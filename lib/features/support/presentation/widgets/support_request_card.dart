@@ -18,6 +18,7 @@ class SupportRequestCard extends StatelessWidget {
     this.onAssign,
     this.isAssigning = false,
     this.isAssignBlocked = false,
+    this.extraAction,
     super.key,
   });
 
@@ -35,6 +36,13 @@ class SupportRequestCard extends StatelessWidget {
 
   /// Another request is being assigned right now.
   final bool isAssignBlocked;
+
+  /// Action contributed by the console for this request, if any.
+  ///
+  /// It is a plain widget so that this feature stays unaware of what the action
+  /// does: today it is "INICIAR ASISTENCIA", which belongs to the remote
+  /// session feature and must not be imported from here.
+  final Widget? extraAction;
 
   @override
   Widget build(BuildContext context) {
@@ -148,6 +156,7 @@ class SupportRequestCard extends StatelessWidget {
               ),
             ),
           ],
+          ?extraAction,
         ],
       ),
     );

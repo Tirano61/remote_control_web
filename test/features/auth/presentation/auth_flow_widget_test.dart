@@ -12,18 +12,24 @@ import 'package:remote_control_web/features/auth/presentation/pages/startup_page
 
 import '../../../support/auth_test_doubles.dart';
 import '../../../support/console_test_doubles.dart';
+import '../../../support/realtime_test_doubles.dart';
+import '../../../support/remote_session_test_doubles.dart';
 
 void main() {
   late FakeAuthRemoteDataSource remote;
   late InMemoryUserTokenStorage storage;
   late FakeDeviceRepository devices;
   late FakeSupportRequestRepository supportRequests;
+  late FakeRemoteSessionRepository remoteSessions;
+  late FakeTechnicianRealtimeClient realtime;
 
   setUp(() {
     remote = FakeAuthRemoteDataSource();
     storage = InMemoryUserTokenStorage();
     devices = FakeDeviceRepository();
     supportRequests = FakeSupportRequestRepository();
+    remoteSessions = FakeRemoteSessionRepository();
+    realtime = FakeTechnicianRealtimeClient();
   });
 
   Future<void> pumpApp(WidgetTester tester) async {
@@ -41,6 +47,8 @@ void main() {
       ),
       deviceRepository: devices,
       supportRequestRepository: supportRequests,
+      remoteSessionRepository: remoteSessions,
+      technicianRealtimeClient: realtime,
     );
     await tester.pumpWidget(RemoteControlApp(dependencies: dependencies));
   }

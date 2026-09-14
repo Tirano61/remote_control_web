@@ -53,4 +53,15 @@ class AppConfig {
     }
     return url;
   }
+
+  /// URL of a Socket.IO namespace, derived from the very same base URL.
+  ///
+  /// Socket.IO runs on the same host and port as the HTTP API, at the default
+  /// `/socket.io` path, so there is no second host to configure and none may
+  /// be hardcoded: `http://localhost:3000` and a Dev Tunnel URL both work by
+  /// changing `BACKEND_BASE_URL` alone.
+  String socketNamespaceUrl(String namespace) {
+    final path = namespace.startsWith('/') ? namespace : '/$namespace';
+    return '$normalizedBackendBaseUrl$path';
+  }
 }

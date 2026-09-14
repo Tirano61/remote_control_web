@@ -1,6 +1,7 @@
 # User JWT persistence on Flutter Web — security decision
 
-Stage: Prompt 1 (technician/admin authentication).
+Stage: Prompt 1 (technician/admin authentication), extended in Prompt 3
+(Socket.IO `/technicians`).
 
 ## What is persisted
 
@@ -35,6 +36,24 @@ The implementation is `BrowserUserTokenStorage`, and it is reachable only
 through the `UserTokenStorage` port. Domain, BLoCs and widgets do not know that
 browser storage exists.
 
+## The same token authenticates Socket.IO
+
+The `/technicians` namespace validates the very same User JWT in its handshake
+(`auth.token`). It is read through the same read-only `UserTokenProvider` port,
+at connection time and again on every reconnection attempt, so:
+
+* there is **one** stored token and one place that can clear it;
+* a token renewed by `GET /auth/check-status` is picked up by the socket without
+  any extra bookkeeping, and no copy of it lives in a variable of the realtime
+  layer;
+* a rejected handshake is treated like a rejected REST call: the session is
+  invalidated and the stored token is dropped. Retrying would be pointless —
+  there is no refresh token.
+
+Nothing else is persisted for realtime. `remoteSessionId`, the joined state and
+the socket state are **not** written to browser storage: after a page reload the
+console rebuilds them from `GET /remote-sessions/current`.
+
 ## The trade-off
 
 `localStorage` is readable by **any JavaScript running on the origin**. A
@@ -60,8 +79,10 @@ Accepted, with the following mitigations already in place:
 * **No secrets in logs.** No Dio logging interceptor is installed, transport
   errors are reduced to a status code before leaving the data layer, and
   `UserSession`, `LoginState` and the session BLoC events/states override
-  `toString()` so the token is never printed. This is covered by
-  `test/features/auth/secret_handling_test.dart`.
+  `toString()` so the token is never printed. The realtime layer logs only
+  connection facts and safe identifiers (`remoteSessionId`), never the
+  handshake payload. Covered by `test/features/auth/secret_handling_test.dart`
+  and `test/features/technician_realtime/realtime_logging_test.dart`.
 * **Single storage key, namespaced**, so clearing the session is exact.
 * **Backend stays authoritative.** The client-side role check (`admin` or
   `tecnico`) only hides UI; every endpoint is still protected server-side.

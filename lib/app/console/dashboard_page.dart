@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
@@ -6,19 +8,27 @@ import '../../features/auth/domain/entities/authenticated_user.dart';
 import '../../features/auth/presentation/bloc/user_session/user_session_bloc.dart';
 import '../../features/devices/presentation/bloc/devices/devices_bloc.dart';
 import '../../features/devices/presentation/widgets/devices_section.dart';
+import '../../features/remote_session/presentation/bloc/remote_session/remote_session_bloc.dart';
+import '../../features/remote_session/presentation/widgets/active_assistance_section.dart';
+import '../../features/remote_session/presentation/widgets/start_assistance_button.dart';
+import '../../features/support/domain/entities/support_request_status.dart';
 import '../../features/support/presentation/bloc/support_requests/support_requests_bloc.dart';
 import '../../features/support/presentation/widgets/support_requests_section.dart';
+import '../../features/technician_realtime/presentation/bloc/signaling_join/signaling_join_bloc.dart';
+import '../../features/technician_realtime/presentation/bloc/technician_realtime/technician_realtime_bloc.dart';
 import '../composition_root.dart';
+import 'technician_console_coordinator.dart';
 
 /// Technician console.
 ///
-/// It composes three features without any of them knowing about the others:
-/// `auth` owns the session, `support` owns the request queue and `devices`
-/// owns the device list. Both lists are loaded independently, so a failure in
-/// one never hides the other.
+/// It composes several features without any of them knowing about the others:
+/// `auth` owns the session, `support` owns the request queue, `devices` owns
+/// the device list, `remote_session` owns the assistance and
+/// `technician_realtime` owns the /technicians connection. Every list is
+/// loaded independently, so a failure in one never hides the other.
 ///
-/// There is no realtime here yet: REST is the source of truth and the user
-/// refreshes explicitly.
+/// REST remains the source of truth. Realtime only tells the console that
+/// something changed; what changed is always re-read over HTTP.
 class DashboardPage extends StatelessWidget {
   const DashboardPage({
     required this.dependencies,
@@ -39,10 +49,66 @@ class DashboardPage extends StatelessWidget {
         BlocProvider<DevicesBloc>(
           create: (_) => dependencies.createDevicesBloc(),
         ),
+        BlocProvider<RemoteSessionBloc>(
+          create: (_) => dependencies.createRemoteSessionBloc(),
+        ),
+        BlocProvider<TechnicianRealtimeBloc>(
+          create: (_) => dependencies.createTechnicianRealtimeBloc(),
+        ),
+        BlocProvider<SignalingJoinBloc>(
+          create: (_) => dependencies.createSignalingJoinBloc(),
+        ),
       ],
-      child: _ConsoleScaffold(user: user),
+      child: _ConsoleCoordinatorScope(
+        dependencies: dependencies,
+        child: _ConsoleScaffold(user: user),
+      ),
     );
   }
+}
+
+/// Keeps the console coordinator alive for as long as the console is on screen.
+///
+/// Opening the console means the user is authenticated, so this is also where
+/// the technician namespace is connected; leaving it — a logout, or a session
+/// that was invalidated — disposes the coordinator and closes the socket.
+class _ConsoleCoordinatorScope extends StatefulWidget {
+  const _ConsoleCoordinatorScope({
+    required this.dependencies,
+    required this.child,
+  });
+
+  final AppDependencies dependencies;
+  final Widget child;
+
+  @override
+  State<_ConsoleCoordinatorScope> createState() =>
+      _ConsoleCoordinatorScopeState();
+}
+
+class _ConsoleCoordinatorScopeState extends State<_ConsoleCoordinatorScope> {
+  late final TechnicianConsoleCoordinator _coordinator;
+
+  @override
+  void initState() {
+    super.initState();
+    _coordinator = widget.dependencies.createConsoleCoordinator(
+      userSessionBloc: context.read<UserSessionBloc>(),
+      remoteSessionBloc: context.read<RemoteSessionBloc>(),
+      technicianRealtimeBloc: context.read<TechnicianRealtimeBloc>(),
+      signalingJoinBloc: context.read<SignalingJoinBloc>(),
+      supportRequestsBloc: context.read<SupportRequestsBloc>(),
+    )..start();
+  }
+
+  @override
+  void dispose() {
+    unawaited(_coordinator.dispose());
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }
 
 class _ConsoleScaffold extends StatelessWidget {
@@ -86,9 +152,20 @@ class _ConsoleScaffold extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    // A live assistance comes first: it is what the technician
+                    // is doing right now.
+                    const ActiveAssistanceSection(),
                     SupportRequestsSection(
                       technicianId: user.id,
                       now: DateTime.now(),
+                      // Only a request this technician owns and the tablet
+                      // accepted can start an assistance. The button hides
+                      // itself while a session is live, because the backend
+                      // allows only one per technician.
+                      ownRequestActionBuilder: (request) =>
+                          request.status == SupportRequestStatus.accepted
+                          ? StartAssistanceButton(supportRequestId: request.id)
+                          : null,
                     ),
                     const SizedBox(height: 20),
                     const DevicesSection(),
