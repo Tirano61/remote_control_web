@@ -11,6 +11,10 @@ import '../../../domain/usecases/restore_session.dart';
 part 'user_session_event.dart';
 part 'user_session_state.dart';
 
+/// Shown on the login page after the session stopped being accepted.
+const String kSessionExpiredNotice =
+    'Tu sesión expiró o dejó de ser válida. Inicia sesión nuevamente.';
+
 /// Global authentication coordinator.
 ///
 /// It decides what the application shows: startup check, login, connection
@@ -24,6 +28,7 @@ class UserSessionBloc extends Bloc<UserSessionEvent, UserSessionState> {
     on<UserSessionStarted>(_onStarted);
     on<UserSessionRetryRequested>(_onRetryRequested);
     on<UserSessionSignedIn>(_onSignedIn);
+    on<UserSessionInvalidated>(_onInvalidated);
     on<UserSessionSignOutRequested>(_onSignOutRequested);
   }
 
@@ -48,6 +53,17 @@ class UserSessionBloc extends Bloc<UserSessionEvent, UserSessionState> {
 
   void _onSignedIn(UserSessionSignedIn event, Emitter<UserSessionState> emit) {
     emit(UserSessionAuthenticated(event.session));
+  }
+
+  Future<void> _onInvalidated(
+    UserSessionInvalidated event,
+    Emitter<UserSessionState> emit,
+  ) async {
+    // Already signed out: a second 401 arriving from another in-flight request
+    // must not overwrite the reason the user is already reading.
+    if (state is UserSessionUnauthenticated) return;
+    await _logOut();
+    emit(UserSessionUnauthenticated(notice: event.notice));
   }
 
   Future<void> _onSignOutRequested(

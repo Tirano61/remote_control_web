@@ -30,6 +30,21 @@ final class UserSessionSignedIn extends UserSessionEvent {
   String toString() => 'UserSessionSignedIn(user: ${session.user.email})';
 }
 
+/// An authenticated request was rejected with a `401`.
+///
+/// There is no refresh token in the backend contract, so the only possible
+/// recovery is a new login: the stored User JWT is dropped and the console goes
+/// back to the login page. A `403` must never raise this event — being
+/// authenticated without permission for one action leaves the session valid.
+final class UserSessionInvalidated extends UserSessionEvent {
+  const UserSessionInvalidated({this.notice = kSessionExpiredNotice});
+
+  final String notice;
+
+  @override
+  List<Object?> get props => [notice];
+}
+
 /// The user pressed "Cerrar sesión".
 final class UserSessionSignOutRequested extends UserSessionEvent {
   const UserSessionSignOutRequested();

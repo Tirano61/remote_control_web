@@ -2,10 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../../../../app/composition_root.dart';
+import '../../../../app/console/dashboard_page.dart';
 import '../bloc/login/login_cubit.dart';
 import '../bloc/user_session/user_session_bloc.dart';
 import 'connection_error_page.dart';
-import 'dashboard_page.dart';
 import 'login_page.dart';
 import 'startup_page.dart';
 
@@ -38,7 +38,10 @@ class AuthGate extends StatelessWidget {
           ),
           child: const LoginPage(),
         ),
-        UserSessionAuthenticated(:final user) => DashboardPage(user: user),
+        UserSessionAuthenticated(:final user) => DashboardPage(
+          dependencies: dependencies,
+          user: user,
+        ),
       },
     );
   }

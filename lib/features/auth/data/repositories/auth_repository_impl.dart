@@ -1,3 +1,4 @@
+import '../../../../core/error/api_failure_mapper.dart';
 import '../../../../core/error/failure.dart';
 import '../../../../core/error/result.dart';
 import '../../../../core/network/api_exception.dart';
@@ -83,18 +84,8 @@ class AuthRepositoryImpl implements AuthRepository {
     },
   };
 
-  Failure _mapCheckStatusException(ApiException exception) => switch (exception) {
-    NetworkApiException() => const NetworkFailure(),
-    MalformedResponseApiException() => const UnexpectedFailure(
-      'La respuesta del servidor no pudo interpretarse.',
-    ),
-    HttpApiException(:final statusCode) => switch (statusCode) {
-      400 => const ValidationFailure(),
-      401 => const AuthFailure(),
-      403 => const ForbiddenFailure(),
-      404 => const NotFoundFailure(),
-      409 => const ConflictFailure(),
-      _ => const ServerFailure(),
-    },
-  };
+  // check-status needs no special wording: the shared status code mapping is
+  // exactly the "Common errors" table of the contract.
+  Failure _mapCheckStatusException(ApiException exception) =>
+      failureFromApiException(exception);
 }

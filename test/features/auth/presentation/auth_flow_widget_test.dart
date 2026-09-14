@@ -1,33 +1,46 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_web/app/composition_root.dart';
+import 'package:remote_control_web/app/console/dashboard_page.dart';
 import 'package:remote_control_web/app/remote_control_app.dart';
 import 'package:remote_control_web/core/config/app_config.dart';
 import 'package:remote_control_web/features/auth/data/repositories/auth_repository_impl.dart';
 import 'package:remote_control_web/features/auth/domain/usecases/log_in.dart';
 import 'package:remote_control_web/features/auth/presentation/pages/connection_error_page.dart';
-import 'package:remote_control_web/features/auth/presentation/pages/dashboard_page.dart';
 import 'package:remote_control_web/features/auth/presentation/pages/login_page.dart';
 import 'package:remote_control_web/features/auth/presentation/pages/startup_page.dart';
 
 import '../../../support/auth_test_doubles.dart';
+import '../../../support/console_test_doubles.dart';
 
 void main() {
   late FakeAuthRemoteDataSource remote;
   late InMemoryUserTokenStorage storage;
+  late FakeDeviceRepository devices;
+  late FakeSupportRequestRepository supportRequests;
 
   setUp(() {
     remote = FakeAuthRemoteDataSource();
     storage = InMemoryUserTokenStorage();
+    devices = FakeDeviceRepository();
+    supportRequests = FakeSupportRequestRepository();
   });
 
   Future<void> pumpApp(WidgetTester tester) async {
+    // The console targets a desktop browser; the header collapses to icon-only
+    // actions below 900px, which would hide the labels asserted below.
+    tester.view.physicalSize = const Size(1400, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
     final dependencies = AppDependencies(
       config: const AppConfig(backendBaseUrl: 'http://localhost:3000'),
       authRepository: AuthRepositoryImpl(
         remoteDataSource: remote,
         tokenStorage: storage,
       ),
+      deviceRepository: devices,
+      supportRequestRepository: supportRequests,
     );
     await tester.pumpWidget(RemoteControlApp(dependencies: dependencies));
   }
@@ -83,8 +96,8 @@ void main() {
 
     expect(find.byType(DashboardPage), findsOneWidget);
     expect(find.text('Administrador'), findsWidgets);
-    expect(find.text('admin@google.com'), findsOneWidget);
-    expect(find.text('Sesión iniciada'), findsOneWidget);
+    expect(find.text('SOLICITUDES DE ASISTENCIA'), findsOneWidget);
+    expect(find.text('DISPOSITIVOS'), findsOneWidget);
     expect(storage.token, 'admin-jwt');
   });
 
