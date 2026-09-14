@@ -18,12 +18,24 @@ import '../features/devices/data/repositories/device_repository_impl.dart';
 import '../features/devices/domain/repositories/device_repository.dart';
 import '../features/devices/domain/usecases/load_devices.dart';
 import '../features/devices/presentation/bloc/devices/devices_bloc.dart';
+import '../features/remote_session/data/datasources/remote_sessions_remote_data_source.dart';
+import '../features/remote_session/data/repositories/remote_session_repository_impl.dart';
+import '../features/remote_session/domain/repositories/remote_session_repository.dart';
+import '../features/remote_session/domain/usecases/close_remote_session.dart';
+import '../features/remote_session/domain/usecases/create_remote_session.dart';
+import '../features/remote_session/domain/usecases/load_current_remote_session.dart';
+import '../features/remote_session/presentation/bloc/remote_session/remote_session_bloc.dart';
 import '../features/support/data/datasources/support_remote_data_source.dart';
 import '../features/support/data/repositories/support_request_repository_impl.dart';
 import '../features/support/domain/repositories/support_request_repository.dart';
 import '../features/support/domain/usecases/assign_support_request.dart';
 import '../features/support/domain/usecases/load_support_requests.dart';
 import '../features/support/presentation/bloc/support_requests/support_requests_bloc.dart';
+import '../features/technician_realtime/data/technician_realtime_client_impl.dart';
+import '../features/technician_realtime/domain/client/technician_realtime_client.dart';
+import '../features/technician_realtime/presentation/bloc/signaling_join/signaling_join_bloc.dart';
+import '../features/technician_realtime/presentation/bloc/technician_realtime/technician_realtime_bloc.dart';
+import 'console/technician_console_coordinator.dart';
 
 /// Composition root.
 ///
@@ -35,6 +47,8 @@ class AppDependencies {
     required this.authRepository,
     required this.deviceRepository,
     required this.supportRequestRepository,
+    required this.remoteSessionRepository,
+    required this.technicianRealtimeClient,
   });
 
   /// Wiring used by the running application.
@@ -56,12 +70,24 @@ class AppDependencies {
         remoteDataSource: AuthRemoteDataSourceImpl(apiClient: apiClient),
         tokenStorage: tokenStorage,
       ),
+      // Socket.IO reads the same single token storage as REST, through the
+      // same read-only port: the User JWT is never duplicated.
+      technicianRealtimeClient: TechnicianRealtimeClientImpl(
+        config: resolvedConfig,
+        tokenProvider: tokenProvider,
+      ),
       deviceRepository: DeviceRepositoryImpl(
         remoteDataSource: DevicesRemoteDataSourceImpl(apiClient: apiClient),
         tokenProvider: tokenProvider,
       ),
       supportRequestRepository: SupportRequestRepositoryImpl(
         remoteDataSource: SupportRemoteDataSourceImpl(apiClient: apiClient),
+        tokenProvider: tokenProvider,
+      ),
+      remoteSessionRepository: RemoteSessionRepositoryImpl(
+        remoteDataSource: RemoteSessionsRemoteDataSourceImpl(
+          apiClient: apiClient,
+        ),
         tokenProvider: tokenProvider,
       ),
     );
@@ -71,6 +97,13 @@ class AppDependencies {
   final AuthRepository authRepository;
   final DeviceRepository deviceRepository;
   final SupportRequestRepository supportRequestRepository;
+  final RemoteSessionRepository remoteSessionRepository;
+
+  /// Single `/technicians` connection of the application.
+  ///
+  /// It is shared by the realtime BLoCs and the console coordinator, so there
+  /// is exactly one socket and exactly one owner of its lifecycle.
+  final TechnicianRealtimeClient technicianRealtimeClient;
 
   late final LogIn logIn = LogIn(repository: authRepository);
   late final RestoreSession restoreSession = RestoreSession(
@@ -86,6 +119,15 @@ class AppDependencies {
   );
   late final AssignSupportRequest assignSupportRequest = AssignSupportRequest(
     repository: supportRequestRepository,
+  );
+
+  late final LoadCurrentRemoteSession loadCurrentRemoteSession =
+      LoadCurrentRemoteSession(repository: remoteSessionRepository);
+  late final CreateRemoteSession createRemoteSession = CreateRemoteSession(
+    repository: remoteSessionRepository,
+  );
+  late final CloseRemoteSession closeRemoteSession = CloseRemoteSession(
+    repository: remoteSessionRepository,
   );
 
   /// Global session coordinator, already asked to restore a stored session.
@@ -109,4 +151,37 @@ class AppDependencies {
     loadSupportRequests: loadSupportRequests,
     assignSupportRequest: assignSupportRequest,
   )..add(const SupportRequestsRequested());
+
+  /// Remote session of the signed-in technician.
+  ///
+  /// No first load is triggered here: the coordinator asks for it when the user
+  /// session is authenticated, which is the only moment the answer means
+  /// anything.
+  RemoteSessionBloc createRemoteSessionBloc() => RemoteSessionBloc(
+    loadCurrentRemoteSession: loadCurrentRemoteSession,
+    createRemoteSession: createRemoteSession,
+    closeRemoteSession: closeRemoteSession,
+  );
+
+  TechnicianRealtimeBloc createTechnicianRealtimeBloc() =>
+      TechnicianRealtimeBloc(client: technicianRealtimeClient);
+
+  SignalingJoinBloc createSignalingJoinBloc() =>
+      SignalingJoinBloc(client: technicianRealtimeClient);
+
+  /// Rules that only exist at the level of the whole console.
+  TechnicianConsoleCoordinator createConsoleCoordinator({
+    required UserSessionBloc userSessionBloc,
+    required RemoteSessionBloc remoteSessionBloc,
+    required TechnicianRealtimeBloc technicianRealtimeBloc,
+    required SignalingJoinBloc signalingJoinBloc,
+    required SupportRequestsBloc supportRequestsBloc,
+  }) => TechnicianConsoleCoordinator(
+    userSessionBloc: userSessionBloc,
+    remoteSessionBloc: remoteSessionBloc,
+    technicianRealtimeBloc: technicianRealtimeBloc,
+    signalingJoinBloc: signalingJoinBloc,
+    supportRequestsBloc: supportRequestsBloc,
+    realtimeClient: technicianRealtimeClient,
+  );
 }

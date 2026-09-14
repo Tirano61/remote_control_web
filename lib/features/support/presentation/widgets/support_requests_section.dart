@@ -16,6 +16,7 @@ class SupportRequestsSection extends StatelessWidget {
   const SupportRequestsSection({
     required this.technicianId,
     required this.now,
+    this.ownRequestActionBuilder,
     super.key,
   });
 
@@ -25,6 +26,12 @@ class SupportRequestsSection extends StatelessWidget {
 
   /// Clock used for the "solicitada hace ..." labels.
   final DateTime now;
+
+  /// Extra action rendered inside the cards of the signed-in technician.
+  ///
+  /// The console injects it so that this feature does not have to know about
+  /// remote sessions; returning `null` renders no action at all.
+  final Widget? Function(SupportRequest request)? ownRequestActionBuilder;
 
   @override
   Widget build(BuildContext context) {
@@ -58,6 +65,7 @@ class SupportRequestsSection extends StatelessWidget {
               state: state,
               technicianId: technicianId,
               now: now,
+              ownRequestActionBuilder: ownRequestActionBuilder,
             ),
           },
         );
@@ -71,11 +79,13 @@ class _Queue extends StatelessWidget {
     required this.state,
     required this.technicianId,
     required this.now,
+    this.ownRequestActionBuilder,
   });
 
   final SupportRequestsLoaded state;
   final String technicianId;
   final DateTime now;
+  final Widget? Function(SupportRequest request)? ownRequestActionBuilder;
 
   @override
   Widget build(BuildContext context) {
@@ -133,7 +143,12 @@ class _Queue extends StatelessWidget {
           const SizedBox(height: 8),
           _GroupTitle(title: 'ASIGNADAS A TI', count: mine.length),
           for (final request in mine)
-            SupportRequestCard(request: request, now: now, isMine: true),
+            SupportRequestCard(
+              request: request,
+              now: now,
+              isMine: true,
+              extraAction: ownRequestActionBuilder?.call(request),
+            ),
         ],
         if (others.isNotEmpty) ...[
           const SizedBox(height: 8),

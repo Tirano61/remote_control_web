@@ -15,12 +15,16 @@ import 'package:remote_control_web/features/support/presentation/bloc/support_re
 
 import '../../support/auth_test_doubles.dart';
 import '../../support/console_test_doubles.dart';
+import '../../support/realtime_test_doubles.dart';
+import '../../support/remote_session_test_doubles.dart';
 
 void main() {
   late FakeAuthRemoteDataSource auth;
   late InMemoryUserTokenStorage storage;
   late FakeDeviceRepository devices;
   late FakeSupportRequestRepository supportRequests;
+  late FakeRemoteSessionRepository remoteSessions;
+  late FakeTechnicianRealtimeClient realtime;
 
   setUp(() {
     auth = FakeAuthRemoteDataSource();
@@ -28,6 +32,8 @@ void main() {
     auth.checkStatusResponse = technicianSession;
     devices = FakeDeviceRepository();
     supportRequests = FakeSupportRequestRepository();
+    remoteSessions = FakeRemoteSessionRepository();
+    realtime = FakeTechnicianRealtimeClient();
   });
 
   /// Opens the console with a restored `tecnico` session.
@@ -46,6 +52,8 @@ void main() {
           ),
           deviceRepository: devices,
           supportRequestRepository: supportRequests,
+          remoteSessionRepository: remoteSessions,
+          technicianRealtimeClient: realtime,
         ),
       ),
     );
@@ -367,8 +375,8 @@ void main() {
         find.text('Estado: Usuario autorizó la asistencia'),
         findsOneWidget,
       );
-      // RemoteSession belongs to the next stage: no action is offered yet.
-      expect(find.textContaining('INICIAR SESIÓN REMOTA'), findsNothing);
+      // An accepted request is what authorises starting an assistance.
+      expect(find.text('INICIAR ASISTENCIA'), findsOneWidget);
     });
 
     testWidgets('a REJECTED request moves to the history', (tester) async {
