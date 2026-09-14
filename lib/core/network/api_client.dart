@@ -13,6 +13,23 @@ class ApiResponse {
   String toString() => 'ApiResponse(statusCode: $statusCode)';
 }
 
+/// A decoded JSON array response.
+///
+/// `GET /devices` and `GET /support-requests` answer with a top level array of
+/// objects, so they cannot be represented by [ApiResponse].
+class ApiListResponse {
+  const ApiListResponse({required this.statusCode, required this.data});
+
+  final int statusCode;
+
+  /// Decoded JSON array. Every element is a JSON object.
+  final List<Map<String, dynamic>> data;
+
+  @override
+  String toString() =>
+      'ApiListResponse(statusCode: $statusCode, items: ${data.length})';
+}
+
 /// Centralised HTTP entry point.
 ///
 /// Every REST call of the application goes through this abstraction. Widgets
@@ -20,7 +37,18 @@ class ApiResponse {
 ///
 /// Implementations must throw [ApiException] subtypes and nothing else.
 abstract interface class ApiClient {
-  Future<ApiResponse> get(String path, {String? bearerToken});
+  Future<ApiResponse> get(
+    String path, {
+    String? bearerToken,
+    Map<String, dynamic>? queryParameters,
+  });
+
+  /// Same as [get], for endpoints documented as answering a JSON array.
+  Future<ApiListResponse> getList(
+    String path, {
+    String? bearerToken,
+    Map<String, dynamic>? queryParameters,
+  });
 
   Future<ApiResponse> post(
     String path, {

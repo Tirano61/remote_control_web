@@ -28,8 +28,38 @@ class DioApiClient implements ApiClient {
   final Dio _dio;
 
   @override
-  Future<ApiResponse> get(String path, {String? bearerToken}) =>
-      _send(() => _dio.get<dynamic>(path, options: _options(bearerToken)));
+  Future<ApiResponse> get(
+    String path, {
+    String? bearerToken,
+    Map<String, dynamic>? queryParameters,
+  }) => _send(
+    () => _dio.get<dynamic>(
+      path,
+      queryParameters: _query(queryParameters),
+      options: _options(bearerToken),
+    ),
+  );
+
+  @override
+  Future<ApiListResponse> getList(
+    String path, {
+    String? bearerToken,
+    Map<String, dynamic>? queryParameters,
+  }) async {
+    try {
+      final response = await _dio.get<dynamic>(
+        path,
+        queryParameters: _query(queryParameters),
+        options: _options(bearerToken),
+      );
+      return ApiListResponse(
+        statusCode: response.statusCode ?? 200,
+        data: _asJsonArray(response.data),
+      );
+    } on DioException catch (error) {
+      throw _mapDioException(error);
+    }
+  }
 
   @override
   Future<ApiResponse> post(
@@ -46,6 +76,16 @@ class DioApiClient implements ApiClient {
         'Authorization': 'Bearer $bearerToken',
     },
   );
+
+  /// Dio keeps `null` entries in the query string, so empty maps and null
+  /// values are dropped before the request is built.
+  Map<String, dynamic>? _query(Map<String, dynamic>? queryParameters) {
+    if (queryParameters == null) return null;
+    final entries = Map<String, dynamic>.fromEntries(
+      queryParameters.entries.where((entry) => entry.value != null),
+    );
+    return entries.isEmpty ? null : entries;
+  }
 
   Future<ApiResponse> _send(Future<Response<dynamic>> Function() request) async {
     try {
@@ -65,6 +105,15 @@ class DioApiClient implements ApiClient {
     if (data is Map) return Map<String, dynamic>.from(data);
     if (data is String && data.trim().isEmpty) return const {};
     throw const MalformedResponseApiException();
+  }
+
+  List<Map<String, dynamic>> _asJsonArray(dynamic data) {
+    if (data is! List) throw const MalformedResponseApiException();
+    return data.map((element) {
+      if (element is Map<String, dynamic>) return element;
+      if (element is Map) return Map<String, dynamic>.from(element);
+      throw const MalformedResponseApiException();
+    }).toList(growable: false);
   }
 
   ApiException _mapDioException(DioException error) {
