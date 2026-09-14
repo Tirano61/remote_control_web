@@ -1,17 +1,37 @@
 # remote_control_web
 
-A new Flutter project.
+Flutter Web technician console of the remote support system.
 
-## Getting Started
+Current stage: **Prompt 1 — technician/admin authentication and session
+restore**. Devices, support requests, Socket.IO, remote sessions, signaling and
+WebRTC are not implemented yet.
 
-This project is a starting point for a Flutter application.
+## Backend URL
 
-A few resources to get you started if this is your first Flutter project:
+The backend host lives in a single place, `lib/core/config/app_config.dart`,
+and is provided at compile time:
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+```bash
+# local development (default when the define is omitted)
+flutter run -d chrome --dart-define=BACKEND_BASE_URL=http://localhost:3000
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+# Dev Tunnel, no code change needed
+flutter run -d chrome --dart-define=BACKEND_BASE_URL=https://w4qb7jsw-3000.brs.devtunnels.ms
+flutter build web --dart-define=BACKEND_BASE_URL=https://w4qb7jsw-3000.brs.devtunnels.ms
+```
+
+## Verification
+
+```bash
+flutter analyze
+flutter test
+flutter build web
+```
+
+## Documentation
+
+```text
+docs/backend/ENDPOINTS.md          REST contract (source of truth)
+docs/backend/REALTIME.md           Socket.IO contract (later stages)
+docs/SECURITY_TOKEN_STORAGE.md     Why the User JWT lives in browser storage
+```
