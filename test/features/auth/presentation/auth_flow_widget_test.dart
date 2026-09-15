@@ -9,10 +9,12 @@ import 'package:remote_control_web/features/auth/domain/usecases/log_in.dart';
 import 'package:remote_control_web/features/auth/presentation/pages/connection_error_page.dart';
 import 'package:remote_control_web/features/auth/presentation/pages/login_page.dart';
 import 'package:remote_control_web/features/auth/presentation/pages/startup_page.dart';
+import 'package:remote_control_web/features/signaling/data/technician_signaling_client_impl.dart';
 
 import '../../../support/auth_test_doubles.dart';
 import '../../../support/console_test_doubles.dart';
 import '../../../support/realtime_test_doubles.dart';
+import '../../../support/webrtc_test_doubles.dart';
 import '../../../support/remote_session_test_doubles.dart';
 
 void main() {
@@ -49,6 +51,10 @@ void main() {
       supportRequestRepository: supportRequests,
       remoteSessionRepository: remoteSessions,
       technicianRealtimeClient: realtime,
+      technicianSignalingClient: TechnicianSignalingClientImpl(
+        transport: realtime,
+      ),
+      webRtcPeerClient: FakeWebRtcPeerClient(),
     );
     await tester.pumpWidget(RemoteControlApp(dependencies: dependencies));
   }

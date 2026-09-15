@@ -20,11 +20,19 @@ class TechnicianRealtimeContract {
   /// is rejected. The reason is deliberately not disclosed.
   static const String unauthorizedConnectErrorMessage = 'Unauthorized';
 
-  /// Client to server. The only signaling event implemented at this stage.
+  /// Client to server. Mandatory before any `webrtc:*` event.
   static const String joinEvent = 'remote-session:join';
 
   /// Server to client domain notification. Requires no join.
   static const String remoteSessionClosedEvent = 'remote-session:closed';
+
+  /// Server to client readiness notification: the other end of the session
+  /// joined its signaling room after this socket did.
+  ///
+  /// It is the second half of the readiness contract, the first being the
+  /// `peerJoined` flag of the join ACK. Payload: `{ remoteSessionId }`.
+  static const String remoteSessionPeerJoinedEvent =
+      'remote-session:peer-joined';
 
   /// The only property `remote-session:join` accepts, and the id carried by
   /// both the join ACK and `remote-session:closed`.
@@ -33,6 +41,13 @@ class TechnicianRealtimeContract {
   /// Join ACK fields.
   static const String joinedField = 'joined';
   static const String errorField = 'error';
+
+  /// Readiness flag of a successful join ACK: whether the other end of the
+  /// session is already inside the signaling room.
+  ///
+  /// It is what tells an offerer that a `webrtc:offer` would reach somebody.
+  /// Relaying into an empty room is silently dropped by the backend.
+  static const String peerJoinedField = 'peerJoined';
 
   /// `remote-session:closed` field carrying a `RemoteSessionEndedBy` value.
   static const String endedByField = 'endedBy';

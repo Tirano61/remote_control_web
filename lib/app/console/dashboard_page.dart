@@ -16,6 +16,7 @@ import '../../features/support/presentation/bloc/support_requests/support_reques
 import '../../features/support/presentation/widgets/support_requests_section.dart';
 import '../../features/technician_realtime/presentation/bloc/signaling_join/signaling_join_bloc.dart';
 import '../../features/technician_realtime/presentation/bloc/technician_realtime/technician_realtime_bloc.dart';
+import '../../features/webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dart';
 import '../composition_root.dart';
 import 'technician_console_coordinator.dart';
 
@@ -58,6 +59,9 @@ class DashboardPage extends StatelessWidget {
         BlocProvider<SignalingJoinBloc>(
           create: (_) => dependencies.createSignalingJoinBloc(),
         ),
+        BlocProvider<WebRtcSessionBloc>(
+          create: (_) => dependencies.createWebRtcSessionBloc(),
+        ),
       ],
       child: _ConsoleCoordinatorScope(
         dependencies: dependencies,
@@ -98,6 +102,7 @@ class _ConsoleCoordinatorScopeState extends State<_ConsoleCoordinatorScope> {
       technicianRealtimeBloc: context.read<TechnicianRealtimeBloc>(),
       signalingJoinBloc: context.read<SignalingJoinBloc>(),
       supportRequestsBloc: context.read<SupportRequestsBloc>(),
+      webRtcSessionBloc: context.read<WebRtcSessionBloc>(),
     )..start();
   }
 

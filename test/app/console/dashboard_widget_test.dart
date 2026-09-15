@@ -9,6 +9,7 @@ import 'package:remote_control_web/core/config/app_config.dart';
 import 'package:remote_control_web/core/error/failure.dart';
 import 'package:remote_control_web/features/auth/data/repositories/auth_repository_impl.dart';
 import 'package:remote_control_web/features/auth/presentation/pages/login_page.dart';
+import 'package:remote_control_web/features/signaling/data/technician_signaling_client_impl.dart';
 import 'package:remote_control_web/features/support/data/repositories/support_request_repository_impl.dart';
 import 'package:remote_control_web/features/support/domain/entities/support_request_status.dart';
 import 'package:remote_control_web/features/support/presentation/bloc/support_requests/support_requests_bloc.dart';
@@ -16,6 +17,7 @@ import 'package:remote_control_web/features/support/presentation/bloc/support_re
 import '../../support/auth_test_doubles.dart';
 import '../../support/console_test_doubles.dart';
 import '../../support/realtime_test_doubles.dart';
+import '../../support/webrtc_test_doubles.dart';
 import '../../support/remote_session_test_doubles.dart';
 
 void main() {
@@ -54,6 +56,10 @@ void main() {
           supportRequestRepository: supportRequests,
           remoteSessionRepository: remoteSessions,
           technicianRealtimeClient: realtime,
+          technicianSignalingClient: TechnicianSignalingClientImpl(
+            transport: realtime,
+          ),
+          webRtcPeerClient: FakeWebRtcPeerClient(),
         ),
       ),
     );

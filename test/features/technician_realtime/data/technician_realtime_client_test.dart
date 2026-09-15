@@ -1,5 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_web/core/config/app_config.dart';
+import 'package:remote_control_web/features/signaling/data/signaling_contract.dart';
+import 'package:remote_control_web/features/signaling/data/signaling_transport.dart';
 import 'package:remote_control_web/features/technician_realtime/data/realtime_contract.dart';
 import 'package:remote_control_web/features/technician_realtime/data/technician_realtime_client_impl.dart';
 import 'package:remote_control_web/features/technician_realtime/domain/entities/join_remote_session_result.dart';
@@ -190,11 +192,44 @@ void main() {
       gateway.completeHandshake();
 
       final pending = client.joinRemoteSession(sessionId);
-      gateway.answerAck({'joined': true, 'remoteSessionId': sessionId});
+      gateway.answerAck({
+        'joined': true,
+        'remoteSessionId': sessionId,
+        'peerJoined': false,
+      });
 
       expect(gateway.emitted.single.event, 'remote-session:join');
       expect(gateway.emitted.single.payload, {'remoteSessionId': sessionId});
       expect(await pending, isA<JoinRemoteSessionAccepted>());
+    });
+
+    test('the ACK reports whether the tablet is already in the room', () async {
+      await client.connect();
+      final gateway = factory.last;
+      gateway.completeHandshake();
+
+      final pending = client.joinRemoteSession(sessionId);
+      gateway.answerAck({
+        'joined': true,
+        'remoteSessionId': sessionId,
+        'peerJoined': true,
+      });
+
+      final result = await pending;
+      expect((result as JoinRemoteSessionAccepted).peerJoined, isTrue);
+    });
+
+    test('an accepted ACK without peerJoined is not usable', () async {
+      await client.connect();
+      final gateway = factory.last;
+      gateway.completeHandshake();
+
+      final pending = client.joinRemoteSession(sessionId);
+      gateway.answerAck({'joined': true, 'remoteSessionId': sessionId});
+
+      expect(await pending, isA<JoinRemoteSessionFailed>());
+      // Readiness that was never reported is never assumed.
+      expect(client.joinedRemoteSessionId, isNull);
     });
 
     test('a refusal is reported with its stable code', () async {
@@ -233,6 +268,219 @@ void main() {
         (result as JoinRemoteSessionFailed).reason,
         JoinRemoteSessionFailureReason.timeout,
       );
+    });
+  });
+
+  group('signaling transport', () {
+    const sdp = 'v=0 o=- 46117 2 IN IP4 127.0.0.1';
+
+    /// Connects and joins, which is the only way into a signaling room.
+    Future<FakeRealtimeSocketGateway> connectAndJoin([
+      String id = sessionId,
+    ]) async {
+      await client.connect();
+      final gateway = factory.last;
+      gateway.completeHandshake();
+      final pending = client.joinRemoteSession(id);
+      gateway.answerAck({
+        'joined': true,
+        'remoteSessionId': id,
+        'peerJoined': false,
+      });
+      await pending;
+      return gateway;
+    }
+
+    test('an accepted join is what opens signaling', () async {
+      expect(client.joinedRemoteSessionId, isNull);
+
+      await connectAndJoin();
+
+      expect(client.joinedRemoteSessionId, sessionId);
+    });
+
+    test('a denied join leaves the socket in no room at all', () async {
+      final gateway = await connectAndJoin();
+
+      final pending = client.joinRemoteSession('another-session');
+      gateway.answerAck({'joined': false, 'error': 'UNAUTHORIZED'});
+      await pending;
+
+      // The contract is explicit: a valid payload that is denied has ALREADY
+      // left the old session.
+      expect(client.joinedRemoteSessionId, isNull);
+    });
+
+    test('INVALID_PAYLOAD keeps the session the socket already had', () async {
+      final gateway = await connectAndJoin();
+
+      final pending = client.joinRemoteSession('another-session');
+      gateway.answerAck({'joined': false, 'error': 'INVALID_PAYLOAD'});
+      await pending;
+
+      // "The payload is validated before anything is torn down."
+      expect(client.joinedRemoteSessionId, sessionId);
+    });
+
+    test('a join nobody answered claims no membership', () async {
+      await client.connect();
+      factory.last.completeHandshake();
+
+      await client.joinRemoteSession(sessionId);
+
+      expect(client.joinedRemoteSessionId, isNull);
+    });
+
+    test('a lost connection loses the room with it', () async {
+      final gateway = await connectAndJoin();
+
+      gateway.dropConnection();
+
+      expect(client.joinedRemoteSessionId, isNull);
+    });
+
+    test('disconnecting and disposing leave no room behind', () async {
+      await connectAndJoin();
+
+      await client.disconnect();
+
+      expect(client.joinedRemoteSessionId, isNull);
+    });
+
+    test('the console can forget the room without dropping the socket', () async {
+      final gateway = await connectAndJoin();
+
+      client.forgetJoinedRemoteSession();
+
+      expect(client.joinedRemoteSessionId, isNull);
+      expect(gateway.disposeCount, 0);
+      expect(client.status.isConnected, isTrue);
+    });
+
+    test('a relay travels over the very same socket as the join', () async {
+      final gateway = await connectAndJoin();
+
+      final sent = client.emitSignaling(SignalingContract.offerEvent, {
+        'remoteSessionId': sessionId,
+        'sdp': sdp,
+      }, (_) {});
+
+      expect(sent, isTrue);
+      // One gateway, one socket: the join and the offer are on the same wire.
+      expect(factory.gateways, hasLength(1));
+      expect(gateway.emitted.map((emission) => emission.event), [
+        'remote-session:join',
+        'webrtc:offer',
+      ]);
+    });
+
+    test('there is nothing to emit over without a socket', () async {
+      var acknowledged = false;
+
+      final sent = client.emitSignaling(
+        SignalingContract.offerEvent,
+        {'remoteSessionId': sessionId, 'sdp': sdp},
+        (_) => acknowledged = true,
+      );
+
+      expect(sent, isFalse);
+      expect(acknowledged, isFalse);
+    });
+
+    test('the three relayed events are forwarded raw', () async {
+      final gateway = await connectAndJoin();
+      final wire = <SignalingWireEvent>[];
+      client.signalingEvents.listen(wire.add);
+
+      gateway.emitServerEvent(SignalingContract.offerEvent, {
+        'remoteSessionId': sessionId,
+        'from': 'DEVICE',
+        'sdp': sdp,
+      });
+      gateway.emitServerEvent(SignalingContract.answerEvent, {
+        'remoteSessionId': sessionId,
+        'from': 'DEVICE',
+        'sdp': sdp,
+      });
+      gateway.emitServerEvent(SignalingContract.iceCandidateEvent, {
+        'remoteSessionId': sessionId,
+        'from': 'DEVICE',
+        'candidate': 'candidate:1 1 udp 1 192.0.2.10 1 typ host',
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(wire.map((event) => event.event), [
+        'webrtc:offer',
+        'webrtc:answer',
+        'webrtc:ice-candidate',
+      ]);
+      // Forwarded untouched: this class does not parse SDP or candidates.
+      expect((wire.first.data! as Map)['sdp'], sdp);
+    });
+
+    test('events from a socket that was replaced are dropped', () async {
+      final gateway = await connectAndJoin();
+      final wire = <SignalingWireEvent>[];
+      client.signalingEvents.listen(wire.add);
+
+      await client.disconnect();
+      gateway.emitServerEvent(SignalingContract.offerEvent, {
+        'remoteSessionId': sessionId,
+        'from': 'DEVICE',
+        'sdp': sdp,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(wire, isEmpty);
+    });
+  });
+
+  group('remote-session:peer-joined', () {
+    test('is published as a typed readiness notice', () async {
+      await client.connect();
+      final gateway = factory.last;
+      gateway.completeHandshake();
+
+      final received = client.peerJoined.first;
+      gateway.emitServerEvent(
+        TechnicianRealtimeContract.remoteSessionPeerJoinedEvent,
+        {'remoteSessionId': sessionId},
+      );
+
+      expect((await received).remoteSessionId, sessionId);
+    });
+
+    test('a malformed payload is ignored', () async {
+      await client.connect();
+      final gateway = factory.last;
+      gateway.completeHandshake();
+
+      var received = 0;
+      client.peerJoined.listen((_) => received++);
+      gateway.emitServerEvent(
+        TechnicianRealtimeContract.remoteSessionPeerJoinedEvent,
+        {'peer': true},
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(received, 0);
+    });
+
+    test('an event from a socket that was replaced is dropped', () async {
+      await client.connect();
+      final gateway = factory.last;
+      gateway.completeHandshake();
+      var received = 0;
+      client.peerJoined.listen((_) => received++);
+
+      await client.disconnect();
+      gateway.emitServerEvent(
+        TechnicianRealtimeContract.remoteSessionPeerJoinedEvent,
+        {'remoteSessionId': sessionId},
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(received, 0);
     });
   });
 

@@ -3,15 +3,20 @@ import 'dart:async';
 import '../../../core/auth/user_token_provider.dart';
 import '../../../core/config/app_config.dart';
 import '../../../core/logging/debug_log.dart';
+import '../../signaling/data/signaling_contract.dart';
+import '../../signaling/data/signaling_transport.dart';
 import '../domain/client/technician_realtime_client.dart';
 import '../domain/entities/join_remote_session_result.dart';
 import '../domain/entities/remote_session_closed_notice.dart';
+import '../domain/entities/remote_session_peer_joined_notice.dart';
+import '../domain/entities/signaling_error_code.dart';
 import '../domain/entities/technician_realtime_status.dart';
 import 'gateway/realtime_connect_error.dart';
 import 'gateway/realtime_socket_gateway.dart';
 import 'gateway/socket_io_realtime_socket_gateway.dart';
 import 'models/join_remote_session_ack_dto.dart';
 import 'models/remote_session_closed_notice_dto.dart';
+import 'models/remote_session_peer_joined_dto.dart';
 import 'realtime_contract.dart';
 
 /// Socket.IO implementation of the `/technicians` namespace.
@@ -24,12 +29,20 @@ import 'realtime_contract.dart';
 /// * the reconnection policy: Socket.IO retries transport failures with its
 ///   own backoff, but a rejected token stops it immediately, because retrying
 ///   a JWT that will never be accepted is an infinite loop;
-/// * `remote-session:join` and its acknowledgement.
+/// * `remote-session:join`, its acknowledgement, and the room membership it
+///   produces.
+///
+/// It is also the [SignalingTransport] of the application. The `webrtc:*`
+/// relay runs over this very socket — one browser, one `/technicians`
+/// connection — and this class is what makes that literal: it forwards the
+/// relayed events without looking inside them and emits what the signaling
+/// client hands it. It never parses, stores or logs an SDP or a candidate.
 ///
 /// What it deliberately does not own: any notion of which session should be
 /// joined, or what a closed session means. Those are decisions of the BLoCs
 /// and of the coordinator, taken against REST.
-class TechnicianRealtimeClientImpl implements TechnicianRealtimeClient {
+class TechnicianRealtimeClientImpl
+    implements TechnicianRealtimeClient, SignalingTransport {
   TechnicianRealtimeClientImpl({
     required AppConfig config,
     required UserTokenProvider tokenProvider,
@@ -56,6 +69,12 @@ class TechnicianRealtimeClientImpl implements TechnicianRealtimeClient {
       StreamController<TechnicianRealtimeStatus>.broadcast();
   final StreamController<RemoteSessionClosedNotice> _closedController =
       StreamController<RemoteSessionClosedNotice>.broadcast();
+  final StreamController<RemoteSessionPeerJoinedNotice> _peerJoinedController =
+      StreamController<RemoteSessionPeerJoinedNotice>.broadcast();
+
+  /// Relayed `webrtc:*` events, forwarded raw to the signaling client.
+  final StreamController<SignalingWireEvent> _signalingController =
+      StreamController<SignalingWireEvent>.broadcast();
 
   RealtimeSocketGateway? _gateway;
   TechnicianRealtimeStatus _status = const TechnicianRealtimeDisconnected();
@@ -64,6 +83,14 @@ class TechnicianRealtimeClientImpl implements TechnicianRealtimeClient {
   /// socket from the one they already joined a session with.
   int _connectionCounter = 0;
   bool _isDisposed = false;
+
+  /// Session this socket is in the signaling room of, or `null`.
+  ///
+  /// It is the client side of a server side fact: the backend stores the
+  /// joined session on the socket and authorizes every `webrtc:*` against it.
+  /// Kept in sync with what the acknowledgements say, and dropped with the
+  /// connection, because rooms do not survive it.
+  String? _joinedRemoteSessionId;
 
   @override
   TechnicianRealtimeStatus get status => _status;
@@ -75,6 +102,17 @@ class TechnicianRealtimeClientImpl implements TechnicianRealtimeClient {
   @override
   Stream<RemoteSessionClosedNotice> get remoteSessionClosed =>
       _closedController.stream;
+
+  @override
+  Stream<RemoteSessionPeerJoinedNotice> get peerJoined =>
+      _peerJoinedController.stream;
+
+  @override
+  String? get joinedRemoteSessionId => _joinedRemoteSessionId;
+
+  @override
+  Stream<SignalingWireEvent> get signalingEvents =>
+      _signalingController.stream;
 
   @override
   Future<void> connect() async {
@@ -107,7 +145,9 @@ class TechnicianRealtimeClientImpl implements TechnicianRealtimeClient {
       if (!identical(_gateway, gateway)) return;
       logDebug('socket disconnected (/technicians)');
       // Rooms die with the connection, so consumers must treat this as "the
-      // session has to be joined again", not as a domain change.
+      // session has to be joined again", not as a domain change. Signaling is
+      // refused locally until a new join succeeds.
+      _joinedRemoteSessionId = null;
       _emit(const TechnicianRealtimeReconnecting());
     });
 
@@ -132,6 +172,27 @@ class TechnicianRealtimeClientImpl implements TechnicianRealtimeClient {
           isAuthenticationError: isAuthenticationError,
         ),
       );
+    });
+
+    for (final event in SignalingContract.relayEvents) {
+      // Forwarded raw and unread: what an offer, an answer or a candidate
+      // contains is none of this class's business, which is exactly why no
+      // SDP or ICE ever reaches its logs.
+      gateway.onEvent(event, (data) {
+        if (!identical(_gateway, gateway)) return;
+        if (_signalingController.isClosed) return;
+        _signalingController.add((event: event, data: data));
+      });
+    }
+
+    gateway.onEvent(TechnicianRealtimeContract.remoteSessionPeerJoinedEvent, (
+      data,
+    ) {
+      if (!identical(_gateway, gateway)) return;
+      final notice = RemoteSessionPeerJoinedDto.fromEvent(data);
+      if (notice == null) return;
+      logDebug('remote-session:peer-joined received ${notice.remoteSessionId}');
+      if (!_peerJoinedController.isClosed) _peerJoinedController.add(notice);
     });
 
     gateway.onEvent(TechnicianRealtimeContract.remoteSessionClosedEvent, (
@@ -190,6 +251,7 @@ class TechnicianRealtimeClientImpl implements TechnicianRealtimeClient {
         if (result is JoinRemoteSessionAccepted) {
           logDebug('join accepted $remoteSessionId');
         }
+        _applyJoinOutcome(result);
         completer.complete(result);
       },
     );
@@ -198,12 +260,56 @@ class TechnicianRealtimeClientImpl implements TechnicianRealtimeClient {
   }
 
   @override
+  bool emitSignaling(
+    String event,
+    Map<String, dynamic> payload,
+    void Function(Object? ack) onAck,
+  ) {
+    final gateway = _gateway;
+    if (gateway == null || !gateway.isConnected) return false;
+    gateway.emitWithAck(event, payload, onAck);
+    return true;
+  }
+
+  @override
+  void forgetJoinedRemoteSession() => _joinedRemoteSessionId = null;
+
+  @override
   Future<void> dispose() async {
     if (_isDisposed) return;
     _isDisposed = true;
     _teardown();
     await _statusController.close();
     await _closedController.close();
+    await _peerJoinedController.close();
+    await _signalingController.close();
+  }
+
+  /// Keeps the stored room membership in step with what the backend answered.
+  ///
+  /// `docs/backend/REALTIME.md` describes what a join does to the session
+  /// already stored on the socket:
+  ///
+  /// ```text
+  /// payload invalid        -> the socket KEEPS its current session
+  /// payload valid, join OK -> it leaves the old session and joins the new one
+  /// payload valid, denied  -> it has ALREADY left and has no session at all
+  /// ```
+  ///
+  /// An acknowledgement that never arrived says nothing, so membership is
+  /// dropped there too: claiming a room this client is not sure about would
+  /// let it relay into nothing, while the opposite mistake costs one join.
+  void _applyJoinOutcome(JoinRemoteSessionResult result) {
+    switch (result) {
+      case JoinRemoteSessionAccepted(:final remoteSessionId):
+        _joinedRemoteSessionId = remoteSessionId;
+      case JoinRemoteSessionRejected(:final error)
+          when error == SignalingErrorCode.invalidPayload:
+        break;
+      case JoinRemoteSessionRejected():
+      case JoinRemoteSessionFailed():
+        _joinedRemoteSessionId = null;
+    }
   }
 
   /// Handshake payload. Read at connection time, and again at every Socket.IO
@@ -216,6 +322,7 @@ class TechnicianRealtimeClientImpl implements TechnicianRealtimeClient {
   void _teardown() {
     final gateway = _gateway;
     _gateway = null;
+    _joinedRemoteSessionId = null;
     gateway?.dispose();
   }
 

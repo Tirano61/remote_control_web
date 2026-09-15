@@ -12,17 +12,27 @@
 /// ```
 ///
 /// When the define is absent, the local development default is used.
+///
+/// The optional STUN server of the WebRTC peer connection is configured the
+/// same way, and for the same reason: one place, no hardcoded host.
+///
+/// ```bash
+/// flutter run -d chrome --dart-define=WEBRTC_STUN_URL=stun:stun.l.google.com:19302
+/// ```
 class AppConfig {
   const AppConfig({
     required this.backendBaseUrl,
+    this.webRtcStunUrl = '',
     this.connectTimeout = defaultConnectTimeout,
     this.receiveTimeout = defaultReceiveTimeout,
     this.sendTimeout = defaultSendTimeout,
   });
 
   /// Reads the configuration from the compile-time environment.
-  factory AppConfig.fromEnvironment() =>
-      const AppConfig(backendBaseUrl: _backendBaseUrlFromEnvironment);
+  factory AppConfig.fromEnvironment() => const AppConfig(
+    backendBaseUrl: _backendBaseUrlFromEnvironment,
+    webRtcStunUrl: _webRtcStunUrlFromEnvironment,
+  );
 
   static const String defaultBackendBaseUrl = 'http://localhost:3000';
 
@@ -35,8 +45,21 @@ class AppConfig {
     defaultValue: defaultBackendBaseUrl,
   );
 
+  /// No default on purpose: with no define the peer connection is configured
+  /// with an empty `iceServers` list, which is what LAN testing needs and what
+  /// keeps the browser from contacting a third party host nobody asked for.
+  static const String _webRtcStunUrlFromEnvironment = String.fromEnvironment(
+    'WEBRTC_STUN_URL',
+  );
+
   /// Raw base URL as configured, e.g. `http://localhost:3000`.
   final String backendBaseUrl;
+
+  /// Optional STUN server, e.g. `stun:stun.l.google.com:19302`.
+  ///
+  /// Empty means "no ICE server at all". TURN is not configurable here yet:
+  /// it needs credentials, which are secrets and must come from the backend.
+  final String webRtcStunUrl;
 
   final Duration connectTimeout;
   final Duration receiveTimeout;
@@ -52,6 +75,12 @@ class AppConfig {
       url = url.substring(0, url.length - 1);
     }
     return url;
+  }
+
+  /// The configured STUN URL, or `null` when there is none.
+  String? get normalizedWebRtcStunUrl {
+    final url = webRtcStunUrl.trim();
+    return url.isEmpty ? null : url;
   }
 
   /// URL of a Socket.IO namespace, derived from the very same base URL.

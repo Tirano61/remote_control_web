@@ -38,16 +38,31 @@ final class SignalingJoining extends SignalingJoinState {
 /// It holds only for the connection that obtained it: rooms are connection
 /// scoped, so a reconnection sends the console back to [SignalingIdle].
 final class SignalingJoined extends SignalingJoinState {
-  const SignalingJoined(this.remoteSessionId);
+  const SignalingJoined(this.remoteSessionId, {required this.peerJoined});
 
   @override
   final String remoteSessionId;
 
+  /// Whether the tablet is inside the same signaling room.
+  ///
+  /// Two facts feed it, and both are connection scoped: the `peerJoined` flag
+  /// of the join ACK, and `remote-session:peer-joined` arriving afterwards.
+  /// It is readiness, never authorization — what this technician may do was
+  /// settled by the join the backend accepted.
+  ///
+  /// Being joined is not enough to start negotiating: a `webrtc:offer` sent
+  /// into a room the tablet has not entered is relayed to nobody and silently
+  /// dropped.
+  final bool peerJoined;
+
   @override
   bool get isJoined => true;
 
+  /// Everything signaling can contribute to a WebRTC negotiation is true.
+  bool get isPeerReady => peerJoined;
+
   @override
-  List<Object?> get props => [remoteSessionId];
+  List<Object?> get props => [remoteSessionId, peerJoined];
 }
 
 /// The join was refused, or no usable acknowledgement came back.
