@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_web/core/config/app_config.dart';
 import 'package:remote_control_web/features/technician_realtime/data/models/join_remote_session_ack_dto.dart';
 import 'package:remote_control_web/features/technician_realtime/data/models/remote_session_closed_notice_dto.dart';
+import 'package:remote_control_web/features/technician_realtime/data/models/remote_session_peer_joined_dto.dart';
 import 'package:remote_control_web/features/technician_realtime/data/gateway/realtime_connect_error.dart';
 import 'package:remote_control_web/features/technician_realtime/data/realtime_contract.dart';
 import 'package:remote_control_web/features/technician_realtime/domain/entities/join_remote_session_result.dart';
@@ -102,17 +103,47 @@ void main() {
       expect(payload.containsKey('deviceId'), isFalse);
     });
 
-    test('an accepted ACK is { joined: true, remoteSessionId }', () {
+    test('an accepted ACK is { joined: true, remoteSessionId, peerJoined }', () {
       final result = JoinRemoteSessionAckDto.fromAck(
-        {'joined': true, 'remoteSessionId': sessionId},
+        {'joined': true, 'remoteSessionId': sessionId, 'peerJoined': true},
         requestedRemoteSessionId: sessionId,
       );
 
       expect(result, isA<JoinRemoteSessionAccepted>());
-      expect(
-        (result as JoinRemoteSessionAccepted).remoteSessionId,
-        sessionId,
+      final accepted = result as JoinRemoteSessionAccepted;
+      expect(accepted.remoteSessionId, sessionId);
+      expect(accepted.peerJoined, isTrue);
+    });
+
+    test('peerJoined false is the normal answer when joining first', () {
+      final result = JoinRemoteSessionAckDto.fromAck(
+        {'joined': true, 'remoteSessionId': sessionId, 'peerJoined': false},
+        requestedRemoteSessionId: sessionId,
       );
+
+      // Joined, but nobody to negotiate with yet: an offer would be relayed
+      // into an empty room and silently dropped.
+      expect((result as JoinRemoteSessionAccepted).peerJoined, isFalse);
+    });
+
+    test('peerJoined is required in an accepted ACK', () {
+      // Guessing a default would invent readiness the backend did not report:
+      // false would ignore a device that is already waiting, true would send
+      // an offer to nobody.
+      for (final ack in <Object?>[
+        {'joined': true, 'remoteSessionId': sessionId},
+        {'joined': true, 'remoteSessionId': sessionId, 'peerJoined': 'true'},
+        {'joined': true, 'remoteSessionId': sessionId, 'peerJoined': null},
+      ]) {
+        expect(
+          JoinRemoteSessionAckDto.fromAck(
+            ack,
+            requestedRemoteSessionId: sessionId,
+          ),
+          isA<JoinRemoteSessionFailed>(),
+          reason: 'ACK $ack must not be accepted',
+        );
+      }
     });
 
     test('a rejected ACK is { joined: false, error }', () {
@@ -164,7 +195,11 @@ void main() {
 
     test('an ACK for a different session is never taken as joined', () {
       final result = JoinRemoteSessionAckDto.fromAck(
-        {'joined': true, 'remoteSessionId': 'another-session'},
+        {
+          'joined': true,
+          'remoteSessionId': 'another-session',
+          'peerJoined': true,
+        },
         requestedRemoteSessionId: sessionId,
       );
 
@@ -196,6 +231,46 @@ void main() {
           reason: 'ACK $ack must not be accepted',
         );
       }
+    });
+  });
+
+  group('remote-session:peer-joined', () {
+    test('the event name is the documented one', () {
+      expect(
+        TechnicianRealtimeContract.remoteSessionPeerJoinedEvent,
+        'remote-session:peer-joined',
+      );
+    });
+
+    test('the payload is { remoteSessionId }', () {
+      final notice = RemoteSessionPeerJoinedDto.fromEvent({
+        'remoteSessionId': sessionId,
+      });
+
+      expect(notice, isNotNull);
+      expect(notice!.remoteSessionId, sessionId);
+    });
+
+    test('a payload without a usable id is dropped', () {
+      for (final data in <Object?>[
+        null,
+        'peer-joined',
+        <String, Object?>{},
+        {'remoteSessionId': 42},
+        {'remoteSessionId': '  '},
+      ]) {
+        expect(RemoteSessionPeerJoinedDto.fromEvent(data), isNull);
+      }
+    });
+
+    test('it is readiness, and carries nothing else', () {
+      // No participant, no token, no session object: the console reads state
+      // over REST and authorization was settled by the join.
+      final notice = RemoteSessionPeerJoinedDto.fromEvent({
+        'remoteSessionId': sessionId,
+      });
+
+      expect(notice!.props, [sessionId]);
     });
   });
 
@@ -261,6 +336,7 @@ void main() {
         'remoteSessionId',
       );
       expect(TechnicianRealtimeContract.joinedField, 'joined');
+      expect(TechnicianRealtimeContract.peerJoinedField, 'peerJoined');
       expect(TechnicianRealtimeContract.errorField, 'error');
       expect(TechnicianRealtimeContract.endedByField, 'endedBy');
       expect(

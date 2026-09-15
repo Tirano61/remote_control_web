@@ -9,11 +9,14 @@ import 'package:remote_control_web/core/error/failure.dart';
 import 'package:remote_control_web/features/auth/data/repositories/auth_repository_impl.dart';
 import 'package:remote_control_web/features/remote_session/data/repositories/remote_session_repository_impl.dart';
 import 'package:remote_control_web/features/remote_session/domain/entities/remote_session_status.dart';
+import 'package:remote_control_web/features/signaling/data/technician_signaling_client_impl.dart';
 import 'package:remote_control_web/features/support/domain/entities/support_request_status.dart';
+import 'package:remote_control_web/features/webrtc/domain/entities/webrtc_connection_state.dart';
 
 import '../../../support/auth_test_doubles.dart';
 import '../../../support/console_test_doubles.dart';
 import '../../../support/realtime_test_doubles.dart';
+import '../../../support/webrtc_test_doubles.dart';
 import '../../../support/remote_session_test_doubles.dart';
 
 void main() {
@@ -23,6 +26,7 @@ void main() {
   late FakeSupportRequestRepository supportRequests;
   late FakeRemoteSessionRepository remoteSessions;
   late FakeTechnicianRealtimeClient realtime;
+  late FakeWebRtcPeerClient peers;
 
   setUp(() {
     auth = FakeAuthRemoteDataSource()..checkStatusResponse = technicianSession;
@@ -31,6 +35,7 @@ void main() {
     supportRequests = FakeSupportRequestRepository();
     remoteSessions = FakeRemoteSessionRepository();
     realtime = FakeTechnicianRealtimeClient();
+    peers = FakeWebRtcPeerClient();
   });
 
   /// The request this technician owns and the tablet already accepted.
@@ -71,6 +76,10 @@ void main() {
           supportRequestRepository: supportRequests,
           remoteSessionRepository: remoteSessions,
           technicianRealtimeClient: realtime,
+          technicianSignalingClient: TechnicianSignalingClientImpl(
+            transport: realtime,
+          ),
+          webRtcPeerClient: peers,
         ),
       ),
     );
@@ -326,6 +335,68 @@ void main() {
 
       expect(realtime.joinedSessionIds, [remoteSessionId]);
       expect(find.text('Canal de asistencia establecido.'), findsOneWidget);
+    });
+  });
+
+  group('remote connection', () {
+    /// The tablet is in the signaling room, so a negotiation starts as soon
+    /// as the socket is up.
+    Future<void> pumpWithReadyPeer(WidgetTester tester) async {
+      remoteSessions.current = buildRemoteSession();
+      realtime.peerJoinedOnJoin = true;
+      await pumpConsole(tester);
+      await connectSocket(tester);
+      // The backend relayed the offer to the tablet.
+      realtime.answerRelayAck({
+        'delivered': true,
+        'remoteSessionId': remoteSessionId,
+      });
+      await settleUi(tester);
+    }
+
+    testWidgets('says it is connecting while WebRTC negotiates', (
+      tester,
+    ) async {
+      await pumpWithReadyPeer(tester);
+
+      expect(peers.sessions, hasLength(1));
+      expect(
+        tester.widget<Text>(find.byKey(const Key('webrtc_status'))).data,
+        'Conectando con el dispositivo...',
+      );
+    });
+
+    testWidgets('reports the remote connection once the channel is open', (
+      tester,
+    ) async {
+      await pumpWithReadyPeer(tester);
+
+      peers.last
+        ..emitControlChannelState(WebRtcDataChannelState.open)
+        ..emitPeerState(WebRtcPeerConnectionState.connected);
+      await settleUi(tester);
+
+      expect(
+        tester.widget<Text>(find.byKey(const Key('webrtc_status'))).data,
+        'Conexión remota establecida',
+      );
+      // The RemoteSession is untouched: the backend has no CONNECTING ->
+      // ACTIVE transition, and the console never invents one.
+      expect(
+        find.text('Estado: Conectando con el dispositivo...'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('nothing is shown while the tablet has not joined', (
+      tester,
+    ) async {
+      remoteSessions.current = buildRemoteSession();
+      await pumpConsole(tester);
+      await connectSocket(tester);
+
+      expect(peers.sessions, isEmpty);
+      expect(find.byKey(const Key('webrtc_status')), findsNothing);
     });
   });
 

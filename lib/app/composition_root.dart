@@ -25,6 +25,8 @@ import '../features/remote_session/domain/usecases/close_remote_session.dart';
 import '../features/remote_session/domain/usecases/create_remote_session.dart';
 import '../features/remote_session/domain/usecases/load_current_remote_session.dart';
 import '../features/remote_session/presentation/bloc/remote_session/remote_session_bloc.dart';
+import '../features/signaling/data/technician_signaling_client_impl.dart';
+import '../features/signaling/domain/client/technician_signaling_client.dart';
 import '../features/support/data/datasources/support_remote_data_source.dart';
 import '../features/support/data/repositories/support_request_repository_impl.dart';
 import '../features/support/domain/repositories/support_request_repository.dart';
@@ -35,6 +37,10 @@ import '../features/technician_realtime/data/technician_realtime_client_impl.dar
 import '../features/technician_realtime/domain/client/technician_realtime_client.dart';
 import '../features/technician_realtime/presentation/bloc/signaling_join/signaling_join_bloc.dart';
 import '../features/technician_realtime/presentation/bloc/technician_realtime/technician_realtime_bloc.dart';
+import '../features/webrtc/data/flutter_webrtc_peer_client.dart';
+import '../features/webrtc/domain/client/webrtc_peer_client.dart';
+import '../features/webrtc/domain/entities/webrtc_ice_configuration.dart';
+import '../features/webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dart';
 import 'console/technician_console_coordinator.dart';
 
 /// Composition root.
@@ -49,6 +55,8 @@ class AppDependencies {
     required this.supportRequestRepository,
     required this.remoteSessionRepository,
     required this.technicianRealtimeClient,
+    required this.technicianSignalingClient,
+    required this.webRtcPeerClient,
   });
 
   /// Wiring used by the running application.
@@ -64,17 +72,27 @@ class AppDependencies {
       storage: tokenStorage,
     );
 
+    // The single Socket.IO connection of the application. It is built once and
+    // handed out under two ports — realtime and signaling — so that domain
+    // notifications, `remote-session:join` and the `webrtc:*` relay all travel
+    // over one `/technicians` socket, exactly like one browser tab should.
+    //
+    // Socket.IO reads the same single token storage as REST, through the same
+    // read-only port: the User JWT is never duplicated.
+    final realtimeClient = TechnicianRealtimeClientImpl(
+      config: resolvedConfig,
+      tokenProvider: tokenProvider,
+    );
+
     return AppDependencies(
       config: resolvedConfig,
       authRepository: AuthRepositoryImpl(
         remoteDataSource: AuthRemoteDataSourceImpl(apiClient: apiClient),
         tokenStorage: tokenStorage,
       ),
-      // Socket.IO reads the same single token storage as REST, through the
-      // same read-only port: the User JWT is never duplicated.
-      technicianRealtimeClient: TechnicianRealtimeClientImpl(
-        config: resolvedConfig,
-        tokenProvider: tokenProvider,
+      technicianRealtimeClient: realtimeClient,
+      technicianSignalingClient: TechnicianSignalingClientImpl(
+        transport: realtimeClient,
       ),
       deviceRepository: DeviceRepositoryImpl(
         remoteDataSource: DevicesRemoteDataSourceImpl(apiClient: apiClient),
@@ -90,6 +108,8 @@ class AppDependencies {
         ),
         tokenProvider: tokenProvider,
       ),
+      // The only implementation that knows `flutter_webrtc` exists.
+      webRtcPeerClient: const FlutterWebRtcPeerClient(),
     );
   }
 
@@ -104,6 +124,21 @@ class AppDependencies {
   /// It is shared by the realtime BLoCs and the console coordinator, so there
   /// is exactly one socket and exactly one owner of its lifecycle.
   final TechnicianRealtimeClient technicianRealtimeClient;
+
+  /// `webrtc:*` relay, over that same connection.
+  ///
+  /// This is the whole API the `RTCPeerConnection` layer needs: it knows
+  /// nothing about Socket.IO, the BLoCs or the gateway.
+  final TechnicianSignalingClient technicianSignalingClient;
+
+  /// Builds the peer connections. Replaceable by a fake in tests, which is how
+  /// the whole negotiation is exercised without a browser.
+  final WebRtcPeerClient webRtcPeerClient;
+
+  /// ICE configuration of every peer connection, built once from the single
+  /// place it is configured: `WEBRTC_STUN_URL`, or nothing at all.
+  late final WebRtcIceConfiguration iceConfiguration =
+      WebRtcIceConfiguration.fromStunUrl(config.normalizedWebRtcStunUrl);
 
   late final LogIn logIn = LogIn(repository: authRepository);
   late final RestoreSession restoreSession = RestoreSession(
@@ -169,6 +204,17 @@ class AppDependencies {
   SignalingJoinBloc createSignalingJoinBloc() =>
       SignalingJoinBloc(client: technicianRealtimeClient);
 
+  /// WebRTC negotiation of the console.
+  ///
+  /// No negotiation is triggered here: the coordinator asks for one when the
+  /// session, the room and the tablet are all ready, which is the only moment
+  /// an offer would reach anybody.
+  WebRtcSessionBloc createWebRtcSessionBloc() => WebRtcSessionBloc(
+    peerClient: webRtcPeerClient,
+    signalingClient: technicianSignalingClient,
+    iceConfiguration: iceConfiguration,
+  );
+
   /// Rules that only exist at the level of the whole console.
   TechnicianConsoleCoordinator createConsoleCoordinator({
     required UserSessionBloc userSessionBloc,
@@ -176,12 +222,15 @@ class AppDependencies {
     required TechnicianRealtimeBloc technicianRealtimeBloc,
     required SignalingJoinBloc signalingJoinBloc,
     required SupportRequestsBloc supportRequestsBloc,
+    required WebRtcSessionBloc webRtcSessionBloc,
   }) => TechnicianConsoleCoordinator(
     userSessionBloc: userSessionBloc,
     remoteSessionBloc: remoteSessionBloc,
     technicianRealtimeBloc: technicianRealtimeBloc,
     signalingJoinBloc: signalingJoinBloc,
     supportRequestsBloc: supportRequestsBloc,
+    webRtcSessionBloc: webRtcSessionBloc,
     realtimeClient: technicianRealtimeClient,
+    signalingClient: technicianSignalingClient,
   );
 }

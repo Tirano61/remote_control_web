@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
@@ -6,6 +7,8 @@ import '../../../../core/presentation/widgets/console_section.dart';
 import '../../../../core/presentation/widgets/presence_indicator.dart';
 import '../../../technician_realtime/presentation/bloc/signaling_join/signaling_join_bloc.dart';
 import '../../../technician_realtime/presentation/bloc/technician_realtime/technician_realtime_bloc.dart';
+import '../../../webrtc/domain/entities/webrtc_connection_state.dart';
+import '../../../webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dart';
 import '../../domain/entities/remote_session.dart';
 import '../bloc/remote_session/remote_session_bloc.dart';
 
@@ -120,6 +123,8 @@ class _LiveAssistance extends StatelessWidget {
             ),
             const SizedBox(height: 6),
             const _AssistanceChannelStatus(),
+            const SizedBox(height: 6),
+            const _RemoteConnectionStatus(),
             const SizedBox(height: 18),
             Align(
               alignment: Alignment.centerLeft,
@@ -226,6 +231,109 @@ class _AssistanceChannelStatus extends StatelessWidget {
       ),
     );
   }
+}
+
+/// One line telling the technician whether the browser reached the tablet.
+///
+/// It reports the WebRTC negotiation, which is a different fact from both the
+/// `RemoteSession` status above it and the signaling channel next to it: the
+/// session stays `CONNECTING` — the backend has no other transition today —
+/// while the peer connection may already be established.
+///
+/// Nothing of the negotiation itself is shown: no SDP, no candidate, no state
+/// machine. The technician needs to know whether it works, not how.
+class _RemoteConnectionStatus extends StatelessWidget {
+  const _RemoteConnectionStatus();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return BlocBuilder<WebRtcSessionBloc, WebRtcSessionState>(
+      builder: (context, state) {
+        // Nothing to say yet: no assistance, or the tablet has not entered the
+        // room. The line above is the one that talks about that.
+        if (state is WebRtcIdle || state is WebRtcClosed) {
+          return const SizedBox.shrink();
+        }
+
+        final isEstablished = state.isConnected && state.isControlChannelOpen;
+        final hasFailed = state is WebRtcFailed;
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  isEstablished
+                      ? Icons.cast_connected
+                      : hasFailed
+                      ? Icons.error_outline
+                      : Icons.sync,
+                  size: 18,
+                  color: hasFailed
+                      ? theme.colorScheme.error
+                      : theme.colorScheme.onSurfaceVariant,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    key: const Key('webrtc_status'),
+                    isEstablished
+                        ? 'Conexión remota establecida'
+                        : hasFailed
+                        ? 'No se pudo establecer la conexión remota.'
+                        : 'Conectando con el dispositivo...',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: hasFailed
+                          ? theme.colorScheme.error
+                          : theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            // Debug builds only, and deliberately shallow: the two facts a
+            // developer needs while bringing WebRTC up, and nothing that could
+            // leak an SDP, a candidate or a token.
+            if (kDebugMode) ...[
+              const SizedBox(height: 2),
+              Padding(
+                padding: const EdgeInsets.only(left: 26),
+                child: Text(
+                  key: const Key('webrtc_debug_status'),
+                  'WebRTC: ${_peerLabel(state)} · '
+                  'Canal de control: ${_channelLabel(state.controlChannelState)}',
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ],
+          ],
+        );
+      },
+    );
+  }
+
+  static String _peerLabel(WebRtcSessionState state) => switch (state) {
+    WebRtcPreparing() => 'preparando',
+    WebRtcOffering() => 'ofreciendo',
+    WebRtcConnecting() => 'conectando',
+    WebRtcConnected() => 'conectado',
+    WebRtcInterrupted() => 'interrumpido',
+    WebRtcFailed() => 'fallido',
+    WebRtcClosed() => 'cerrado',
+    WebRtcIdle() => 'inactivo',
+  };
+
+  static String _channelLabel(WebRtcDataChannelState state) => switch (state) {
+    WebRtcDataChannelState.connecting => 'abriendo',
+    WebRtcDataChannelState.open => 'abierto',
+    WebRtcDataChannelState.closing => 'cerrando',
+    WebRtcDataChannelState.closed => 'cerrado',
+  };
 }
 
 /// Compact error shown when the state of the assistance could not be read or a

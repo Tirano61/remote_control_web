@@ -10,20 +10,33 @@ sealed class JoinRemoteSessionResult extends Equatable {
   List<Object?> get props => const [];
 }
 
-/// ACK `{ "joined": true, "remoteSessionId": ... }`.
+/// ACK `{ "joined": true, "remoteSessionId": ..., "peerJoined": ... }`.
 ///
 /// The socket is now in the signaling room of that session. It stays there
 /// until the connection drops — rooms are connection scoped.
 final class JoinRemoteSessionAccepted extends JoinRemoteSessionResult {
-  const JoinRemoteSessionAccepted(this.remoteSessionId);
+  const JoinRemoteSessionAccepted(
+    this.remoteSessionId, {
+    required this.peerJoined,
+  });
 
   final String remoteSessionId;
 
-  @override
-  List<Object?> get props => [remoteSessionId];
+  /// Whether the other end of the session was already in the room when this
+  /// join was answered.
+  ///
+  /// Readiness, not authorization. `false` is the normal answer when the
+  /// technician joins first, and it is then completed by
+  /// `remote-session:peer-joined`. It is never remembered across
+  /// connections: a new socket gets a fresh answer from its own ACK.
+  final bool peerJoined;
 
   @override
-  String toString() => 'JoinRemoteSessionAccepted($remoteSessionId)';
+  List<Object?> get props => [remoteSessionId, peerJoined];
+
+  @override
+  String toString() =>
+      'JoinRemoteSessionAccepted($remoteSessionId, peerJoined: $peerJoined)';
 }
 
 /// ACK `{ "joined": false, "error": ... }`.

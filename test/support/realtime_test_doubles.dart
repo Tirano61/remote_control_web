@@ -1,20 +1,28 @@
 import 'dart:async';
 
+import 'package:remote_control_web/features/signaling/data/signaling_transport.dart';
 import 'package:remote_control_web/features/technician_realtime/data/gateway/realtime_socket_gateway.dart';
 import 'package:remote_control_web/features/technician_realtime/domain/client/technician_realtime_client.dart';
 import 'package:remote_control_web/features/technician_realtime/domain/entities/join_remote_session_result.dart';
 import 'package:remote_control_web/features/technician_realtime/domain/entities/remote_session_closed_notice.dart';
+import 'package:remote_control_web/features/technician_realtime/domain/entities/remote_session_peer_joined_notice.dart';
 import 'package:remote_control_web/features/technician_realtime/domain/entities/technician_realtime_status.dart';
 
-/// Scripted [TechnicianRealtimeClient].
+/// Scripted [TechnicianRealtimeClient], and the [SignalingTransport] built on
+/// the same object — exactly like production, where one class serves both
+/// ports over one socket.
 ///
 /// No socket and no server: the test decides when the connection succeeds,
-/// drops or is rejected, and what the join is answered with.
-class FakeTechnicianRealtimeClient implements TechnicianRealtimeClient {
+/// drops or is rejected, what the join is answered with, and what each
+/// `webrtc:*` relay is acknowledged with.
+class FakeTechnicianRealtimeClient
+    implements TechnicianRealtimeClient, SignalingTransport {
   final StreamController<TechnicianRealtimeStatus> _statusController =
       StreamController<TechnicianRealtimeStatus>.broadcast();
   final StreamController<RemoteSessionClosedNotice> _closedController =
       StreamController<RemoteSessionClosedNotice>.broadcast();
+  final StreamController<RemoteSessionPeerJoinedNotice> _peerJoinedController =
+      StreamController<RemoteSessionPeerJoinedNotice>.broadcast();
 
   TechnicianRealtimeStatus _status = const TechnicianRealtimeDisconnected();
 
@@ -24,8 +32,24 @@ class FakeTechnicianRealtimeClient implements TechnicianRealtimeClient {
 
   final List<String> joinedSessionIds = [];
 
+  /// Relays that were put on the wire, in order.
+  final List<({String event, Map<String, dynamic> payload})> emittedSignaling =
+      [];
+
+  /// Set when the transport must behave as if there were no usable socket.
+  bool canEmitSignaling = true;
+
+  int forgetJoinedCount = 0;
+
   /// Answer of the next join. Defaults to an accepted one.
   JoinRemoteSessionResult? joinResult;
+
+  /// Readiness the default accepted join reports.
+  ///
+  /// `false` is what the backend answers when the technician joins the room
+  /// first, which is the normal case and the one that must not start a
+  /// negotiation.
+  bool peerJoinedOnJoin = false;
 
   /// Keeps a join in flight so a second trigger can be attempted meanwhile.
   Future<void>? joinGate;
@@ -42,6 +66,10 @@ class FakeTechnicianRealtimeClient implements TechnicianRealtimeClient {
   @override
   Stream<RemoteSessionClosedNotice> get remoteSessionClosed =>
       _closedController.stream;
+
+  @override
+  Stream<RemoteSessionPeerJoinedNotice> get peerJoined =>
+      _peerJoinedController.stream;
 
   @override
   Future<void> connect() async {
@@ -62,7 +90,51 @@ class FakeTechnicianRealtimeClient implements TechnicianRealtimeClient {
     joinedSessionIds.add(remoteSessionId);
     final gate = joinGate;
     if (gate != null) await gate;
-    return joinResult ?? JoinRemoteSessionAccepted(remoteSessionId);
+    final result =
+        joinResult ??
+        JoinRemoteSessionAccepted(
+          remoteSessionId,
+          peerJoined: peerJoinedOnJoin,
+        );
+    // Membership follows the acknowledgement, as it does in the real client.
+    _joinedRemoteSessionId = result is JoinRemoteSessionAccepted
+        ? result.remoteSessionId
+        : null;
+    return result;
+  }
+
+  @override
+  void forgetJoinedRemoteSession() {
+    forgetJoinedCount++;
+    _joinedRemoteSessionId = null;
+  }
+
+  // --- SignalingTransport -------------------------------------------------
+
+  String? _joinedRemoteSessionId;
+
+  final StreamController<SignalingWireEvent> _signalingController =
+      StreamController<SignalingWireEvent>.broadcast();
+
+  void Function(Object? ack)? _pendingRelayAck;
+
+  @override
+  String? get joinedRemoteSessionId => _joinedRemoteSessionId;
+
+  @override
+  Stream<SignalingWireEvent> get signalingEvents =>
+      _signalingController.stream;
+
+  @override
+  bool emitSignaling(
+    String event,
+    Map<String, dynamic> payload,
+    void Function(Object? ack) onAck,
+  ) {
+    if (!canEmitSignaling) return false;
+    emittedSignaling.add((event: event, payload: payload));
+    _pendingRelayAck = onAck;
+    return true;
   }
 
   @override
@@ -70,6 +142,8 @@ class FakeTechnicianRealtimeClient implements TechnicianRealtimeClient {
     disposeCount++;
     await _statusController.close();
     await _closedController.close();
+    await _peerJoinedController.close();
+    await _signalingController.close();
   }
 
   // --- test helpers -------------------------------------------------------
@@ -86,8 +160,11 @@ class FakeTechnicianRealtimeClient implements TechnicianRealtimeClient {
     emitStatus(TechnicianRealtimeConnected(_connectionCounter));
   }
 
-  void emitReconnecting() =>
-      emitStatus(const TechnicianRealtimeReconnecting());
+  /// The connection dropped. Rooms die with it.
+  void emitReconnecting() {
+    _joinedRemoteSessionId = null;
+    emitStatus(const TechnicianRealtimeReconnecting());
+  }
 
   void emitAuthenticationError() => emitStatus(
     const TechnicianRealtimeConnectionError(isAuthenticationError: true),
@@ -96,6 +173,27 @@ class FakeTechnicianRealtimeClient implements TechnicianRealtimeClient {
   void emitNetworkError() => emitStatus(
     const TechnicianRealtimeConnectionError(isAuthenticationError: false),
   );
+
+  /// Puts the socket in a signaling room without going through a join.
+  void joinRoom(String remoteSessionId) =>
+      _joinedRemoteSessionId = remoteSessionId;
+
+  /// Answers the acknowledgement of the last relay.
+  void answerRelayAck(Object? ack) => _pendingRelayAck?.call(ack);
+
+  /// A `webrtc:*` event arriving from the backend.
+  void emitSignalingEvent(String event, Object? data) {
+    if (_signalingController.isClosed) return;
+    _signalingController.add((event: event, data: data));
+  }
+
+  /// `remote-session:peer-joined`: the tablet entered the signaling room.
+  void emitPeerJoined(String remoteSessionId) {
+    if (_peerJoinedController.isClosed) return;
+    _peerJoinedController.add(
+      RemoteSessionPeerJoinedNotice(remoteSessionId: remoteSessionId),
+    );
+  }
 
   void emitRemoteSessionClosed(
     String remoteSessionId, {

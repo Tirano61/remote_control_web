@@ -35,3 +35,13 @@ final class SignalingJoinRequested extends SignalingJoinEvent {
 final class SignalingJoinReset extends SignalingJoinEvent {
   const SignalingJoinReset();
 }
+
+/// `remote-session:peer-joined` arrived. Internal: only the client raises it.
+final class _SignalingPeerJoinedReported extends SignalingJoinEvent {
+  const _SignalingPeerJoinedReported(this.remoteSessionId);
+
+  final String remoteSessionId;
+
+  @override
+  List<Object?> get props => [remoteSessionId];
+}

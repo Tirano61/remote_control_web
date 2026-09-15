@@ -80,6 +80,142 @@ void main() {
       expect(client.joinedSessionIds, [sessionId]);
       expect(bloc.state.isJoined, isTrue);
       expect(bloc.state.remoteSessionId, sessionId);
+      // Joined, but the tablet is not in the room: being joined and being
+      // able to negotiate are two different facts.
+      expect((bloc.state as SignalingJoined).peerJoined, isFalse);
+      await bloc.close();
+    });
+
+    test('an ACK that already reports the peer needs no event', () async {
+      client.peerJoinedOnJoin = true;
+      final bloc = SignalingJoinBloc(client: client);
+
+      bloc.add(
+        const SignalingJoinRequested(
+          remoteSessionId: sessionId,
+          connectionId: 1,
+        ),
+      );
+      await bloc.stream.firstWhere((state) => state is SignalingJoined);
+
+      expect((bloc.state as SignalingJoined).peerJoined, isTrue);
+      await bloc.close();
+    });
+
+    test('remote-session:peer-joined completes the readiness', () async {
+      final bloc = SignalingJoinBloc(client: client);
+      bloc.add(
+        const SignalingJoinRequested(
+          remoteSessionId: sessionId,
+          connectionId: 1,
+        ),
+      );
+      await bloc.stream.firstWhere((state) => state is SignalingJoined);
+
+      client.emitPeerJoined(sessionId);
+      await bloc.stream.firstWhere(
+        (state) => state is SignalingJoined && state.peerJoined,
+      );
+
+      expect((bloc.state as SignalingJoined).peerJoined, isTrue);
+      await bloc.close();
+    });
+
+    test('the event is idempotent', () async {
+      final bloc = SignalingJoinBloc(client: client);
+      final seen = <SignalingJoinState>[];
+      bloc.add(
+        const SignalingJoinRequested(
+          remoteSessionId: sessionId,
+          connectionId: 1,
+        ),
+      );
+      await bloc.stream.firstWhere((state) => state is SignalingJoined);
+      final subscription = bloc.stream.listen(seen.add);
+
+      client
+        ..emitPeerJoined(sessionId)
+        ..emitPeerJoined(sessionId)
+        ..emitPeerJoined(sessionId);
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+
+      // One change of state, whatever the number of events.
+      expect(seen, hasLength(1));
+      expect((bloc.state as SignalingJoined).peerJoined, isTrue);
+      await subscription.cancel();
+      await bloc.close();
+    });
+
+    test('readiness for another session is never adopted', () async {
+      final bloc = SignalingJoinBloc(client: client);
+      bloc.add(
+        const SignalingJoinRequested(
+          remoteSessionId: sessionId,
+          connectionId: 1,
+        ),
+      );
+      await bloc.stream.firstWhere((state) => state is SignalingJoined);
+
+      client.emitPeerJoined('9a0f3d1b-4c88-9e64-6f2a-5c7e8b103d1b');
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+
+      expect((bloc.state as SignalingJoined).peerJoined, isFalse);
+      expect(bloc.state.remoteSessionId, sessionId);
+      await bloc.close();
+    });
+
+    test('an event that overtook its acknowledgement still counts', () async {
+      // The tablet joined between this socket's join and its ACK, so the ACK
+      // legitimately says false and the event arrived first.
+      final gate = Completer<void>();
+      client.joinGate = gate.future;
+      final bloc = SignalingJoinBloc(client: client);
+
+      bloc.add(
+        const SignalingJoinRequested(
+          remoteSessionId: sessionId,
+          connectionId: 1,
+        ),
+      );
+      await bloc.stream.firstWhere((state) => state is SignalingJoining);
+      client.emitPeerJoined(sessionId);
+      await Future<void>.delayed(Duration.zero);
+      gate.complete();
+      await bloc.stream.firstWhere((state) => state is SignalingJoined);
+
+      expect((bloc.state as SignalingJoined).peerJoined, isTrue);
+      await bloc.close();
+    });
+
+    test('readiness never survives a reset', () async {
+      final bloc = SignalingJoinBloc(client: client);
+      bloc.add(
+        const SignalingJoinRequested(
+          remoteSessionId: sessionId,
+          connectionId: 1,
+        ),
+      );
+      await bloc.stream.firstWhere((state) => state is SignalingJoined);
+      client.emitPeerJoined(sessionId);
+      await bloc.stream.firstWhere(
+        (state) => state is SignalingJoined && state.peerJoined,
+      );
+
+      // The socket dropped: rooms and readiness die with it.
+      bloc.add(const SignalingJoinReset());
+      await bloc.stream.firstWhere((state) => state is SignalingIdle);
+      bloc.add(
+        const SignalingJoinRequested(
+          remoteSessionId: sessionId,
+          connectionId: 2,
+        ),
+      );
+      await bloc.stream.firstWhere((state) => state is SignalingJoined);
+
+      // The new socket has to be told again, by its own ACK or by a new event.
+      expect((bloc.state as SignalingJoined).peerJoined, isFalse);
       await bloc.close();
     });
 
@@ -252,12 +388,18 @@ void main() {
         ),
       );
       await bloc.stream.firstWhere((state) => state is SignalingJoined);
+      // An accepted join is what opens signaling.
+      expect(client.joinedRemoteSessionId, sessionId);
 
       bloc.add(const SignalingJoinReset());
       await bloc.stream.firstWhere((state) => state is SignalingIdle);
 
       expect(bloc.state.isJoined, isFalse);
       expect(bloc.state.remoteSessionId, isNull);
+      // And the client stops relaying at the same moment, so late signaling
+      // for that session is discarded instead of being acted upon.
+      expect(client.joinedRemoteSessionId, isNull);
+      expect(client.forgetJoinedCount, 1);
       await bloc.close();
     });
   });

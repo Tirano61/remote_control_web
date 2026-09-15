@@ -37,8 +37,16 @@ void main() {
 
         gateway.completeHandshake();
         final pending = client.joinRemoteSession(sessionId);
-        gateway.answerAck({'joined': true, 'remoteSessionId': sessionId});
+        gateway.answerAck({
+          'joined': true,
+          'remoteSessionId': sessionId,
+          'peerJoined': true,
+        });
         await pending;
+        gateway.emitServerEvent(
+          TechnicianRealtimeContract.remoteSessionPeerJoinedEvent,
+          {'remoteSessionId': sessionId},
+        );
         gateway.emitServerEvent(
           TechnicianRealtimeContract.remoteSessionClosedEvent,
           {'remoteSessionId': sessionId, 'endedBy': 'DEVICE'},
@@ -66,6 +74,10 @@ void main() {
     expect(output, contains('socket disconnected'));
     expect(output, contains('join requested $sessionId'));
     expect(output, contains('join accepted $sessionId'));
+    expect(
+      output,
+      contains('remote-session:peer-joined received $sessionId'),
+    );
     expect(output, contains('remote-session:closed received $sessionId'));
   });
 }
