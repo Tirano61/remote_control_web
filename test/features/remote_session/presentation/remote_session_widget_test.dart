@@ -314,11 +314,16 @@ void main() {
     testWidgets('an ACTIVE session is shown as in progress', (tester) async {
       remoteSessions.current = buildRemoteSession(
         status: RemoteSessionStatus.active,
+        connectedAt: DateTime.utc(2026, 3, 11, 9, 35, 12),
       );
 
       await pumpConsole(tester);
 
+      expect(find.byKey(const Key('active_assistance_section')), findsOneWidget);
       expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
+      expect(find.text('FINALIZAR ASISTENCIA'), findsOneWidget);
+      // Recovered as ACTIVE: there was nothing to activate.
+      expect(remoteSessions.activatedIds, isEmpty);
     });
 
     testWidgets('the session is joined once the socket is connected', (
@@ -369,6 +374,9 @@ void main() {
     testWidgets('reports the remote connection once the channel is open', (
       tester,
     ) async {
+      // The confirmation never gets through, so the session stays where the
+      // backend has it and only the WebRTC line moves.
+      remoteSessions.activateFailure = const NetworkFailure();
       await pumpWithReadyPeer(tester);
 
       peers.last
@@ -380,12 +388,86 @@ void main() {
         tester.widget<Text>(find.byKey(const Key('webrtc_status'))).data,
         'Conexión remota establecida',
       );
-      // The RemoteSession is untouched: the backend has no CONNECTING ->
-      // ACTIVE transition, and the console never invents one.
+      // The RemoteSession is never promoted locally: it is whatever the last
+      // successful REST read said.
       expect(
         find.text('Estado: Conectando con el dispositivo...'),
         findsOneWidget,
       );
+      expect(find.byKey(const Key('remote_session_connected_at')), findsNothing);
+    });
+
+    testWidgets('an established connection turns the session ACTIVE', (
+      tester,
+    ) async {
+      await pumpWithReadyPeer(tester);
+      expect(
+        find.text('Estado: Conectando con el dispositivo...'),
+        findsOneWidget,
+      );
+
+      peers.last
+        ..emitControlChannelState(WebRtcDataChannelState.open)
+        ..emitPeerState(WebRtcPeerConnectionState.connected);
+      await settleUi(tester);
+
+      // No contradiction left on screen: the three lines agree.
+      expect(remoteSessions.activatedIds, [remoteSessionId]);
+      expect(find.text('ASISTENCIA REMOTA'), findsOneWidget);
+      expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
+      expect(
+        find.text('Estado: Conectando con el dispositivo...'),
+        findsNothing,
+      );
+      expect(
+        tester.widget<Text>(find.byKey(const Key('webrtc_status'))).data,
+        'Conexión remota establecida',
+      );
+      expect(
+        tester.widget<Text>(find.byKey(const Key('webrtc_debug_status'))).data,
+        'WebRTC: conectado · Canal de control: abierto',
+      );
+      expect(find.text('FINALIZAR ASISTENCIA'), findsOneWidget);
+    });
+
+    testWidgets('shows the connectedAt the backend stamped', (tester) async {
+      await pumpWithReadyPeer(tester);
+
+      peers.last
+        ..emitControlChannelState(WebRtcDataChannelState.open)
+        ..emitPeerState(WebRtcPeerConnectionState.connected);
+      await settleUi(tester);
+
+      final connectedAt = remoteSessions.current!.connectedAt!.toLocal();
+      String two(int n) => n.toString().padLeft(2, '0');
+      expect(
+        tester
+            .widget<Text>(find.byKey(const Key('remote_session_connected_at')))
+            .data,
+        'Conectado desde: ${two(connectedAt.hour)}:${two(connectedAt.minute)}',
+      );
+    });
+
+    testWidgets('an activation that failed offers a retry that activates', (
+      tester,
+    ) async {
+      remoteSessions.activateFailure = const NetworkFailure();
+      await pumpWithReadyPeer(tester);
+      peers.last
+        ..emitControlChannelState(WebRtcDataChannelState.open)
+        ..emitPeerState(WebRtcPeerConnectionState.connected);
+      await settleUi(tester);
+
+      expect(find.byKey(const Key('remote_session_error_banner')), findsOneWidget);
+      expect(find.text('FINALIZAR ASISTENCIA'), findsOneWidget);
+      expect(remoteSessions.activatedIds, hasLength(1));
+
+      remoteSessions.activateFailure = null;
+      await tester.tap(find.byKey(const Key('remote_session_retry_button')));
+      await settleUi(tester);
+
+      expect(remoteSessions.activatedIds, hasLength(2));
+      expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
     });
 
     testWidgets('nothing is shown while the tablet has not joined', (

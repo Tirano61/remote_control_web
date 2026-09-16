@@ -484,6 +484,87 @@ void main() {
     });
   });
 
+  group('remote-session:active', () {
+    test('is published as a typed notice, without having joined', () async {
+      await client.connect();
+      final gateway = factory.last;
+      gateway.completeHandshake();
+
+      final received = client.remoteSessionActivated.first;
+      gateway.emitServerEvent(
+        TechnicianRealtimeContract.remoteSessionActiveEvent,
+        {'remoteSessionId': sessionId},
+      );
+
+      expect((await received).remoteSessionId, sessionId);
+      // The event is addressed to the technician: no join was needed.
+      expect(gateway.emitted, isEmpty);
+    });
+
+    test('an invalid payload is ignored', () async {
+      await client.connect();
+      final gateway = factory.last;
+      gateway.completeHandshake();
+
+      var received = 0;
+      client.remoteSessionActivated.listen((_) => received++);
+      for (final data in <Object?>[
+        null,
+        'active',
+        <String, Object?>{},
+        {'status': 'ACTIVE'},
+        {'remoteSessionId': 42},
+      ]) {
+        gateway.emitServerEvent(
+          TechnicianRealtimeContract.remoteSessionActiveEvent,
+          data,
+        );
+      }
+      await Future<void>.delayed(Duration.zero);
+
+      expect(received, 0);
+    });
+
+    test('an event from a socket that was replaced is dropped', () async {
+      await client.connect();
+      final gateway = factory.last;
+      gateway.completeHandshake();
+      var received = 0;
+      client.remoteSessionActivated.listen((_) => received++);
+
+      await client.disconnect();
+      gateway.emitServerEvent(
+        TechnicianRealtimeContract.remoteSessionActiveEvent,
+        {'remoteSessionId': sessionId},
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(received, 0);
+    });
+
+    test('it does not touch the joined room', () async {
+      await client.connect();
+      final gateway = factory.last;
+      gateway.completeHandshake();
+      final join = client.joinRemoteSession(sessionId);
+      gateway.answerAck({
+        'joined': true,
+        'remoteSessionId': sessionId,
+        'peerJoined': false,
+      });
+      await join;
+
+      gateway.emitServerEvent(
+        TechnicianRealtimeContract.remoteSessionActiveEvent,
+        {'remoteSessionId': 'another-session'},
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      // A domain notification is not membership, whatever id it names.
+      expect(client.joinedRemoteSessionId, sessionId);
+    });
+  });
+
   group('remote-session:closed', () {
     test('is delivered without having joined anything', () async {
       await client.connect();

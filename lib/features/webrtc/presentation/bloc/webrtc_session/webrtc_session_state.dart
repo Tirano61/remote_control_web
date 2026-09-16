@@ -17,9 +17,11 @@ enum WebRtcFailureReason {
 /// State of the WebRTC negotiation with the tablet.
 ///
 /// It is deliberately **not** the state of the `RemoteSession`. The backend
-/// owns that one and has no `CONNECTING -> ACTIVE` transition today, so
-/// `RemoteSession = CONNECTING` together with `WebRtc = connected` is a normal,
-/// expected combination and is never "fixed" locally.
+/// owns that one: `connected` here is what makes the console ask for
+/// `POST /remote-sessions/:id/activate`, but the transition itself is the
+/// backend's and is never applied locally. Until REST says otherwise,
+/// `RemoteSession = CONNECTING` together with `WebRtc = connected` remains a
+/// perfectly normal combination.
 sealed class WebRtcSessionState extends Equatable {
   const WebRtcSessionState();
 
@@ -106,7 +108,10 @@ final class WebRtcConnecting extends WebRtcNegotiation {
 
 /// `RTCPeerConnectionState.connected`.
 ///
-/// This changes nothing about the `RemoteSession`: it stays whatever REST says.
+/// This changes nothing about the `RemoteSession` by itself: it stays whatever
+/// REST says. Together with an open `control` channel it is what the console
+/// treats as "the assistance really started", but the session only becomes
+/// `ACTIVE` when the backend says so.
 final class WebRtcConnected extends WebRtcNegotiation {
   const WebRtcConnected({
     required super.remoteSessionId,

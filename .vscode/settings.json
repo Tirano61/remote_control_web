@@ -2,19 +2,19 @@
   // Identificación visual de la suite Remote Control.
   // device = verde Android
   "workbench.colorCustomizations": {
-    "titleBar.activeBackground": "#2E7D32",
+    "titleBar.activeBackground": "#ff98f6",
     "titleBar.activeForeground": "#FFFFFF",
-    "titleBar.inactiveBackground": "#2E7D3299",
+    "titleBar.inactiveBackground": "#ff98f6",
     "titleBar.inactiveForeground": "#FFFFFFCC",
-    "activityBar.background": "#2E7D32",
+    "activityBar.background": "#ff98f6",
     "activityBar.foreground": "#FFFFFF",
     "activityBar.inactiveForeground": "#FFFFFF99",
     "activityBarBadge.background": "#A5D6A7",
     "activityBarBadge.foreground": "#0B2E12",
-    "statusBar.background": "#1B5E20",
+    "statusBar.background": "#ff98f6",
     "statusBar.foreground": "#FFFFFF",
-    "statusBarItem.hoverBackground": "#2E7D32",
-    "statusBarItem.remoteBackground": "#1B5E20",
+    "statusBarItem.hoverBackground": "#ff98f6",
+    "statusBarItem.remoteBackground": "#ff98f6",
     "statusBarItem.remoteForeground": "#FFFFFF"
   }
 }

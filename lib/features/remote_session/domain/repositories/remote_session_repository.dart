@@ -22,6 +22,14 @@ abstract interface class RemoteSessionRepository {
   /// page reload or a missed realtime event.
   Future<Result<RemoteSession?>> loadCurrent();
 
+  /// `POST /remote-sessions/:id/activate` — the technician end reached the
+  /// device, so the assistance really started.
+  ///
+  /// The backend performs `CONNECTING -> ACTIVE` and stamps `connectedAt` with
+  /// its own clock. The call is idempotent: an already `ACTIVE` session answers
+  /// `200` with that same session.
+  Future<Result<RemoteSession>> activate({required String id});
+
   /// `POST /remote-sessions/:id/close` — ends the assistance.
   ///
   /// The backend closes the session and completes its support request in the

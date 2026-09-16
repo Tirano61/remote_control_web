@@ -21,6 +21,13 @@ abstract interface class RemoteSessionsRemoteDataSource {
   /// Returns `null` when the documented envelope carries `remoteSession: null`.
   Future<RemoteSession?> fetchCurrent({required String token});
 
+  /// `POST /remote-sessions/:id/activate` — empty body.
+  ///
+  /// Moves the session from `CONNECTING` to `ACTIVE` and lets the backend set
+  /// `connectedAt`. Nothing identifying the technician, the device or the
+  /// moment is sent: all three are the backend's to decide.
+  Future<RemoteSession> activate({required String id, required String token});
+
   /// `POST /remote-sessions/:id/close` — empty body.
   Future<RemoteSession> close({required String id, required String token});
 }
@@ -39,6 +46,9 @@ class RemoteSessionsRemoteDataSourceImpl
   /// The only field `POST /remote-sessions` accepts. Sending `deviceId` or
   /// `technicianId` is a `400`, not an ignored property.
   static const String supportRequestIdField = 'supportRequestId';
+
+  static String activatePath(String id) =>
+      '$remoteSessionsPath/$id/activate';
 
   static String closePath(String id) => '$remoteSessionsPath/$id/close';
 
@@ -61,6 +71,21 @@ class RemoteSessionsRemoteDataSourceImpl
   Future<RemoteSession?> fetchCurrent({required String token}) async {
     final response = await _apiClient.get(currentPath, bearerToken: token);
     return RemoteSessionDto.currentFromJson(response.data);
+  }
+
+  @override
+  Future<RemoteSession> activate({
+    required String id,
+    required String token,
+  }) async {
+    // Empty body, exactly like close: `status`, `connectedAt`, `technicianId`,
+    // `userId` and `deviceId` are never sent — the backend owns the transition
+    // and derives the identity from the User JWT.
+    final response = await _apiClient.post(
+      activatePath(id),
+      bearerToken: token,
+    );
+    return RemoteSessionDto.fromJson(response.data);
   }
 
   @override

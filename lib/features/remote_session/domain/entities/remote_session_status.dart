@@ -23,8 +23,11 @@ class RemoteSessionStatus extends Equatable {
     'CONNECTING',
   );
 
-  /// Reserved by the backend. No code path sets it today, but the console must
-  /// render it if it ever arrives — it must never be simulated locally.
+  /// The assistance is running: the technician end reached the device.
+  ///
+  /// Written only by `POST /remote-sessions/:id/activate`, which also stamps
+  /// `connectedAt`. The console asks for that transition but never performs it
+  /// locally.
   static const RemoteSessionStatus active = RemoteSessionStatus._('ACTIVE');
 
   /// The session ended. Terminal.

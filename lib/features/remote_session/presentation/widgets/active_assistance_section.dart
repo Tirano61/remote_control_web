@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
+import '../../../../core/presentation/format/elapsed_label.dart';
 import '../../../../core/presentation/widgets/console_feedback.dart';
 import '../../../../core/presentation/widgets/console_section.dart';
 import '../../../../core/presentation/widgets/presence_indicator.dart';
@@ -21,6 +22,20 @@ import '../bloc/remote_session/remote_session_bloc.dart';
 /// The realtime channel is described in plain words. Namespaces, rooms,
 /// handshakes and acknowledgements are implementation details the technician
 /// has no use for.
+///
+/// The three lines it shows answer three different questions, and they are
+/// only allowed to disagree while something is genuinely in between:
+///
+/// ```text
+/// Estado                       what the backend says the session is
+/// Canal de asistencia          whether signaling is usable
+/// Conexión remota establecida  whether the peers reached each other
+/// ```
+///
+/// Once the peers are connected the console confirms it with
+/// `POST /remote-sessions/:id/activate`, so "Conectando con el dispositivo..."
+/// next to "Conexión remota establecida" is a transient window and no longer
+/// the resting state it used to be.
 class ActiveAssistanceSection extends StatelessWidget {
   const ActiveAssistanceSection({super.key});
 
@@ -81,8 +96,14 @@ class _LiveAssistance extends StatelessWidget {
                 alignment: Alignment.centerLeft,
                 child: TextButton.icon(
                   key: const Key('remote_session_retry_button'),
-                  onPressed: () =>
-                      bloc.add(const RemoteSessionRefreshRequested()),
+                  // An activation that failed on the way out is retried as
+                  // what it was. Everything else is recovered by re-reading
+                  // the backend, which is the console's usual answer.
+                  onPressed: () => bloc.add(
+                    state.canRetryActivation
+                        ? RemoteSessionActivationRequested(session.id)
+                        : const RemoteSessionRefreshRequested(),
+                  ),
                   icon: const Icon(Icons.refresh, size: 18),
                   label: const Text('REINTENTAR'),
                 ),
@@ -121,6 +142,19 @@ class _LiveAssistance extends StatelessWidget {
                 ),
               ],
             ),
+            // Stamped by the backend when it moved the session to `ACTIVE`.
+            // Never computed here: the console does not own that instant.
+            if (session.connectedAt != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  key: const Key('remote_session_connected_at'),
+                  'Conectado desde: ${timeOfDay(session.connectedAt!)}',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
             const SizedBox(height: 6),
             const _AssistanceChannelStatus(),
             const SizedBox(height: 6),
@@ -236,9 +270,10 @@ class _AssistanceChannelStatus extends StatelessWidget {
 /// One line telling the technician whether the browser reached the tablet.
 ///
 /// It reports the WebRTC negotiation, which is a different fact from both the
-/// `RemoteSession` status above it and the signaling channel next to it: the
-/// session stays `CONNECTING` — the backend has no other transition today —
-/// while the peer connection may already be established.
+/// `RemoteSession` status above it and the signaling channel next to it. The
+/// two agree in the end — a connection established here is what makes the
+/// session `ACTIVE` — but they are read from different places and one of them
+/// is always the first to know.
 ///
 /// Nothing of the negotiation itself is shown: no SDP, no candidate, no state
 /// machine. The technician needs to know whether it works, not how.

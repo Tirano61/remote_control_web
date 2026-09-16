@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_web/core/config/app_config.dart';
 import 'package:remote_control_web/features/technician_realtime/data/models/join_remote_session_ack_dto.dart';
+import 'package:remote_control_web/features/technician_realtime/data/models/remote_session_active_notice_dto.dart';
 import 'package:remote_control_web/features/technician_realtime/data/models/remote_session_closed_notice_dto.dart';
 import 'package:remote_control_web/features/technician_realtime/data/models/remote_session_peer_joined_dto.dart';
 import 'package:remote_control_web/features/technician_realtime/data/gateway/realtime_connect_error.dart';
@@ -271,6 +272,69 @@ void main() {
       });
 
       expect(notice!.props, [sessionId]);
+    });
+  });
+
+  group('remote-session:active', () {
+    test('the event name is the documented one', () {
+      expect(
+        TechnicianRealtimeContract.remoteSessionActiveEvent,
+        'remote-session:active',
+      );
+      // It is a different notification from the two it sits next to.
+      expect(
+        TechnicianRealtimeContract.remoteSessionActiveEvent,
+        isNot(TechnicianRealtimeContract.remoteSessionClosedEvent),
+      );
+      expect(
+        TechnicianRealtimeContract.remoteSessionActiveEvent,
+        isNot(TechnicianRealtimeContract.remoteSessionPeerJoinedEvent),
+      );
+    });
+
+    test('the payload is exactly { remoteSessionId }', () {
+      final notice = RemoteSessionActiveNoticeDto.fromEvent({
+        'remoteSessionId': sessionId,
+      });
+
+      expect(notice, isNotNull);
+      expect(notice!.remoteSessionId, sessionId);
+      expect(notice.props, [sessionId]);
+    });
+
+    test('it carries no session object: it is a trigger, not the state', () {
+      // Even a backend that one day added fields would change nothing: the
+      // console reads `connectedAt` and `status` from REST.
+      final notice = RemoteSessionActiveNoticeDto.fromEvent({
+        'remoteSessionId': sessionId,
+        'status': 'ACTIVE',
+        'connectedAt': '2026-03-11T09:35:12.000Z',
+      });
+
+      expect(notice!.props, [sessionId]);
+    });
+
+    test('an invalid payload is ignored', () {
+      for (final data in <Object?>[
+        null,
+        'active',
+        42,
+        <String, Object?>{},
+        {'status': 'ACTIVE'},
+        {'remoteSessionId': 42},
+        {'remoteSessionId': null},
+        {'remoteSessionId': '  '},
+      ]) {
+        expect(RemoteSessionActiveNoticeDto.fromEvent(data), isNull);
+      }
+    });
+
+    test('it reads the same id field as the rest of the namespace', () {
+      final notice = RemoteSessionActiveNoticeDto.fromEvent({
+        TechnicianRealtimeContract.remoteSessionIdField: sessionId,
+      });
+
+      expect(notice!.remoteSessionId, sessionId);
     });
   });
 

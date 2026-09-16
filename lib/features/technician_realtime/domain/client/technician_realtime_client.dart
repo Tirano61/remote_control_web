@@ -1,4 +1,5 @@
 import '../entities/join_remote_session_result.dart';
+import '../entities/remote_session_active_notice.dart';
 import '../entities/remote_session_closed_notice.dart';
 import '../entities/remote_session_peer_joined_notice.dart';
 import '../entities/technician_realtime_status.dart';
@@ -28,6 +29,12 @@ abstract interface class TechnicianRealtimeClient {
   /// They require no join: the backend addresses the private room the socket
   /// entered when it authenticated.
   Stream<RemoteSessionClosedNotice> get remoteSessionClosed;
+
+  /// `remote-session:active` notifications addressed to this technician.
+  ///
+  /// Like the closed one, it requires no join and is a trigger rather than a
+  /// state: what the session became is read from REST.
+  Stream<RemoteSessionActiveNotice> get remoteSessionActivated;
 
   /// Opens the namespace with the User JWT that is valid right now.
   ///

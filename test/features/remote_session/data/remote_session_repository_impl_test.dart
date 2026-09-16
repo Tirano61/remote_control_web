@@ -29,10 +29,12 @@ void main() {
 
       await repository.loadCurrent();
       await repository.create(supportRequestId: requestId);
+      await repository.activate(id: remoteSessionId);
       await repository.close(id: remoteSessionId);
 
       expect(remote.currentTokens, ['user-jwt']);
       expect(remote.createCalls.single.token, 'user-jwt');
+      expect(remote.activateCalls.single.token, 'user-jwt');
       expect(remote.closeCalls.single.token, 'user-jwt');
     });
 
@@ -141,6 +143,79 @@ void main() {
       final message = (result as Failed<RemoteSession>).failure.message;
       expect(message, isNot(contains('409')));
       expect(message, isNot(contains('Exception')));
+    });
+  });
+
+  group('activate', () {
+    test('activates by id and answers the ACTIVE session', () async {
+      final result = await repository.activate(id: remoteSessionId);
+
+      expect(remote.activateCalls.single.id, remoteSessionId);
+      final session = (result as Success<RemoteSession>).value;
+      expect(session.status, RemoteSessionStatus.active);
+      expect(session.connectedAt, isNotNull);
+    });
+
+    test('a network failure becomes a NetworkFailure', () async {
+      remote.activateError = const NetworkApiException();
+
+      final result = await repository.activate(id: remoteSessionId);
+
+      expect((result as Failed<RemoteSession>).failure, isA<NetworkFailure>());
+    });
+
+    test('401 becomes an AuthFailure', () async {
+      remote.activateError = const HttpApiException(401);
+
+      final result = await repository.activate(id: remoteSessionId);
+
+      expect((result as Failed<RemoteSession>).failure, isA<AuthFailure>());
+    });
+
+    test('403 becomes a ForbiddenFailure', () async {
+      remote.activateError = const HttpApiException(403);
+
+      final result = await repository.activate(id: remoteSessionId);
+
+      expect((result as Failed<RemoteSession>).failure, isA<ForbiddenFailure>());
+    });
+
+    test('404 becomes a NotFoundFailure', () async {
+      remote.activateError = const HttpApiException(404);
+
+      final result = await repository.activate(id: remoteSessionId);
+
+      expect((result as Failed<RemoteSession>).failure, isA<NotFoundFailure>());
+    });
+
+    test('409 becomes a ConflictFailure', () async {
+      remote.activateError = const HttpApiException(409);
+
+      final result = await repository.activate(id: remoteSessionId);
+
+      final failure = (result as Failed<RemoteSession>).failure;
+      expect(failure, isA<ConflictFailure>());
+      expect(failure.message, kActivateConflictMessage);
+    });
+
+    test('5xx becomes a ServerFailure', () async {
+      remote.activateError = const HttpApiException(500);
+
+      final result = await repository.activate(id: remoteSessionId);
+
+      expect((result as Failed<RemoteSession>).failure, isA<ServerFailure>());
+    });
+
+    test('no status code or technical detail reaches the message', () async {
+      for (final statusCode in [401, 403, 404, 409, 500]) {
+        remote.activateError = HttpApiException(statusCode);
+
+        final result = await repository.activate(id: remoteSessionId);
+
+        final message = (result as Failed<RemoteSession>).failure.message;
+        expect(message, isNot(contains('$statusCode')));
+        expect(message, isNot(contains('Exception')));
+      }
     });
   });
 

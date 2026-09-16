@@ -18,6 +18,21 @@ const String kCreateConflictMessage =
     'No se pudo iniciar la asistencia. Puede que el dispositivo esté '
     'desconectado o que la solicitud ya no sea válida.';
 
+/// Shown when `POST /remote-sessions/:id/activate` is refused with a `409`.
+///
+/// It means the session stopped being activable — it was closed concurrently,
+/// most often by the tablet — so the console reconciles with REST and only
+/// shows this if something is still there afterwards.
+const String kActivateConflictMessage =
+    'La asistencia ya no podía activarse.';
+
+/// Shown when the activation could not be sent at all.
+///
+/// The peer connection is untouched by this: WebRTC is peer to peer and does
+/// not care that one REST call failed.
+const String kActivateFailedMessage =
+    'No se pudo confirmar el inicio de la asistencia.';
+
 /// Shown when `POST /remote-sessions/:id/close` is refused with a `409`.
 const String kCloseConflictMessage =
     'La asistencia ya no estaba activa.';
@@ -68,6 +83,20 @@ class RemoteSessionRepositoryImpl implements RemoteSessionRepository {
       _ => null,
     },
   );
+
+  @override
+  Future<Result<RemoteSession>> activate({required String id}) =>
+      _authenticated(
+        (token) => _remoteDataSource.activate(id: id, token: token),
+        overrides: (statusCode) => switch (statusCode) {
+          403 => const ForbiddenFailure(
+            'No tienes permisos para activar esta asistencia.',
+          ),
+          404 => const NotFoundFailure('La asistencia ya no existe.'),
+          409 => const ConflictFailure(kActivateConflictMessage),
+          _ => null,
+        },
+      );
 
   @override
   Future<Result<RemoteSession>> close({required String id}) => _authenticated(

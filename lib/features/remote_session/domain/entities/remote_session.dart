@@ -33,7 +33,8 @@ class RemoteSession extends Equatable {
   final RemoteSessionStatus status;
   final DateTime createdAt;
 
-  /// Set when the session reaches `ACTIVE`. No backend code path does that yet.
+  /// Stamped by the backend when the session reaches `ACTIVE`, with its own
+  /// clock. It is displayed as it arrives and never computed here.
   final DateTime? connectedAt;
 
   final DateTime? endedAt;
