@@ -21,6 +21,7 @@ import '../features/devices/presentation/bloc/devices/devices_bloc.dart';
 import '../features/remote_session/data/datasources/remote_sessions_remote_data_source.dart';
 import '../features/remote_session/data/repositories/remote_session_repository_impl.dart';
 import '../features/remote_session/domain/repositories/remote_session_repository.dart';
+import '../features/remote_session/domain/usecases/activate_remote_session.dart';
 import '../features/remote_session/domain/usecases/close_remote_session.dart';
 import '../features/remote_session/domain/usecases/create_remote_session.dart';
 import '../features/remote_session/domain/usecases/load_current_remote_session.dart';
@@ -161,6 +162,8 @@ class AppDependencies {
   late final CreateRemoteSession createRemoteSession = CreateRemoteSession(
     repository: remoteSessionRepository,
   );
+  late final ActivateRemoteSession activateRemoteSession =
+      ActivateRemoteSession(repository: remoteSessionRepository);
   late final CloseRemoteSession closeRemoteSession = CloseRemoteSession(
     repository: remoteSessionRepository,
   );
@@ -192,9 +195,12 @@ class AppDependencies {
   /// No first load is triggered here: the coordinator asks for it when the user
   /// session is authenticated, which is the only moment the answer means
   /// anything.
+  /// No activation is triggered here either: the coordinator decides it, once
+  /// the peer connection and the `control` channel are both usable.
   RemoteSessionBloc createRemoteSessionBloc() => RemoteSessionBloc(
     loadCurrentRemoteSession: loadCurrentRemoteSession,
     createRemoteSession: createRemoteSession,
+    activateRemoteSession: activateRemoteSession,
     closeRemoteSession: closeRemoteSession,
   );
 

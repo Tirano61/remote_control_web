@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_web/core/error/failure.dart';
 import 'package:remote_control_web/features/remote_session/data/repositories/remote_session_repository_impl.dart';
 import 'package:remote_control_web/features/remote_session/domain/entities/remote_session_status.dart';
+import 'package:remote_control_web/features/remote_session/domain/usecases/activate_remote_session.dart';
 import 'package:remote_control_web/features/remote_session/domain/usecases/close_remote_session.dart';
 import 'package:remote_control_web/features/remote_session/domain/usecases/create_remote_session.dart';
 import 'package:remote_control_web/features/remote_session/domain/usecases/load_current_remote_session.dart';
@@ -18,6 +19,7 @@ void main() {
   RemoteSessionBloc buildBloc() => RemoteSessionBloc(
     loadCurrentRemoteSession: LoadCurrentRemoteSession(repository: repository),
     createRemoteSession: CreateRemoteSession(repository: repository),
+    activateRemoteSession: ActivateRemoteSession(repository: repository),
     closeRemoteSession: CloseRemoteSession(repository: repository),
   );
 
@@ -220,6 +222,244 @@ void main() {
       bloc.add(const RemoteSessionCreateRequested('another-request'));
       await Future<void>.delayed(Duration.zero);
 
+      expect(repository.createdSupportRequestIds, isEmpty);
+      await bloc.close();
+    });
+  });
+
+  group('activate', () {
+    /// A bloc showing the live `CONNECTING` session the backend has.
+    Future<RemoteSessionBloc> connectedBloc() async {
+      repository.current = buildRemoteSession();
+      final bloc = buildBloc()..add(const RemoteSessionStarted());
+      await bloc.stream.firstWhere((state) => state is RemoteSessionConnecting);
+      return bloc;
+    }
+
+    test('a CONNECTING session becomes ACTIVE through REST', () async {
+      final bloc = await connectedBloc();
+
+      bloc.add(const RemoteSessionActivationRequested(remoteSessionId));
+      await bloc.stream.firstWhere((state) => state is RemoteSessionActive);
+
+      expect(repository.activatedIds, [remoteSessionId]);
+      // The POST answer is not taken as the state: current is read again.
+      expect(repository.currentCount, 2);
+      final session = bloc.state.session!;
+      expect(session.status, RemoteSessionStatus.active);
+      expect(session.connectedAt, isNotNull);
+      expect(bloc.state.failure, isNull);
+      await bloc.close();
+    });
+
+    test('the assistance stays visible while it is in flight', () async {
+      final bloc = await connectedBloc();
+      final gate = Completer<void>();
+      repository.activateGate = gate.future;
+
+      bloc.add(const RemoteSessionActivationRequested(remoteSessionId));
+      await bloc.stream.firstWhere((state) => state.isActivating);
+
+      // Not a loading screen: the session the technician is working on stays.
+      expect(bloc.state, isA<RemoteSessionConnecting>());
+      expect(bloc.state.session!.id, remoteSessionId);
+      expect(bloc.state.isActivating, isTrue);
+
+      gate.complete();
+      await bloc.stream.firstWhere((state) => state is RemoteSessionActive);
+      await bloc.close();
+    });
+
+    test('a second request while one is in flight is dropped', () async {
+      final bloc = await connectedBloc();
+      final gate = Completer<void>();
+      repository.activateGate = gate.future;
+
+      bloc.add(const RemoteSessionActivationRequested(remoteSessionId));
+      await bloc.stream.firstWhere((state) => state.isActivating);
+      bloc
+        ..add(const RemoteSessionActivationRequested(remoteSessionId))
+        ..add(const RemoteSessionActivationRequested(remoteSessionId));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(repository.activatedIds, [remoteSessionId]);
+
+      gate.complete();
+      await bloc.stream.firstWhere((state) => state is RemoteSessionActive);
+      expect(repository.activatedIds, [remoteSessionId]);
+      await bloc.close();
+    });
+
+    test('an ACTIVE session is never activated again', () async {
+      repository.current = buildRemoteSession(
+        status: RemoteSessionStatus.active,
+        connectedAt: DateTime.utc(2026, 3, 11, 9, 35, 12),
+      );
+      final bloc = buildBloc()..add(const RemoteSessionStarted());
+      await bloc.stream.firstWhere((state) => state is RemoteSessionActive);
+
+      bloc.add(const RemoteSessionActivationRequested(remoteSessionId));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(repository.activatedIds, isEmpty);
+      await bloc.close();
+    });
+
+    test('an id that is not the current session is ignored', () async {
+      final bloc = await connectedBloc();
+
+      bloc.add(const RemoteSessionActivationRequested('another-session'));
+      await Future<void>.delayed(Duration.zero);
+
+      // Ownership is never taken from the event: nothing is sent and the id
+      // is not adopted.
+      expect(repository.activatedIds, isEmpty);
+      expect(bloc.state.session!.id, remoteSessionId);
+      await bloc.close();
+    });
+
+    test('nothing is activated without a live session', () async {
+      repository.current = null;
+      final bloc = buildBloc()..add(const RemoteSessionStarted());
+      await bloc.stream.firstWhere((state) => state is RemoteSessionIdle);
+
+      bloc.add(const RemoteSessionActivationRequested(remoteSessionId));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(repository.activatedIds, isEmpty);
+      await bloc.close();
+    });
+
+    test('a 409 is reconciled with REST', () async {
+      final bloc = await connectedBloc();
+      repository
+        ..activateFailure = const ConflictFailure(kActivateConflictMessage)
+        // What the backend really has: the tablet closed it meanwhile.
+        ..current = null;
+
+      bloc.add(const RemoteSessionActivationRequested(remoteSessionId));
+      await bloc.stream.firstWhere((state) => state is RemoteSessionIdle);
+
+      expect(repository.activatedIds, [remoteSessionId]);
+      expect(repository.currentCount, 2);
+      // No fictional CONNECTING session is kept alive.
+      expect(bloc.state.hasLiveSession, isFalse);
+      await bloc.close();
+    });
+
+    test('a 409 whose session is still live shows what REST answers', () async {
+      final bloc = await connectedBloc();
+      repository
+        ..activateFailure = const ConflictFailure(kActivateConflictMessage)
+        ..current = buildRemoteSession(
+          status: RemoteSessionStatus.active,
+          connectedAt: DateTime.utc(2026, 3, 11, 9, 35, 12),
+        );
+
+      bloc.add(const RemoteSessionActivationRequested(remoteSessionId));
+      await bloc.stream.firstWhere((state) => state is RemoteSessionActive);
+
+      // It was activated by the race, not by this console. Not an error.
+      expect(bloc.state.failure, isNull);
+      expect(bloc.state.session!.connectedAt, isNotNull);
+      await bloc.close();
+    });
+
+    test('a 404 is reconciled the same way', () async {
+      final bloc = await connectedBloc();
+      repository
+        ..activateFailure = const NotFoundFailure()
+        ..current = null;
+
+      bloc.add(const RemoteSessionActivationRequested(remoteSessionId));
+      await bloc.stream.firstWhere((state) => state is RemoteSessionIdle);
+
+      expect(repository.currentCount, 2);
+      expect(bloc.state.hasLiveSession, isFalse);
+      await bloc.close();
+    });
+
+    test('a network failure keeps the session and offers a retry', () async {
+      final bloc = await connectedBloc();
+      repository.activateFailure = const NetworkFailure();
+
+      bloc.add(const RemoteSessionActivationRequested(remoteSessionId));
+      await bloc.stream.firstWhere((state) => state.failure != null);
+
+      // The peers are still connected; only the confirmation failed.
+      expect(bloc.state, isA<RemoteSessionConnecting>());
+      expect(bloc.state.session!.id, remoteSessionId);
+      expect(bloc.state.isActivating, isFalse);
+      expect(bloc.state.canRetryActivation, isTrue);
+      expect(bloc.state.failure!.message, kRemoteSessionActivationFailedNotice);
+      // Nothing was re-read: the failure never reached the backend.
+      expect(repository.currentCount, 1);
+      await bloc.close();
+    });
+
+    test('the offered retry activates again and succeeds', () async {
+      final bloc = await connectedBloc();
+      repository.activateFailure = const NetworkFailure();
+      bloc.add(const RemoteSessionActivationRequested(remoteSessionId));
+      await bloc.stream.firstWhere((state) => state.canRetryActivation);
+
+      repository.activateFailure = null;
+      bloc.add(const RemoteSessionActivationRequested(remoteSessionId));
+      await bloc.stream.firstWhere((state) => state is RemoteSessionActive);
+
+      expect(repository.activatedIds, [remoteSessionId, remoteSessionId]);
+      expect(bloc.state.session!.status, RemoteSessionStatus.active);
+      await bloc.close();
+    });
+
+    test('a 401 is reported as an AuthFailure for the console', () async {
+      final bloc = await connectedBloc();
+      repository.activateFailure = const AuthFailure();
+
+      bloc.add(const RemoteSessionActivationRequested(remoteSessionId));
+      await bloc.stream.firstWhere((state) => state.failure != null);
+
+      expect(bloc.state.lastFailure, isA<AuthFailure>());
+      // A rejected token is not something a retry could fix.
+      expect(bloc.state.canRetryActivation, isFalse);
+      await bloc.close();
+    });
+
+    test('a 403 is reported without inventing ownership', () async {
+      final bloc = await connectedBloc();
+      repository.activateFailure = const ForbiddenFailure();
+
+      bloc.add(const RemoteSessionActivationRequested(remoteSessionId));
+      await bloc.stream.firstWhere((state) => state.failure != null);
+
+      expect(bloc.state.failure, isA<ForbiddenFailure>());
+      expect(bloc.state.session!.id, remoteSessionId);
+      expect(bloc.state.canRetryActivation, isFalse);
+      await bloc.close();
+    });
+
+    test('dismissing the notice drops the retry offer with it', () async {
+      final bloc = await connectedBloc();
+      repository.activateFailure = const NetworkFailure();
+      bloc.add(const RemoteSessionActivationRequested(remoteSessionId));
+      await bloc.stream.firstWhere((state) => state.canRetryActivation);
+
+      bloc.add(const RemoteSessionNoticeDismissed());
+      await bloc.stream.firstWhere((state) => state.failure == null);
+
+      expect(bloc.state.canRetryActivation, isFalse);
+      expect(bloc.state, isA<RemoteSessionConnecting>());
+      await bloc.close();
+    });
+
+    test('activate, load current and close stay separate operations', () async {
+      final bloc = await connectedBloc();
+
+      bloc.add(const RemoteSessionActivationRequested(remoteSessionId));
+      await bloc.stream.firstWhere((state) => state is RemoteSessionActive);
+
+      expect(repository.activatedIds, [remoteSessionId]);
+      expect(repository.closedIds, isEmpty);
       expect(repository.createdSupportRequestIds, isEmpty);
       await bloc.close();
     });

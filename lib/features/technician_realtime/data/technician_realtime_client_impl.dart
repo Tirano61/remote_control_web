@@ -7,6 +7,7 @@ import '../../signaling/data/signaling_contract.dart';
 import '../../signaling/data/signaling_transport.dart';
 import '../domain/client/technician_realtime_client.dart';
 import '../domain/entities/join_remote_session_result.dart';
+import '../domain/entities/remote_session_active_notice.dart';
 import '../domain/entities/remote_session_closed_notice.dart';
 import '../domain/entities/remote_session_peer_joined_notice.dart';
 import '../domain/entities/signaling_error_code.dart';
@@ -15,6 +16,7 @@ import 'gateway/realtime_connect_error.dart';
 import 'gateway/realtime_socket_gateway.dart';
 import 'gateway/socket_io_realtime_socket_gateway.dart';
 import 'models/join_remote_session_ack_dto.dart';
+import 'models/remote_session_active_notice_dto.dart';
 import 'models/remote_session_closed_notice_dto.dart';
 import 'models/remote_session_peer_joined_dto.dart';
 import 'realtime_contract.dart';
@@ -69,6 +71,8 @@ class TechnicianRealtimeClientImpl
       StreamController<TechnicianRealtimeStatus>.broadcast();
   final StreamController<RemoteSessionClosedNotice> _closedController =
       StreamController<RemoteSessionClosedNotice>.broadcast();
+  final StreamController<RemoteSessionActiveNotice> _activeController =
+      StreamController<RemoteSessionActiveNotice>.broadcast();
   final StreamController<RemoteSessionPeerJoinedNotice> _peerJoinedController =
       StreamController<RemoteSessionPeerJoinedNotice>.broadcast();
 
@@ -102,6 +106,10 @@ class TechnicianRealtimeClientImpl
   @override
   Stream<RemoteSessionClosedNotice> get remoteSessionClosed =>
       _closedController.stream;
+
+  @override
+  Stream<RemoteSessionActiveNotice> get remoteSessionActivated =>
+      _activeController.stream;
 
   @override
   Stream<RemoteSessionPeerJoinedNotice> get peerJoined =>
@@ -195,6 +203,16 @@ class TechnicianRealtimeClientImpl
       if (!_peerJoinedController.isClosed) _peerJoinedController.add(notice);
     });
 
+    gateway.onEvent(TechnicianRealtimeContract.remoteSessionActiveEvent, (
+      data,
+    ) {
+      if (!identical(_gateway, gateway)) return;
+      final notice = RemoteSessionActiveNoticeDto.fromEvent(data);
+      if (notice == null) return;
+      logDebug('remote-session:active received ${notice.remoteSessionId}');
+      if (!_activeController.isClosed) _activeController.add(notice);
+    });
+
     gateway.onEvent(TechnicianRealtimeContract.remoteSessionClosedEvent, (
       data,
     ) {
@@ -281,6 +299,7 @@ class TechnicianRealtimeClientImpl
     _teardown();
     await _statusController.close();
     await _closedController.close();
+    await _activeController.close();
     await _peerJoinedController.close();
     await _signalingController.close();
   }

@@ -4,6 +4,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../../../../core/error/failure.dart';
 import '../../../../../core/error/result.dart';
 import '../../../domain/entities/remote_session.dart';
+import '../../../domain/usecases/activate_remote_session.dart';
 import '../../../domain/usecases/close_remote_session.dart';
 import '../../../domain/usecases/create_remote_session.dart';
 import '../../../domain/usecases/load_current_remote_session.dart';
@@ -20,27 +21,44 @@ const String kRemoteSessionRefreshFailedNotice =
 const String kRemoteSessionStillLiveNotice =
     'La asistencia sigue activa. Vuelve a intentarlo.';
 
+/// Shown when the activation could not be confirmed with the backend.
+///
+/// The wording is deliberate: the remote connection itself is fine — it is the
+/// confirmation that did not get through — and it can be retried.
+const String kRemoteSessionActivationFailedNotice =
+    'La conexión con el dispositivo está establecida, pero no se pudo '
+    'confirmar el inicio de la asistencia.';
+
 /// Owns the remote session of the signed-in technician.
 ///
 /// REST is the source of truth. The BLoC never promotes a session to `CLOSED`
-/// on its own and never invents `ACTIVE`: every transition it shows came from
-/// `GET /remote-sessions/current`, `POST /remote-sessions` or
-/// `POST /remote-sessions/:id/close`.
+/// or to `ACTIVE` on its own: every transition it shows came from
+/// `GET /remote-sessions/current`, `POST /remote-sessions`,
+/// `POST /remote-sessions/:id/activate` or `POST /remote-sessions/:id/close`.
+///
+/// The four operations are kept apart on purpose — create, load current,
+/// activate and close fail differently and are recovered differently — and
+/// none of them replaces a visible assistance with an empty loading screen.
 ///
 /// Socket.IO is deliberately absent from this class. Realtime only triggers a
-/// [RemoteSessionRefreshRequested]; it never carries the state itself.
+/// [RemoteSessionRefreshRequested]; it never carries the state itself. WebRTC
+/// is absent too: whether the peers reached each other is decided elsewhere
+/// and arrives here only as a [RemoteSessionActivationRequested].
 class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
   RemoteSessionBloc({
     required LoadCurrentRemoteSession loadCurrentRemoteSession,
     required CreateRemoteSession createRemoteSession,
+    required ActivateRemoteSession activateRemoteSession,
     required CloseRemoteSession closeRemoteSession,
   }) : _loadCurrentRemoteSession = loadCurrentRemoteSession,
        _createRemoteSession = createRemoteSession,
+       _activateRemoteSession = activateRemoteSession,
        _closeRemoteSession = closeRemoteSession,
        super(const RemoteSessionInitial()) {
     on<RemoteSessionStarted>(_onStarted);
     on<RemoteSessionRefreshRequested>(_onRefreshRequested);
     on<RemoteSessionCreateRequested>(_onCreateRequested);
+    on<RemoteSessionActivationRequested>(_onActivationRequested);
     on<RemoteSessionCloseRequested>(_onCloseRequested);
     on<RemoteSessionNoticeDismissed>(_onNoticeDismissed);
     on<RemoteSessionCleared>(_onCleared);
@@ -48,6 +66,7 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
 
   final LoadCurrentRemoteSession _loadCurrentRemoteSession;
   final CreateRemoteSession _createRemoteSession;
+  final ActivateRemoteSession _activateRemoteSession;
   final CloseRemoteSession _closeRemoteSession;
 
   /// Events are processed concurrently by default, so a refresh arriving while
@@ -104,6 +123,59 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     }
   }
 
+  /// `POST /remote-sessions/:id/activate`.
+  ///
+  /// The assistance stays on screen throughout: this is a confirmation sent
+  /// while the technician is already working, not a page transition.
+  Future<void> _onActivationRequested(
+    RemoteSessionActivationRequested event,
+    Emitter<RemoteSessionState> emit,
+  ) async {
+    final current = state;
+    // Only a `CONNECTING` session is activable. An `ACTIVE` one is already
+    // where the backend would put it, so no request is even sent; and a
+    // session that is not live is not this technician's business any more.
+    if (current is! RemoteSessionConnecting) return;
+    // An id is never adopted from outside: the activation has to name the
+    // session REST gave us, or it is about something else entirely.
+    if (current.session.id != event.remoteSessionId) return;
+    // One activation at a time. The backend is idempotent, but a second
+    // request while the first is unanswered buys nothing.
+    if (current.isActivating) return;
+
+    final session = current.session;
+    emit(RemoteSessionState.fromSession(session, isActivating: true));
+
+    final result = await _activateRemoteSession(remoteSessionId: session.id);
+
+    switch (result) {
+      case Success<RemoteSession>():
+        // The response already carries the `ACTIVE` session, but REST stays
+        // the source of truth: ask for the current one instead of assuming.
+        await _loadCurrent(emit);
+      case Failed<RemoteSession>(:final failure):
+        if (failure is ConflictFailure || failure is NotFoundFailure) {
+          // The session stopped being activable — closed concurrently by the
+          // tablet, most likely. Reconcile instead of keeping a state the
+          // backend has already moved on from.
+          await _reconcileAfterActivationConflict(emit, conflict: failure);
+        } else {
+          // Everything else — a network failure above all — leaves the
+          // assistance exactly as it was. The peers are still connected; only
+          // the confirmation did not get through, and it can be retried.
+          emit(
+            RemoteSessionState.fromSession(
+              session,
+              failure: failure is NetworkFailure
+                  ? const NetworkFailure(kRemoteSessionActivationFailedNotice)
+                  : failure,
+              canRetryActivation: _isRetryable(failure),
+            ),
+          );
+        }
+    }
+  }
+
   Future<void> _onCloseRequested(
     RemoteSessionCloseRequested event,
     Emitter<RemoteSessionState> emit,
@@ -114,7 +186,15 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     if (current.isClosing) return;
 
     final session = current.session;
-    emit(RemoteSessionState.fromSession(session, isClosing: true));
+    // An activation that is still in flight keeps its flag: closing does not
+    // make its guard disappear.
+    emit(
+      RemoteSessionState.fromSession(
+        session,
+        isClosing: true,
+        isActivating: current.isActivating,
+      ),
+    );
 
     final result = await _closeRemoteSession(remoteSessionId: session.id);
 
@@ -141,10 +221,13 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     final current = state;
     if (current.failure == null) return;
     if (current is RemoteSessionLive) {
+      // The retry offer goes with the banner it belonged to; what is in
+      // flight does not.
       emit(
         RemoteSessionState.fromSession(
           current.session,
           isClosing: current.isClosing,
+          isActivating: current.isActivating,
         ),
       );
     } else if (current is RemoteSessionIdle) {
@@ -209,6 +292,36 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     }
   }
 
+  /// A refused activation is never turned into a local state: REST is asked
+  /// what the session really is now.
+  Future<void> _reconcileAfterActivationConflict(
+    Emitter<RemoteSessionState> emit, {
+    required Failure conflict,
+  }) async {
+    final previous = state;
+    final result = await _readCurrent();
+
+    switch (result) {
+      case Success<RemoteSession?>(:final value):
+        // Gone: the assistance is over, whatever the console still had on
+        // screen. No fictional `CONNECTING` session is kept alive.
+        emit(
+          value == null
+              ? const RemoteSessionIdle()
+              : RemoteSessionState.fromSession(value),
+        );
+      case Failed<RemoteSession?>(:final failure):
+        // A rejected token must reach the console; anything else is reported
+        // as the refusal that started this.
+        emit(
+          _preservingKnownState(
+            previous,
+            failure is AuthFailure ? failure : conflict,
+          ),
+        );
+    }
+  }
+
   Future<void> _reconcileAfterCloseConflict(
     Emitter<RemoteSessionState> emit, {
     required RemoteSession session,
@@ -240,6 +353,13 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
       _isLoading = false;
     }
   }
+
+  /// Whether a new attempt could plausibly succeed.
+  ///
+  /// Only transport level problems qualify. A refusal is a backend decision
+  /// and a rejected token needs a new login, so neither offers a retry.
+  static bool _isRetryable(Failure failure) =>
+      failure is NetworkFailure || failure is ServerFailure;
 
   /// Keeps the last known session visible when the backend could not be read.
   RemoteSessionState _preservingKnownState(

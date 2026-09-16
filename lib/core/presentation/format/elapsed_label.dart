@@ -25,3 +25,14 @@ String shortTimestamp(DateTime value) {
   return '${two(local.day)}/${two(local.month)} '
       '${two(local.hour)}:${two(local.minute)}';
 }
+
+/// Time of day in the browser local time zone, as `HH:mm`.
+///
+/// Used for backend stamped instants such as `RemoteSession.connectedAt`. The
+/// value always comes from the backend: the console never computes the moment
+/// an assistance started.
+String timeOfDay(DateTime value) {
+  final local = value.toLocal();
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${two(local.hour)}:${two(local.minute)}';
+}

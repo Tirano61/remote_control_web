@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_web/app/console/technician_console_coordinator.dart';
 import 'package:remote_control_web/core/error/failure.dart';
@@ -5,7 +7,9 @@ import 'package:remote_control_web/features/auth/domain/usecases/log_out.dart';
 import 'package:remote_control_web/features/auth/domain/usecases/restore_session.dart';
 import 'package:remote_control_web/features/auth/data/repositories/auth_repository_impl.dart';
 import 'package:remote_control_web/features/auth/presentation/bloc/user_session/user_session_bloc.dart';
+import 'package:remote_control_web/features/remote_session/data/repositories/remote_session_repository_impl.dart';
 import 'package:remote_control_web/features/remote_session/domain/entities/remote_session_status.dart';
+import 'package:remote_control_web/features/remote_session/domain/usecases/activate_remote_session.dart';
 import 'package:remote_control_web/features/remote_session/domain/usecases/close_remote_session.dart';
 import 'package:remote_control_web/features/remote_session/domain/usecases/create_remote_session.dart';
 import 'package:remote_control_web/features/remote_session/domain/usecases/load_current_remote_session.dart';
@@ -81,6 +85,7 @@ void main() {
         repository: remoteSessions,
       ),
       createRemoteSession: CreateRemoteSession(repository: remoteSessions),
+      activateRemoteSession: ActivateRemoteSession(repository: remoteSessions),
       closeRemoteSession: CloseRemoteSession(repository: remoteSessions),
     );
     realtimeBloc = TechnicianRealtimeBloc(client: realtime);
@@ -420,6 +425,343 @@ void main() {
 
       expect(peers.last.isClosed, isTrue);
       expect(webRtcSessionBloc.state, isA<WebRtcIdle>());
+    });
+  });
+
+  group('RemoteSession activation', () {
+    /// A console with a live `CONNECTING` session and a negotiation under way:
+    /// socket up, room joined, tablet inside, offer relayed.
+    Future<void> signInNegotiating() async {
+      remoteSessions.current = buildRemoteSession();
+      supportRequests.requests = [buildSupportRequest()];
+      realtime.peerJoinedOnJoin = true;
+      await signIn();
+      realtime.emitConnected();
+      await settle();
+      realtime.answerRelayAck({
+        'delivered': true,
+        'remoteSessionId': remoteSessionId,
+      });
+      await settle();
+      expect(peers.sessions, hasLength(1));
+    }
+
+    /// The peers reached each other and the control channel is usable.
+    Future<void> establishWebRtc() async {
+      peers.last
+        ..emitPeerState(WebRtcPeerConnectionState.connected)
+        ..emitControlChannelState(WebRtcDataChannelState.open);
+      await settle();
+    }
+
+    test('a negotiating session is not activated', () async {
+      await signInNegotiating();
+
+      // Joined, peer ready, offer delivered: none of that is a connection.
+      expect(webRtcSessionBloc.state.isConnected, isFalse);
+      expect(remoteSessions.activatedIds, isEmpty);
+      expect(remoteSessionBloc.state, isA<RemoteSessionConnecting>());
+    });
+
+    test('a connected peer with a channel still opening is not enough', () async {
+      await signInNegotiating();
+
+      peers.last
+        ..emitControlChannelState(WebRtcDataChannelState.connecting)
+        ..emitPeerState(WebRtcPeerConnectionState.connected);
+      await settle();
+
+      expect(webRtcSessionBloc.state, isA<WebRtcConnected>());
+      expect(webRtcSessionBloc.state.isControlChannelOpen, isFalse);
+      expect(remoteSessions.activatedIds, isEmpty);
+    });
+
+    test('an open channel without a connected peer is not enough', () async {
+      await signInNegotiating();
+
+      // The data channel can report `open` while ICE is still settling.
+      peers.last.emitControlChannelState(WebRtcDataChannelState.open);
+      await settle();
+
+      expect(webRtcSessionBloc.state.isControlChannelOpen, isTrue);
+      expect(webRtcSessionBloc.state.isConnected, isFalse);
+      expect(remoteSessions.activatedIds, isEmpty);
+    });
+
+    test('both conditions together activate exactly once', () async {
+      await signInNegotiating();
+
+      await establishWebRtc();
+
+      expect(remoteSessions.activatedIds, [remoteSessionId]);
+      expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
+      expect(remoteSessionBloc.state.session!.connectedAt, isNotNull);
+    });
+
+    test('the channel opening last activates just as well', () async {
+      await signInNegotiating();
+
+      peers.last.emitPeerState(WebRtcPeerConnectionState.connected);
+      await settle();
+      expect(remoteSessions.activatedIds, isEmpty);
+
+      peers.last.emitControlChannelState(WebRtcDataChannelState.open);
+      await settle();
+
+      expect(remoteSessions.activatedIds, [remoteSessionId]);
+    });
+
+    test('repeated events and refreshes never activate twice', () async {
+      await signInNegotiating();
+      await establishWebRtc();
+
+      peers.last
+        ..emitPeerState(WebRtcPeerConnectionState.connected)
+        ..emitPeerState(WebRtcPeerConnectionState.connected)
+        ..emitControlChannelState(WebRtcDataChannelState.open)
+        ..emitControlChannelState(WebRtcDataChannelState.open);
+      remoteSessionBloc.add(const RemoteSessionRefreshRequested());
+      realtime.emitPeerJoined(remoteSessionId);
+      await settle();
+
+      expect(remoteSessions.activatedIds, [remoteSessionId]);
+    });
+
+    test('a session already ACTIVE is never activated', () async {
+      remoteSessions.current = buildRemoteSession(
+        status: RemoteSessionStatus.active,
+        connectedAt: DateTime.utc(2026, 3, 11, 9, 35, 12),
+      );
+      realtime.peerJoinedOnJoin = true;
+      await signIn();
+      realtime.emitConnected();
+      await settle();
+      realtime.answerRelayAck({
+        'delivered': true,
+        'remoteSessionId': remoteSessionId,
+      });
+      await settle();
+
+      await establishWebRtc();
+
+      expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
+      expect(remoteSessions.activatedIds, isEmpty);
+    });
+
+    test('REST decides the state, not the activate response', () async {
+      await signInNegotiating();
+      final readsBefore = remoteSessions.currentCount;
+
+      await establishWebRtc();
+
+      // POST /activate, then GET /remote-sessions/current.
+      expect(remoteSessions.activatedIds, [remoteSessionId]);
+      expect(remoteSessions.currentCount, readsBefore + 1);
+      expect(remoteSessionBloc.state.session!.status,
+          RemoteSessionStatus.active);
+    });
+
+    test('a 409 is reconciled with REST', () async {
+      await signInNegotiating();
+      remoteSessions
+        ..activateFailure = const ConflictFailure(kActivateConflictMessage)
+        // Closed concurrently by the tablet while the peers were connecting.
+        ..current = null;
+
+      await establishWebRtc();
+
+      expect(remoteSessions.activatedIds, [remoteSessionId]);
+      // No fictional CONNECTING session survives.
+      expect(remoteSessionBloc.state, isA<RemoteSessionIdle>());
+      expect(remoteSessionBloc.state.hasLiveSession, isFalse);
+    });
+
+    test('a network failure preserves the peer connection', () async {
+      await signInNegotiating();
+      remoteSessions.activateFailure = const NetworkFailure();
+
+      await establishWebRtc();
+
+      expect(remoteSessions.activatedIds, [remoteSessionId]);
+      // P2P is untouched: WebRTC does not care that one REST call failed.
+      expect(peers.last.isClosed, isFalse);
+      expect(webRtcSessionBloc.state, isA<WebRtcConnected>());
+      expect(webRtcSessionBloc.state.isControlChannelOpen, isTrue);
+      // And the assistance is still the one the backend gave us.
+      expect(remoteSessionBloc.state, isA<RemoteSessionConnecting>());
+      expect(remoteSessionBloc.state.session!.id, remoteSessionId);
+      expect(remoteSessionBloc.state.canRetryActivation, isTrue);
+    });
+
+    test('a failed activation is not retried by the next state change', () async {
+      await signInNegotiating();
+      remoteSessions.activateFailure = const NetworkFailure();
+      await establishWebRtc();
+      expect(remoteSessions.activatedIds, hasLength(1));
+
+      // Everything that would re-evaluate readiness: no retry loop.
+      remoteSessionBloc.add(const RemoteSessionRefreshRequested());
+      realtime.emitPeerJoined(remoteSessionId);
+      peers.last.emitPeerState(WebRtcPeerConnectionState.connected);
+      await settle();
+
+      expect(remoteSessions.activatedIds, hasLength(1));
+    });
+
+    test('a peer connection that comes back gets a new attempt', () async {
+      await signInNegotiating();
+      remoteSessions.activateFailure = const NetworkFailure();
+      await establishWebRtc();
+      expect(remoteSessions.activatedIds, hasLength(1));
+
+      // The connection blinked and recovered: a genuinely new episode.
+      peers.last.emitPeerState(WebRtcPeerConnectionState.disconnected);
+      await settle();
+      remoteSessions.activateFailure = null;
+      peers.last.emitPeerState(WebRtcPeerConnectionState.connected);
+      await settle();
+
+      expect(remoteSessions.activatedIds, hasLength(2));
+      expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
+    });
+
+    test('a 401 ends the user session', () async {
+      await signInNegotiating();
+      remoteSessions.activateFailure = const AuthFailure();
+
+      await establishWebRtc();
+
+      expect(userSessionBloc.state, isA<UserSessionUnauthenticated>());
+      expect(realtime.disconnectCount, 1);
+    });
+
+    test('a socket that dropped does not prevent the activation', () async {
+      await signInNegotiating();
+      peers.last.emitPeerState(WebRtcPeerConnectionState.connected);
+      await settle();
+
+      // Signaling is gone, the peers are not: /activate is REST.
+      realtime.emitReconnecting();
+      await settle();
+      peers.last.emitControlChannelState(WebRtcDataChannelState.open);
+      await settle();
+
+      expect(peers.last.isClosed, isFalse);
+      expect(remoteSessions.activatedIds, [remoteSessionId]);
+    });
+
+    test('an assistance that ends forgets the activation guard', () async {
+      await signInNegotiating();
+      await establishWebRtc();
+      expect(remoteSessions.activatedIds, hasLength(1));
+
+      remoteSessions.current = null;
+      realtime.emitRemoteSessionClosed(remoteSessionId);
+      await settle();
+
+      expect(remoteSessionBloc.state.hasLiveSession, isFalse);
+      expect(peers.last.isClosed, isTrue);
+      // Nothing was activated on the way out.
+      expect(remoteSessions.activatedIds, hasLength(1));
+    });
+  });
+
+  group('remote-session:active', () {
+    Future<void> signInWithConnectingSession() async {
+      remoteSessions.current = buildRemoteSession();
+      await signIn();
+      realtime.emitConnected();
+      await settle();
+    }
+
+    test('triggers a REST reconciliation instead of mutating the state', () async {
+      await signInWithConnectingSession();
+      expect(remoteSessionBloc.state, isA<RemoteSessionConnecting>());
+      final readsBefore = remoteSessions.currentCount;
+
+      // What the backend really has when it emits the event.
+      remoteSessions.current = buildRemoteSession(
+        status: RemoteSessionStatus.active,
+        connectedAt: DateTime.utc(2026, 3, 11, 9, 35, 12),
+      );
+      realtime.emitRemoteSessionActive(remoteSessionId);
+      await settle();
+
+      expect(remoteSessions.currentCount, readsBefore + 1);
+      expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
+      expect(remoteSessionBloc.state.session!.connectedAt, isNotNull);
+    });
+
+    test('the event alone never promotes the session', () async {
+      await signInWithConnectingSession();
+
+      // The backend still answers CONNECTING — the event is not the state.
+      realtime.emitRemoteSessionActive(remoteSessionId);
+      await settle();
+
+      expect(remoteSessionBloc.state, isA<RemoteSessionConnecting>());
+      expect(remoteSessionBloc.state.session!.connectedAt, isNull);
+    });
+
+    test('an event for another session is ignored', () async {
+      await signInWithConnectingSession();
+      final readsBefore = remoteSessions.currentCount;
+
+      realtime.emitRemoteSessionActive('another-session');
+      await settle();
+
+      // Its id is never adopted, and nothing is re-read for it.
+      expect(remoteSessions.currentCount, readsBefore);
+      expect(remoteSessionBloc.state.session!.id, remoteSessionId);
+    });
+
+    test('the echo of our own activation costs no extra request', () async {
+      remoteSessions.current = buildRemoteSession();
+      realtime.peerJoinedOnJoin = true;
+      await signIn();
+      realtime.emitConnected();
+      await settle();
+      realtime.answerRelayAck({
+        'delivered': true,
+        'remoteSessionId': remoteSessionId,
+      });
+      await settle();
+
+      final gate = Completer<void>();
+      remoteSessions.activateGate = gate.future;
+      peers.last
+        ..emitPeerState(WebRtcPeerConnectionState.connected)
+        ..emitControlChannelState(WebRtcDataChannelState.open);
+      await settle();
+      final readsBefore = remoteSessions.currentCount;
+
+      // The backend emits the event to us as well, while our POST is still
+      // unanswered. Its own response already ends in a GET current.
+      realtime.emitRemoteSessionActive(remoteSessionId);
+      await settle();
+      expect(remoteSessions.currentCount, readsBefore);
+
+      gate.complete();
+      await settle();
+
+      expect(remoteSessions.currentCount, readsBefore + 1);
+      expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
+    });
+
+    test('an already ACTIVE session is not re-read', () async {
+      remoteSessions.current = buildRemoteSession(
+        status: RemoteSessionStatus.active,
+        connectedAt: DateTime.utc(2026, 3, 11, 9, 35, 12),
+      );
+      await signIn();
+      realtime.emitConnected();
+      await settle();
+      final readsBefore = remoteSessions.currentCount;
+
+      realtime.emitRemoteSessionActive(remoteSessionId);
+      await settle();
+
+      expect(remoteSessions.currentCount, readsBefore);
     });
   });
 

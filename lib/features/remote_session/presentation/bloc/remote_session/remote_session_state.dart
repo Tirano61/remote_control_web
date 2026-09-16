@@ -11,12 +11,16 @@ sealed class RemoteSessionState extends Equatable {
   static RemoteSessionState fromSession(
     RemoteSession session, {
     bool isClosing = false,
+    bool isActivating = false,
+    bool canRetryActivation = false,
     Failure? failure,
   }) {
     if (session.isConnecting) {
       return RemoteSessionConnecting(
         session: session,
         isClosing: isClosing,
+        isActivating: isActivating,
+        canRetryActivation: canRetryActivation,
         failure: failure,
       );
     }
@@ -42,6 +46,18 @@ sealed class RemoteSessionState extends Equatable {
 
   /// Whether an assistance is currently open for this technician.
   bool get hasLiveSession => session?.isLive ?? false;
+
+  /// Whether `POST /remote-sessions/:id/activate` is in flight.
+  ///
+  /// It is watched by the console, which must not ask for a second activation
+  /// while one is still unanswered.
+  bool get isActivating => false;
+
+  /// Whether the last activation failed in a way a new attempt could fix.
+  ///
+  /// Only a transport level problem qualifies. A refused activation is a
+  /// backend decision and is reconciled instead of retried.
+  bool get canRetryActivation => false;
 
   /// Whether a REST call of this feature is in flight.
   bool get isBusy => false;
@@ -106,24 +122,44 @@ sealed class RemoteSessionLive extends RemoteSessionState {
   final Failure? failure;
 
   @override
-  bool get isBusy => isClosing;
+  bool get isBusy => isClosing || isActivating;
 
   @override
-  List<Object?> get props => [session, isClosing, failure];
+  List<Object?> get props => [
+    session,
+    isClosing,
+    isActivating,
+    canRetryActivation,
+    failure,
+  ];
 }
 
 /// `CONNECTING` — the session exists and both ends may start connecting.
+///
+/// This is also the only status that can be activated, which is why it is the
+/// only one carrying the activation flags: an `ACTIVE` session is already
+/// where `POST /remote-sessions/:id/activate` would put it.
 final class RemoteSessionConnecting extends RemoteSessionLive {
   const RemoteSessionConnecting({
     required super.session,
     super.isClosing,
+    this.isActivating = false,
+    this.canRetryActivation = false,
     super.failure,
   });
+
+  @override
+  final bool isActivating;
+
+  @override
+  final bool canRetryActivation;
 }
 
-/// `ACTIVE` — reserved by the backend; no code path sets it today.
+/// `ACTIVE` — the assistance is running: the technician reached the device.
 ///
-/// It is rendered if it ever arrives, and never simulated locally.
+/// Only the backend produces it, through `POST /remote-sessions/:id/activate`
+/// and the `GET /remote-sessions/current` that follows. It is never simulated
+/// locally, and `connectedAt` is never computed here.
 final class RemoteSessionActive extends RemoteSessionLive {
   const RemoteSessionActive({
     required super.session,

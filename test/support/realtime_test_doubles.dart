@@ -4,6 +4,7 @@ import 'package:remote_control_web/features/signaling/data/signaling_transport.d
 import 'package:remote_control_web/features/technician_realtime/data/gateway/realtime_socket_gateway.dart';
 import 'package:remote_control_web/features/technician_realtime/domain/client/technician_realtime_client.dart';
 import 'package:remote_control_web/features/technician_realtime/domain/entities/join_remote_session_result.dart';
+import 'package:remote_control_web/features/technician_realtime/domain/entities/remote_session_active_notice.dart';
 import 'package:remote_control_web/features/technician_realtime/domain/entities/remote_session_closed_notice.dart';
 import 'package:remote_control_web/features/technician_realtime/domain/entities/remote_session_peer_joined_notice.dart';
 import 'package:remote_control_web/features/technician_realtime/domain/entities/technician_realtime_status.dart';
@@ -21,6 +22,8 @@ class FakeTechnicianRealtimeClient
       StreamController<TechnicianRealtimeStatus>.broadcast();
   final StreamController<RemoteSessionClosedNotice> _closedController =
       StreamController<RemoteSessionClosedNotice>.broadcast();
+  final StreamController<RemoteSessionActiveNotice> _activeController =
+      StreamController<RemoteSessionActiveNotice>.broadcast();
   final StreamController<RemoteSessionPeerJoinedNotice> _peerJoinedController =
       StreamController<RemoteSessionPeerJoinedNotice>.broadcast();
 
@@ -66,6 +69,10 @@ class FakeTechnicianRealtimeClient
   @override
   Stream<RemoteSessionClosedNotice> get remoteSessionClosed =>
       _closedController.stream;
+
+  @override
+  Stream<RemoteSessionActiveNotice> get remoteSessionActivated =>
+      _activeController.stream;
 
   @override
   Stream<RemoteSessionPeerJoinedNotice> get peerJoined =>
@@ -142,6 +149,7 @@ class FakeTechnicianRealtimeClient
     disposeCount++;
     await _statusController.close();
     await _closedController.close();
+    await _activeController.close();
     await _peerJoinedController.close();
     await _signalingController.close();
   }
@@ -192,6 +200,14 @@ class FakeTechnicianRealtimeClient
     if (_peerJoinedController.isClosed) return;
     _peerJoinedController.add(
       RemoteSessionPeerJoinedNotice(remoteSessionId: remoteSessionId),
+    );
+  }
+
+  /// `remote-session:active`: the backend moved a session to `ACTIVE`.
+  void emitRemoteSessionActive(String remoteSessionId) {
+    if (_activeController.isClosed) return;
+    _activeController.add(
+      RemoteSessionActiveNotice(remoteSessionId: remoteSessionId),
     );
   }
 

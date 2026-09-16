@@ -70,15 +70,19 @@ class FakeRemoteSessionRepository implements RemoteSessionRepository {
   Failure? currentFailureAfterFirstRead;
   bool _read = false;
 
+  Failure? activateFailure;
+
   /// Keeps a call in flight so a second click can be attempted meanwhile.
   Future<void>? createGate;
   Future<void>? closeGate;
+  Future<void>? activateGate;
 
   /// Set when the backend must behave as if the session had already been
   /// closed by the tablet: create/close fail, and `current` is what it is.
   int currentCount = 0;
   final List<String> createdSupportRequestIds = [];
   final List<String> closedIds = [];
+  final List<String> activatedIds = [];
 
   @override
   Future<Result<RemoteSession>> create({
@@ -105,6 +109,24 @@ class FakeRemoteSessionRepository implements RemoteSessionRepository {
   }
 
   @override
+  Future<Result<RemoteSession>> activate({required String id}) async {
+    activatedIds.add(id);
+    final gate = activateGate;
+    if (gate != null) await gate;
+    final failure = activateFailure;
+    if (failure != null) return Failed(failure);
+    // What the backend does: CONNECTING -> ACTIVE with its own connectedAt.
+    final activated = buildRemoteSession(
+      id: id,
+      supportRequestId: current?.supportRequestId ?? requestId,
+      status: RemoteSessionStatus.active,
+      connectedAt: DateTime.utc(2026, 3, 11, 9, 35, 12),
+    );
+    current = activated;
+    return Success(activated);
+  }
+
+  @override
   Future<Result<RemoteSession>> close({required String id}) async {
     closedIds.add(id);
     final gate = closeGate;
@@ -128,14 +150,17 @@ class FakeRemoteSessionsRemoteDataSource
   RemoteSession? current;
   RemoteSession? createResponse;
   RemoteSession? closeResponse;
+  RemoteSession? activateResponse;
 
   Object? createError;
   Object? currentError;
   Object? closeError;
+  Object? activateError;
 
   final List<({String supportRequestId, String token})> createCalls = [];
   final List<String> currentTokens = [];
   final List<({String id, String token})> closeCalls = [];
+  final List<({String id, String token})> activateCalls = [];
 
   @override
   Future<RemoteSession> create({
@@ -154,6 +179,22 @@ class FakeRemoteSessionsRemoteDataSource
     final error = currentError;
     if (error != null) throw error;
     return current;
+  }
+
+  @override
+  Future<RemoteSession> activate({
+    required String id,
+    required String token,
+  }) async {
+    activateCalls.add((id: id, token: token));
+    final error = activateError;
+    if (error != null) throw error;
+    return activateResponse ??
+        buildRemoteSession(
+          id: id,
+          status: RemoteSessionStatus.active,
+          connectedAt: DateTime.utc(2026, 3, 11, 9, 35, 12),
+        );
   }
 
   @override

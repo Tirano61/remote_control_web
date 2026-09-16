@@ -26,6 +26,14 @@ class TechnicianRealtimeContract {
   /// Server to client domain notification. Requires no join.
   static const String remoteSessionClosedEvent = 'remote-session:closed';
 
+  /// Server to client domain notification: the backend moved a session to
+  /// `ACTIVE` and stamped its `connectedAt`. Requires no join.
+  ///
+  /// Payload: `{ remoteSessionId }`. It is a trigger for
+  /// `GET /remote-sessions/current`, never the state itself — the console
+  /// that asked for the activation receives it too.
+  static const String remoteSessionActiveEvent = 'remote-session:active';
+
   /// Server to client readiness notification: the other end of the session
   /// joined its signaling room after this socket did.
   ///

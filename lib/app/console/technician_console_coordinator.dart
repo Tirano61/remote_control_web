@@ -7,6 +7,7 @@ import '../../features/signaling/domain/client/technician_signaling_client.dart'
 import '../../features/signaling/domain/entities/signaling_relay_result.dart';
 import '../../features/support/presentation/bloc/support_requests/support_requests_bloc.dart';
 import '../../features/technician_realtime/domain/client/technician_realtime_client.dart';
+import '../../features/technician_realtime/domain/entities/remote_session_active_notice.dart';
 import '../../features/technician_realtime/domain/entities/remote_session_closed_notice.dart';
 import '../../features/technician_realtime/domain/entities/signaling_error_code.dart';
 import '../../features/technician_realtime/domain/entities/technician_realtime_status.dart';
@@ -33,6 +34,8 @@ const String kRealtimeSessionRejectedNotice =
 /// joined without the peer            -> wait: an offer would reach nobody
 /// signaling room lost                -> incomplete negotiations are dropped
 /// live session gone                  -> the peer connection is released
+/// CONNECTING + connected + control   -> POST /remote-sessions/:id/activate
+/// remote-session:active              -> GET current (never the event as state)
 /// remote-session:closed              -> GET current (never the event as state)
 /// live session disappeared           -> reload the support request queue
 /// socket handshake rejected          -> the user session is over
@@ -42,13 +45,14 @@ const String kRealtimeSessionRejectedNotice =
 /// relay refused INVALID_PAYLOAD      -> nothing: it is a contract bug
 /// ```
 ///
-/// Four facts are kept strictly apart, because they fail independently:
+/// Five facts are kept strictly apart, because they fail independently:
 ///
 /// ```text
 /// socket connected     TechnicianRealtimeBloc
 /// signaling joined     SignalingJoinBloc
 /// peer ready           SignalingJoined.peerJoined
 /// WebRTC connected     WebRtcSessionBloc
+/// control channel open WebRtcSessionBloc
 /// ```
 class TechnicianConsoleCoordinator {
   TechnicianConsoleCoordinator({
@@ -107,6 +111,28 @@ class TechnicianConsoleCoordinator {
   int _rejoinsOnConnection = 0;
   int _reconciliationsOnConnection = 0;
 
+  /// The (session, WebRTC readiness) an activation was already asked for.
+  ///
+  /// Readiness is re-evaluated on every WebRTC state change, every refreshed
+  /// `RemoteSession` and every rebuild, so without this a connected peer would
+  /// produce one `POST /remote-sessions/:id/activate` per notification. The
+  /// backend is idempotent, but that is not a reason to ask it repeatedly.
+  ///
+  /// A failed activation keeps the guard set: retrying on the very state
+  /// change the failure produced is how a tight loop is built. What re-arms it
+  /// is a genuinely new situation — a new assistance, or a peer connection
+  /// that went away and came back — plus the explicit retry the user is
+  /// offered, which goes straight to the BLoC and is one request per press.
+  (String, int)? _requestedActivation;
+
+  /// Counts the episodes of "the peers can really exchange data".
+  ///
+  /// It is the coordinator's equivalent of the negotiation generation the
+  /// WebRTC BLoC keeps to itself: a connection that dropped and came back is a
+  /// different episode, and deserves its own activation budget.
+  int _webRtcReadinessEpisode = 0;
+  bool _isWebRtcEstablished = false;
+
   /// The (connection, session) a negotiation was already asked for.
   ///
   /// Readiness is re-evaluated on many triggers, and a negotiation that failed
@@ -126,7 +152,11 @@ class TechnicianConsoleCoordinator {
       ..add(_technicianRealtimeBloc.stream.listen(_onRealtimeStatusChanged))
       ..add(_remoteSessionBloc.stream.listen(_onRemoteSessionChanged))
       ..add(_signalingJoinBloc.stream.listen(_onSignalingJoinChanged))
+      ..add(_webRtcSessionBloc.stream.listen(_onWebRtcSessionChanged))
       ..add(_realtimeClient.remoteSessionClosed.listen(_onRemoteSessionClosed))
+      ..add(
+        _realtimeClient.remoteSessionActivated.listen(_onRemoteSessionActive),
+      )
       ..add(_signalingClient.relayRefusals.listen(_onRelayRefused));
 
     // The console is opened by an already authenticated session, so the
@@ -161,6 +191,7 @@ class TechnicianConsoleCoordinator {
     _remoteSessionBloc.add(const RemoteSessionCleared());
     _hadLiveSession = false;
     _requestedNegotiation = null;
+    _forgetWebRtcReadiness();
     _clearRelayGuards();
   }
 
@@ -202,6 +233,10 @@ class TechnicianConsoleCoordinator {
       _resetRelayGuards(remoteSessionId: state.session?.id);
       _joinLiveSessionIfPossible();
       _negotiateWebRtcIfReady();
+      // A session that comes back from REST as `CONNECTING` while the peers
+      // are already talking is exactly the case this stage exists for — an
+      // F5 in the middle of an assistance, for instance.
+      _activateIfEstablished();
       return;
     }
 
@@ -210,6 +245,7 @@ class TechnicianConsoleCoordinator {
     // there. Whatever WebRTC still holds belongs to an assistance that is
     // over: peer connection, data channel and both candidate queues go.
     _requestedNegotiation = null;
+    _requestedActivation = null;
     _webRtcSessionBloc.add(const WebRtcSessionTerminated());
 
     if (_hadLiveSession && state is! RemoteSessionLoading) {
@@ -233,6 +269,46 @@ class TechnicianConsoleCoordinator {
     // is. The BLoC makes that distinction; from here both cases look alike.
     _requestedNegotiation = null;
     _webRtcSessionBloc.add(const WebRtcSignalingLost());
+  }
+
+  /// The WebRTC negotiation reported something.
+  ///
+  /// Only one question is asked here: can the two ends really exchange data
+  /// now — the peer connection is `connected` **and** the `control` channel is
+  /// `open`. Everything before that is negotiation noise as far as the
+  /// `RemoteSession` is concerned.
+  void _onWebRtcSessionChanged(WebRtcSessionState state) {
+    final isEstablished = state.isConnected && state.isControlChannelOpen;
+    if (isEstablished && !_isWebRtcEstablished) {
+      // A new episode of "the peers can work". The previous one's activation
+      // budget does not carry over.
+      _webRtcReadinessEpisode++;
+    }
+    _isWebRtcEstablished = isEstablished;
+
+    _activateIfEstablished();
+  }
+
+  /// `remote-session:active` arrived over `/technicians`.
+  ///
+  /// The console that asked for the activation receives this too, so the
+  /// common case is an echo of something already being reconciled.
+  void _onRemoteSessionActive(RemoteSessionActiveNotice notice) {
+    final state = _remoteSessionBloc.state;
+    final session = state.session;
+
+    // An event naming a session this console does not hold changes nothing:
+    // its id is never adopted, and ownership is never taken from realtime.
+    if (session == null || session.id != notice.remoteSessionId) return;
+    // Our own activation is still in flight; its response already ends in a
+    // `GET /remote-sessions/current`. A second one would be a duplicate.
+    if (state.isActivating) return;
+    // Already known to be `ACTIVE`: REST has nothing new to tell.
+    if (session.isActive) return;
+
+    // The event is a trigger, never the state: the session is not promoted
+    // locally, and `connectedAt` comes from the backend or from nowhere.
+    _remoteSessionBloc.add(const RemoteSessionRefreshRequested());
   }
 
   void _onRemoteSessionClosed(RemoteSessionClosedNotice notice) {
@@ -376,6 +452,64 @@ class TechnicianConsoleCoordinator {
     _requestedNegotiation = negotiation;
 
     _webRtcSessionBloc.add(WebRtcNegotiationRequested(session.id));
+  }
+
+  /// Confirms to the backend that the assistance really started, when — and
+  /// only when — all of this holds:
+  ///
+  /// ```text
+  /// RemoteSession.status == CONNECTING
+  /// + RTCPeerConnectionState == connected
+  /// + the `control` data channel is open
+  /// + both features are talking about the same RemoteSession
+  /// + no activation is in flight for it
+  /// + none was already asked for in this readiness episode
+  /// ```
+  ///
+  /// Each of the first two is deliberately insufficient on its own. A peer
+  /// connection whose channel is still `connecting` cannot carry a single
+  /// command, and a channel that opened while ICE is still settling is not a
+  /// working assistance either — whichever callback happens to arrive first.
+  ///
+  /// Signaling is not part of the condition at all: joined, `peerJoined`, a
+  /// delivered offer and a received answer are all steps towards a connection,
+  /// not the connection. A socket that dropped afterwards changes nothing —
+  /// WebRTC is peer to peer and `/activate` is REST.
+  ///
+  /// Known limitation of this stage: the transition is one way. If the peer
+  /// connection fails after the backend has been told the assistance started —
+  /// or while `/activate` is still unanswered — the session stays `ACTIVE`
+  /// server side until somebody closes it. Nothing here reverts it, there is
+  /// no heartbeat and no automatic close: deciding when a broken connection
+  /// should end an assistance is a lifecycle policy, and it belongs to its own
+  /// stage rather than to a silent rollback made from the client.
+  void _activateIfEstablished() {
+    final webRtc = _webRtcSessionBloc.state;
+    if (!webRtc.isConnected || !webRtc.isControlChannelOpen) return;
+
+    final sessionState = _remoteSessionBloc.state;
+    // `CONNECTING` is the only activable status. An `ACTIVE` session is
+    // already where the backend would put it, and asking again would be a
+    // request made for nothing.
+    if (sessionState is! RemoteSessionConnecting) return;
+    if (sessionState.isActivating) return;
+
+    final session = sessionState.session;
+    // Readiness that is not about the assistance the console holds is not
+    // readiness: an id is never adopted from the WebRTC layer either.
+    if (session.id != webRtc.remoteSessionId) return;
+
+    final activation = (session.id, _webRtcReadinessEpisode);
+    if (_requestedActivation == activation) return;
+    _requestedActivation = activation;
+
+    _remoteSessionBloc.add(RemoteSessionActivationRequested(session.id));
+  }
+
+  /// Forgets what the activation guard was scoped to.
+  void _forgetWebRtcReadiness() {
+    _requestedActivation = null;
+    _isWebRtcEstablished = false;
   }
 
   void _joinLiveSessionIfPossible() {
