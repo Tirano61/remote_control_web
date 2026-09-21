@@ -26,7 +26,8 @@ part 'webrtc_session_state.dart';
 /// The sequence, once the console says everything is ready:
 ///
 /// ```text
-/// createSession -> control channel -> createOffer + setLocalDescription
+/// createSession -> control channel -> video recvonly
+///   -> createOffer + setLocalDescription
 ///   -> webrtc:offer -> delivered -> flush local ICE
 ///   -> webrtc:answer -> setRemoteDescription -> flush remote ICE
 ///   -> RTCPeerConnectionState.connected
@@ -148,6 +149,12 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
       await session.openControlChannel();
       if (generation != _generation) return;
 
+      // Also before the offer: the `recvonly` video section the tablet will
+      // attach its screen to. An offer created without it describes a
+      // data-only session, and no screen could arrive without renegotiating.
+      await session.prepareScreenVideoReceiver();
+      if (generation != _generation) return;
+
       final offer = await session.createLocalOffer();
       if (generation != _generation) return;
       emit(
@@ -262,6 +269,16 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         // The channel carries no protocol yet. Nothing is parsed, nothing is
         // answered, and the payload is not logged.
         break;
+
+      case RemoteVideoTrackAvailable():
+        // The offer already asks for the screen, but nothing displays it yet:
+        // the tablet does not capture one, and no renderer exists. So the
+        // arrival is recorded in the log and changes no state — in particular
+        // it neither completes nor degrades the connection, which is decided
+        // by the peer connection and the `control` channel alone. Surfacing
+        // "screen available" apart from "control connected" is the next
+        // stage's job.
+        logDebug('remote video track available $remoteSessionId');
     }
   }
 

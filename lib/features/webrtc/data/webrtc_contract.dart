@@ -20,6 +20,19 @@ class WebRtcContract {
   /// channel.
   static const bool controlChannelOrdered = true;
 
+  /// The only media this application negotiates: the tablet's screen, in one
+  /// direction.
+  ///
+  /// The console receives and never sends — it has no camera, no microphone
+  /// and no screen to share — so the offer carries exactly one `recvonly`
+  /// video section, declared with a transceiver. `offerToReceiveVideo` is not
+  /// used: it is the legacy Plan B way of asking for the same thing, and
+  /// libwebrtc itself warns against it under Unified Plan.
+  ///
+  /// Audio is out of scope: none is negotiated and none is accepted.
+  static const String screenVideoKind = 'video';
+  static const String screenVideoDirection = 'recvonly';
+
   /// `RTCSessionDescription` types. The offer/answer distinction lives in the
   /// event name on the wire and in the type here.
   static const String offerType = 'offer';

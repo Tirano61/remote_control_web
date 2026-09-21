@@ -6,6 +6,7 @@ import 'package:remote_control_web/features/signaling/domain/entities/signaling_
 import 'package:remote_control_web/features/signaling/domain/entities/webrtc_ice_candidate.dart';
 import 'package:remote_control_web/features/signaling/domain/entities/webrtc_session_description.dart';
 import 'package:remote_control_web/features/webrtc/domain/client/webrtc_peer_client.dart';
+import 'package:remote_control_web/features/webrtc/domain/entities/remote_video_track.dart';
 import 'package:remote_control_web/features/webrtc/domain/entities/webrtc_connection_state.dart';
 import 'package:remote_control_web/features/webrtc/domain/entities/webrtc_ice_configuration.dart';
 import 'package:remote_control_web/features/webrtc/domain/entities/webrtc_peer_event.dart';
@@ -60,6 +61,7 @@ class FakeWebRtcPeerSession implements WebRtcPeerSession {
   String offerSdp = 'v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\n';
 
   int openControlChannelCount = 0;
+  int prepareScreenVideoReceiverCount = 0;
   int createOfferCount = 0;
   int closeCount = 0;
 
@@ -82,6 +84,12 @@ class FakeWebRtcPeerSession implements WebRtcPeerSession {
   Future<void> openControlChannel() async {
     openControlChannelCount++;
     calls.add('channel');
+  }
+
+  @override
+  Future<void> prepareScreenVideoReceiver() async {
+    prepareScreenVideoReceiverCount++;
+    calls.add('video');
   }
 
   @override
@@ -138,10 +146,22 @@ class FakeWebRtcPeerSession implements WebRtcPeerSession {
   void emitControlChannelMessage(String text) =>
       _emit(ControlChannelMessageReceived(text));
 
+  void emitRemoteVideoTrack([String id = 'remote-screen-0']) =>
+      _emit(RemoteVideoTrackAvailable(FakeRemoteVideoTrack(id)));
+
   void _emit(WebRtcPeerEvent event) {
     if (_events.isClosed) return;
     _events.add(event);
   }
+}
+
+/// An opaque remote video track. There is nothing to simulate: above the data
+/// layer a track is an identity and nothing else.
+class FakeRemoteVideoTrack implements RemoteVideoTrack {
+  const FakeRemoteVideoTrack(this.id);
+
+  @override
+  final String id;
 }
 
 /// Scripted [TechnicianSignalingClient].
