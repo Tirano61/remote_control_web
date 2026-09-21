@@ -1,6 +1,7 @@
 import 'package:equatable/equatable.dart';
 
 import '../../../signaling/domain/entities/webrtc_ice_candidate.dart';
+import 'remote_video_track.dart';
 import 'webrtc_connection_state.dart';
 
 /// Something the peer connection reported, as a typed value.
@@ -76,4 +77,31 @@ final class ControlChannelMessageReceived extends WebRtcPeerEvent {
   @override
   String toString() =>
       'ControlChannelMessageReceived(length: ${text.length})';
+}
+
+/// `onTrack` delivered a **video** track: the tablet is sending its screen.
+///
+/// Only video reaches this event. The negotiation declares one `recvonly`
+/// video transceiver and nothing else, so an audio track — which nothing in
+/// this application asks for — is dropped by the adapter instead of being
+/// reported.
+///
+/// The track itself never leaves the data layer: what travels here is the
+/// opaque [RemoteVideoTrack] handle.
+///
+/// It is **not** a connection state. A negotiation is connected when the peer
+/// connection is connected and the `control` channel is open; whether a screen
+/// is also arriving is a separate question, and today the tablet does not send
+/// one yet.
+final class RemoteVideoTrackAvailable extends WebRtcPeerEvent {
+  const RemoteVideoTrackAvailable(this.track);
+
+  final RemoteVideoTrack track;
+
+  @override
+  List<Object?> get props => [track];
+
+  /// The id only: no frame, no codec, no media of any kind.
+  @override
+  String toString() => 'RemoteVideoTrackAvailable(${track.id})';
 }

@@ -60,6 +60,76 @@ void main() {
     await settle();
   }
 
+  group('the remote screen', () {
+    test('it is asked for once per negotiation, before the offer', () async {
+      await negotiate();
+      // Repeated readiness reuses the negotiation, so nothing is prepared
+      // twice and the offer keeps a single video section.
+      await negotiate();
+
+      expect(peers.sessions, hasLength(1));
+      expect(peers.last.prepareScreenVideoReceiverCount, 1);
+      expect(
+        peers.last.calls.indexOf('video') < peers.last.calls.indexOf('offer'),
+        isTrue,
+      );
+    });
+
+    test('a new negotiation asks for it again', () async {
+      await negotiate();
+      await negotiate(otherSessionId);
+
+      expect(peers.sessions, hasLength(2));
+      expect(peers.sessions.first.prepareScreenVideoReceiverCount, 1);
+      expect(peers.sessions.last.prepareScreenVideoReceiverCount, 1);
+    });
+
+    test('no track at all is a normal connected session', () async {
+      await connect();
+
+      // The tablet does not capture its screen yet. That takes nothing away
+      // from the assistance: the peers are connected and control is open.
+      expect(bloc.state, isA<WebRtcConnected>());
+      expect(bloc.state.isConnected, isTrue);
+      expect(bloc.state.isControlChannelOpen, isTrue);
+    });
+
+    test('a track arriving does not change the connection state', () async {
+      await connect();
+      final connected = bloc.state;
+
+      peers.last.emitRemoteVideoTrack();
+      await settle();
+
+      // Announced, not acted upon: nothing renders it yet, and "a screen is
+      // available" is a separate question from "the peers can talk".
+      expect(bloc.state, same(connected));
+      expect(bloc.state, isA<WebRtcConnected>());
+    });
+
+    test('a track arriving mid-negotiation completes nothing', () async {
+      await negotiate();
+
+      peers.last.emitRemoteVideoTrack();
+      await settle();
+
+      expect(bloc.state, isA<WebRtcConnecting>());
+      expect(bloc.state.isConnected, isFalse);
+    });
+
+    test('a track from a replaced peer connection is dropped', () async {
+      await negotiate();
+      final abandoned = peers.last;
+      await negotiate(otherSessionId);
+
+      abandoned.emitRemoteVideoTrack();
+      await settle();
+
+      expect(bloc.state.remoteSessionId, otherSessionId);
+      expect(bloc.state, isA<WebRtcConnecting>());
+    });
+  });
+
   group('starting a negotiation', () {
     test('nothing is created until the console asks for it', () async {
       expect(bloc.state, isA<WebRtcIdle>());
@@ -71,9 +141,11 @@ void main() {
       await negotiate();
 
       expect(peers.sessions, hasLength(1));
-      // The control channel comes first: it is what puts the SCTP m-section
-      // into the SDP that is about to be created.
-      expect(peers.last.calls, ['channel', 'offer']);
+      // Everything the offer must describe exists before it is created: the
+      // control channel is what puts the SCTP m-section into the SDP, and the
+      // receive-only video section is what lets the tablet attach its screen.
+      expect(peers.last.calls, ['channel', 'video', 'offer']);
+      expect(peers.last.prepareScreenVideoReceiverCount, 1);
       expect(signaling.sentOffers.single.remoteSessionId, sessionId);
       expect(signaling.sentOffers.single.sdp, peers.last.offerSdp);
       expect(bloc.state, isA<WebRtcConnecting>());
@@ -349,7 +421,14 @@ void main() {
       await settle();
 
       // The remote description first, then the queue, in order.
-      expect(peers.last.calls, ['channel', 'offer', 'answer', 'candidate', 'candidate']);
+      expect(peers.last.calls, [
+        'channel',
+        'video',
+        'offer',
+        'answer',
+        'candidate',
+        'candidate',
+      ]);
       expect(
         peers.last.addedIceCandidates.map((candidate) => candidate.candidate),
         ['A', 'B'],

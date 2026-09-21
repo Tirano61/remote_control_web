@@ -8,6 +8,7 @@ import '../../signaling/domain/entities/webrtc_session_description.dart';
 import '../domain/client/webrtc_peer_client.dart';
 import '../domain/entities/webrtc_ice_configuration.dart';
 import '../domain/entities/webrtc_peer_event.dart';
+import 'flutter_webrtc_remote_video_track.dart';
 import 'mappers/rtc_ice_candidate_mapper.dart';
 import 'mappers/rtc_state_mapper.dart';
 import 'webrtc_contract.dart';
@@ -68,7 +69,8 @@ class FlutterWebRtcPeerSession implements WebRtcPeerSession {
   }) : _connection = connection {
     _connection
       ..onIceCandidate = _onIceCandidate
-      ..onConnectionState = _onConnectionState;
+      ..onConnectionState = _onConnectionState
+      ..onTrack = _onTrack;
   }
 
   @override
@@ -80,10 +82,34 @@ class FlutterWebRtcPeerSession implements WebRtcPeerSession {
       StreamController<WebRtcPeerEvent>.broadcast();
 
   rtc.RTCDataChannel? _controlChannel;
+
+  /// The single `recvonly` video transceiver, memoised as the future that
+  /// creates it.
+  ///
+  /// Keeping the *future* rather than a flag or the transceiver itself is what
+  /// makes [prepareScreenVideoReceiver] idempotent even when it is called
+  /// twice before the first call has finished: both callers await the same
+  /// creation, and the offer keeps exactly one `m=video` section.
+  Future<void>? _screenVideoReceiver;
+
+  /// The last video track `onTrack` delivered, if any. Owned by the peer
+  /// connection: this is a reference, not a copy, and it is dropped on close.
+  FlutterWebRtcRemoteVideoTrack? _remoteVideoTrack;
+
   bool _isClosed = false;
 
   @override
   Stream<WebRtcPeerEvent> get events => _events.stream;
+
+  /// The video track currently being received, or `null` while the tablet
+  /// sends none — which is the normal state today, since screen capture is not
+  /// implemented on the device yet.
+  ///
+  /// Not part of the port: above the data layer a track is announced by
+  /// [RemoteVideoTrackAvailable] and nothing else. This getter exists for the
+  /// renderer binding that will live next to this adapter, and for the tests
+  /// that check the reference is dropped on close.
+  FlutterWebRtcRemoteVideoTrack? get remoteVideoTrack => _remoteVideoTrack;
 
   @override
   Future<void> openControlChannel() async {
@@ -111,6 +137,34 @@ class FlutterWebRtcPeerSession implements WebRtcPeerSession {
     logDebug('control channel created $remoteSessionId');
     final state = channel.state;
     if (state != null) _onDataChannelState(state);
+  }
+
+  @override
+  Future<void> prepareScreenVideoReceiver() {
+    if (_isClosed) return Future<void>.value();
+    return _screenVideoReceiver ??= _addScreenVideoReceiver();
+  }
+
+  /// Adds the one media section the offer needs: video, receive-only.
+  ///
+  /// A transceiver, not `offerToReceiveVideo`: Unified Plan is what browsers
+  /// and libwebrtc implement today, the legacy constraint makes libwebrtc
+  /// print a deprecation warning, and a transceiver is also the object a later
+  /// stage will read the direction back from. No SDP is written by hand here
+  /// or anywhere — the `m=video` section is produced by `createOffer`.
+  Future<void> _addScreenVideoReceiver() async {
+    final transceiver = await _connection.addTransceiver(
+      kind: rtc.RTCRtpMediaType.RTCRtpMediaTypeVideo,
+      init: rtc.RTCRtpTransceiverInit(
+        direction: rtc.TransceiverDirection.RecvOnly,
+      ),
+    );
+    if (_isClosed) {
+      // The negotiation was abandoned while the transceiver was being added.
+      await _quietly(transceiver.stop);
+      return;
+    }
+    logDebug('video recvonly transceiver created $remoteSessionId');
   }
 
   @override
@@ -155,7 +209,12 @@ class FlutterWebRtcPeerSession implements WebRtcPeerSession {
     // negotiation nobody listens to any more.
     _connection
       ..onIceCandidate = null
-      ..onConnectionState = null;
+      ..onConnectionState = null
+      ..onTrack = null;
+    // The remote track belongs to the peer connection being closed; letting
+    // go of it is all this side has to do.
+    _remoteVideoTrack = null;
+    _screenVideoReceiver = null;
     final channel = _controlChannel;
     _controlChannel = null;
     if (channel != null) {
@@ -184,6 +243,27 @@ class FlutterWebRtcPeerSession implements WebRtcPeerSession {
     final mapped = RtcStateMapper.peerConnectionState(state);
     logDebug('peer connection ${mapped.name} $remoteSessionId');
     _emit(PeerConnectionStateChanged(mapped));
+  }
+
+  void _onTrack(rtc.RTCTrackEvent event) {
+    final track = event.track;
+    if (track.kind != WebRtcContract.screenVideoKind) {
+      // Only the screen is negotiated. Nothing asks for audio, so a track that
+      // is not video is dropped instead of being reported upwards.
+      logDebug('non-video remote track ignored $remoteSessionId');
+      return;
+    }
+
+    final remoteTrack = FlutterWebRtcRemoteVideoTrack(
+      mediaStreamTrack: track,
+      // A sender may announce the track without an msid; a renderer will then
+      // be given the track alone.
+      mediaStream: event.streams.isEmpty ? null : event.streams.first,
+    );
+    _remoteVideoTrack = remoteTrack;
+    // The safe identifier only: no frame, no codec, no track content.
+    logDebug('remote video track received $remoteSessionId');
+    _emit(RemoteVideoTrackAvailable(remoteTrack));
   }
 
   void _onDataChannelState(rtc.RTCDataChannelState state) {

@@ -33,6 +33,15 @@ abstract interface class WebRtcPeerClient {
 /// only needs to create an offer and consume an answer. `createAnswer` is
 /// deliberately absent: a deterministic role is what keeps glare impossible
 /// while the backend stays direction-neutral.
+///
+/// Everything the offer must describe is prepared before it is created, and
+/// the order is part of the contract:
+///
+/// ```text
+/// openControlChannel          SCTP m-section  (control, ordered)
+/// prepareScreenVideoReceiver  video m-section (recvonly)
+/// createLocalOffer            the SDP, produced by WebRTC and never edited
+/// ```
 abstract interface class WebRtcPeerSession {
   /// The remote session this negotiation belongs to. Every candidate emitted
   /// by [events] is already addressed to it.
@@ -47,6 +56,21 @@ abstract interface class WebRtcPeerSession {
   /// puts the SCTP m-section into the SDP. The device never creates this
   /// channel: it receives it through `onDataChannel`.
   Future<void> openControlChannel();
+
+  /// Declares that this side wants to **receive** the tablet's screen.
+  ///
+  /// It must be called before [createLocalOffer], because what it prepares is
+  /// a media section of that very offer: an offer created without it describes
+  /// a data-only session, and the tablet would have nowhere to attach its
+  /// screen track when it starts capturing one.
+  ///
+  /// The direction is receive-only and it is never negotiated the other way:
+  /// the console has no camera, no microphone and no screen to send.
+  ///
+  /// Idempotent. Calling it twice prepares nothing new — one negotiation
+  /// carries exactly one screen, and a second call must never add a second
+  /// media section to the offer.
+  Future<void> prepareScreenVideoReceiver();
 
   /// `createOffer()` followed by `setLocalDescription()`, in that order.
   ///

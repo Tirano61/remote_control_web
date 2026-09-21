@@ -1,6 +1,6 @@
 # WebRTC on the technician console — decisions
 
-Stage: Prompt 5 (`RTCPeerConnection` and the `control` data channel).
+Stage: Prompt 7 (the offer also asks to receive the tablet's screen).
 
 This document records the choices that are **not** part of the backend
 contract. `docs/backend/REALTIME.md` only relays SDP and ICE and is
@@ -118,6 +118,99 @@ peer connection state: `connected` does not imply the channel is already open.
 are not parsed, and no command — tap, swipe, back, home, text — is defined.
 This stage only proves that SCTP works.
 
+## The screen: one `recvonly` video section
+
+```text
+kind        video
+direction   recvonly
+transceiver added before createOffer, exactly one per peer connection
+```
+
+What the two ends negotiate, and what each one does with it:
+
+```text
+remote_control_web      DataChannel creator      VIDEO recvonly
+remote_control_device   DataChannel receiver     VIDEO sendonly (MediaProjection)
+```
+
+**Screen capture is not implemented.** The tablet does not create a video track
+yet: `MediaProjection`, the consent dialog it requires and the local
+`VideoTrack` are the next stage on the device side. What exists today is the
+*offer* that makes it possible — a session negotiated without a video section
+could not receive a screen without renegotiating, and renegotiation is
+deliberately not implemented either.
+
+So this is a normal, healthy state and the console treats it as one:
+
+```text
+RTCPeerConnection  connected
+control channel    open
+remote video       none
+```
+
+Nothing is degraded by the absence of a screen. The assistance is established
+when the peer connection is `connected` **and** `control` is `open`, exactly as
+before; "control connected" and "screen available" become two different things
+in a later stage, when there is something to display.
+
+### Why a transceiver
+
+`addTransceiver(kind: video, init: direction recvonly)`, never
+`offerToReceiveVideo`. The latter is the Plan B constraint for the same intent,
+and libwebrtc prints a deprecation warning for it under Unified Plan — which is
+what every current browser implements. The transceiver is also the object a
+later stage reads the negotiated direction back from.
+
+**No SDP is written by hand.** The `m=video` line is produced by `createOffer`,
+like everything else in the description; nothing in this application parses,
+edits or inserts SDP.
+
+### Exactly one, always
+
+`prepareScreenVideoReceiver()` is idempotent, and idempotent even against
+itself: the adapter memoises the *future* that adds the transceiver, so two
+calls that overlap wait on the same creation instead of producing two `m=video`
+sections. One peer connection carries one screen.
+
+The order is part of the port's contract and is asserted on both sides of it:
+
+```text
+createPeerConnection
+  -> openControlChannel          (SCTP m-section)
+  -> prepareScreenVideoReceiver  (video m-section, recvonly)
+  -> createLocalOffer            (createOffer + setLocalDescription)
+  -> webrtc:offer
+```
+
+A peer connection created before this existed is never repaired in place — a
+new assistance creates a new one, which is the only way a session gets a video
+section.
+
+### The track, seen from above
+
+`onTrack` is accepted for `kind == 'video'` only; an audio track is dropped
+with a debug line, because no audio is negotiated and nothing would consume it.
+A video track becomes one typed event:
+
+```text
+RemoteVideoTrackAvailable(RemoteVideoTrack)
+```
+
+`RemoteVideoTrack` is an opaque handle in `domain`: an `id` and nothing else.
+The real `MediaStreamTrack` and the `MediaStream` it was announced in stay
+inside `FlutterWebRtcRemoteVideoTrack`, next to the adapter, so no BLoC and no
+widget imports `package:flutter_webrtc` to know a screen is arriving.
+
+**Binding a renderer later.** `RTCVideoRenderer` needs the real
+`MediaStream`. The seam is already chosen and does not change the domain: the
+widget that builds the view will be injected into presentation as a builder,
+and its only implementation will live next to the adapter, where the concrete
+handle can be recognised and unwrapped. Presentation will hand it a
+`RemoteVideoTrack` and still never learn what is inside.
+
+Today nothing consumes the event beyond a debug line: there is no renderer, no
+`RTCVideoView`, and no UI for a screen that is not being captured.
+
 ## Candidate ordering
 
 Two ephemeral queues, both cleared with the negotiation and neither persisted:
@@ -168,8 +261,9 @@ connection anyway.
 
 ## Teardown
 
-The peer connection, the data channel, the event subscription and both
-candidate queues are released together, from every ending:
+The peer connection, the data channel, the video transceiver, the remote track
+reference, the event subscription and both candidate queues are released
+together, from every ending:
 
 ```text
 FINALIZAR ASISTENCIA        (RemoteSession -> Idle)
@@ -180,8 +274,13 @@ RTCPeerConnectionState.failed / closed
 signaling lost before the peer connection was established
 ```
 
+The remote track and the transceiver belong to the peer connection and die with
+it, so closing means letting go of the references — nothing is stopped or
+disposed twice, and a callback firing during the teardown reaches a detached
+handler.
+
 Nothing about WebRTC is persisted: no SDP, no candidate, no readiness, no
-generation. After an F5 the console re-reads `GET /remote-sessions/current`,
+generation, no track. After an F5 the console re-reads `GET /remote-sessions/current`,
 reconnects, joins again and starts a **new** negotiation if the ACK says the
 tablet is still there.
 
@@ -190,10 +289,15 @@ tablet is still there.
 Never logged: SDP, ICE candidate contents, the User JWT, the `Authorization`
 header, the handshake `auth` map.
 
+Also never logged: media. No frame, no codec, no track content — a remote track
+is reported by its opaque id and nothing else.
+
 Logged in debug: peer connection created, offer created, offer relayed, answer
 received, remote description applied, peer connection connected/failed/closed,
-control channel created and its state, plus the safe identifiers
-(`remoteSessionId`, `supportRequestId`, `device.publicId`).
+control channel created and its state, the video `recvonly` transceiver being
+created, a remote video track being received and a non-video track being
+ignored, plus the safe identifiers (`remoteSessionId`, `supportRequestId`,
+`device.publicId`).
 
 ## Divergence with the copied contract
 

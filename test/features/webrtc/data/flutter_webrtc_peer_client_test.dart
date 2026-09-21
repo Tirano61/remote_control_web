@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -5,6 +6,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:remote_control_web/features/signaling/domain/entities/webrtc_ice_candidate.dart';
 import 'package:remote_control_web/features/signaling/domain/entities/webrtc_session_description.dart';
 import 'package:remote_control_web/features/webrtc/data/flutter_webrtc_peer_client.dart';
+import 'package:remote_control_web/features/webrtc/data/flutter_webrtc_remote_video_track.dart';
 import 'package:remote_control_web/features/webrtc/data/mappers/rtc_ice_candidate_mapper.dart';
 import 'package:remote_control_web/features/webrtc/data/mappers/rtc_state_mapper.dart';
 import 'package:remote_control_web/features/webrtc/data/webrtc_contract.dart';
@@ -50,6 +52,28 @@ void main() {
           {'urls': 'stun:stun.example.org:19302'},
         ],
       });
+    });
+
+    test('the screen is one recvonly video section', () {
+      expect(WebRtcContract.screenVideoKind, 'video');
+      expect(WebRtcContract.screenVideoDirection, 'recvonly');
+    });
+
+    test('the enums handed to WebRTC carry exactly those two strings', () {
+      // What `flutter_webrtc` puts in `addTransceiver` on the web: the kind
+      // and the direction the contract names, and no SDP written by hand.
+      expect(
+        rtc.typeRTCRtpMediaTypetoString[rtc
+            .RTCRtpMediaType
+            .RTCRtpMediaTypeVideo],
+        WebRtcContract.screenVideoKind,
+      );
+      expect(
+        rtc.typeRtpTransceiverDirectionToString[rtc
+            .TransceiverDirection
+            .RecvOnly],
+        WebRtcContract.screenVideoDirection,
+      );
     });
 
     test('a blank define is the same as no STUN at all', () {
@@ -191,6 +215,20 @@ void main() {
     Future<WebRtcPeerSession> createSession() => client.createSession(
       remoteSessionId: sessionId,
       configuration: WebRtcIceConfiguration.fromStunUrl('stun:host:3478'),
+    );
+
+    /// The same session, seen from the data layer — where the remote track
+    /// reference lives. The port does not expose it and must not.
+    Future<FlutterWebRtcPeerSession> createAdapterSession() async =>
+        await createSession() as FlutterWebRtcPeerSession;
+
+    rtc.RTCTrackEvent trackEvent({
+      required String kind,
+      String id = 'track-0',
+      List<rtc.MediaStream> streams = const [],
+    }) => rtc.RTCTrackEvent(
+      track: FakeMediaStreamTrack(kind: kind, id: id),
+      streams: streams,
     );
 
     test('the peer connection is built with the configured ICE servers', () async {
@@ -341,6 +379,135 @@ void main() {
       ]);
     });
 
+    test('the offer declares one video section, receive only', () async {
+      final session = await createSession();
+
+      await session.prepareScreenVideoReceiver();
+
+      expect(connection.transceiverKinds, [
+        rtc.RTCRtpMediaType.RTCRtpMediaTypeVideo,
+      ]);
+      expect(
+        connection.transceiverInits.single.direction,
+        rtc.TransceiverDirection.RecvOnly,
+      );
+      // The console sends nothing: no track and no stream is offered.
+      expect(connection.transceiverTracks.single, isNull);
+      expect(connection.transceiverInits.single.streams, isNull);
+    });
+
+    test('preparing twice does not add a second m=video', () async {
+      final session = await createSession();
+
+      await session.prepareScreenVideoReceiver();
+      await session.prepareScreenVideoReceiver();
+
+      expect(connection.transceiverKinds, hasLength(1));
+    });
+
+    test('two preparations in flight at once add one m=video', () async {
+      // Idempotence that a flag set after the await would not give: both
+      // callers wait on the same creation.
+      final gate = Completer<void>();
+      connection.addTransceiverGate = gate.future;
+      final session = await createSession();
+
+      final both = Future.wait([
+        session.prepareScreenVideoReceiver(),
+        session.prepareScreenVideoReceiver(),
+      ]);
+      gate.complete();
+      await both;
+
+      expect(connection.transceiverKinds, hasLength(1));
+    });
+
+    test('everything the offer describes exists before it is created', () async {
+      final session = await createSession();
+
+      await session.openControlChannel();
+      await session.prepareScreenVideoReceiver();
+      final offer = await session.createLocalOffer();
+
+      expect(connection.calls, [
+        'createDataChannel',
+        'addTransceiver',
+        'createOffer',
+        'setLocalDescription',
+      ]);
+      // The SDP is whatever WebRTC produced: no m-section is written here.
+      expect(offer.sdp, connection.offerSdp);
+    });
+
+    test('nothing is negotiated for a session already closed', () async {
+      final session = await createSession();
+
+      await session.close();
+      await session.prepareScreenVideoReceiver();
+
+      expect(connection.transceiverKinds, isEmpty);
+    });
+
+    test('a transceiver that arrives after the teardown is stopped', () async {
+      final gate = Completer<void>();
+      connection.addTransceiverGate = gate.future;
+      final session = await createSession();
+
+      final pending = session.prepareScreenVideoReceiver();
+      await session.close();
+      gate.complete();
+      await pending;
+
+      expect(connection.addedTransceivers.single.stopCount, 1);
+    });
+
+    test('a remote video track is published as an opaque handle', () async {
+      final session = await createAdapterSession();
+      final events = <WebRtcPeerEvent>[];
+      session.events.listen(events.add);
+      final stream = FakeMediaStream('stream-0');
+
+      connection.onTrack!(
+        trackEvent(kind: 'video', id: 'screen-0', streams: [stream]),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(events.single, isA<RemoteVideoTrackAvailable>());
+      final track = (events.single as RemoteVideoTrackAvailable).track;
+      // An identity, not media: that is the whole upward surface.
+      expect(track.id, 'screen-0');
+      expect(track, isA<FlutterWebRtcRemoteVideoTrack>());
+
+      final held = session.remoteVideoTrack!;
+      expect(held.mediaStreamTrack.id, 'screen-0');
+      expect(held.mediaStream, same(stream));
+    });
+
+    test('a track announced without a stream is still published', () async {
+      final session = await createAdapterSession();
+      final events = <WebRtcPeerEvent>[];
+      session.events.listen(events.add);
+
+      connection.onTrack!(trackEvent(kind: 'video', id: 'screen-0'));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(events, hasLength(1));
+      expect(session.remoteVideoTrack!.mediaStream, isNull);
+    });
+
+    test('an audio track is ignored', () async {
+      final session = await createAdapterSession();
+      final events = <WebRtcPeerEvent>[];
+      session.events.listen(events.add);
+
+      connection.onTrack!(trackEvent(kind: 'audio', id: 'mic-0'));
+      await Future<void>.delayed(Duration.zero);
+
+      // No audio is negotiated, so none is reported and none is held.
+      expect(events, isEmpty);
+      expect(session.remoteVideoTrack, isNull);
+    });
+
     test('closing releases the channel, the peer connection and the stream', () async {
       final session = await createSession();
       await session.openControlChannel();
@@ -356,6 +523,18 @@ void main() {
       expect(connection.onConnectionState, isNull);
       expect(session.events.isBroadcast, isTrue);
       expect(() => session.events.listen((_) {}), returnsNormally);
+    });
+
+    test('closing lets go of the remote video track', () async {
+      final session = await createAdapterSession();
+      connection.onTrack!(trackEvent(kind: 'video', id: 'screen-0'));
+
+      await session.close();
+
+      // The track belongs to the peer connection being closed; the adapter
+      // only drops its reference, and no callback can hand it another one.
+      expect(session.remoteVideoTrack, isNull);
+      expect(connection.onTrack, isNull);
     });
 
     test('closing twice is not an error', () async {
@@ -413,6 +592,34 @@ class FakeRtcPeerConnection extends _UnusedRtcApi
   Function(rtc.RTCPeerConnectionState state)? onConnectionState;
 
   @override
+  Function(rtc.RTCTrackEvent event)? onTrack;
+
+  final List<rtc.RTCRtpMediaType?> transceiverKinds = [];
+  final List<rtc.RTCRtpTransceiverInit> transceiverInits = [];
+  final List<rtc.MediaStreamTrack?> transceiverTracks = [];
+  final List<FakeRtcRtpTransceiver> addedTransceivers = [];
+
+  /// Keeps `addTransceiver` in flight so the test can interleave something.
+  Future<void>? addTransceiverGate;
+
+  @override
+  Future<rtc.RTCRtpTransceiver> addTransceiver({
+    rtc.MediaStreamTrack? track,
+    rtc.RTCRtpMediaType? kind,
+    rtc.RTCRtpTransceiverInit? init,
+  }) async {
+    calls.add('addTransceiver');
+    transceiverKinds.add(kind);
+    transceiverTracks.add(track);
+    if (init != null) transceiverInits.add(init);
+    final gate = addTransceiverGate;
+    if (gate != null) await gate;
+    final transceiver = FakeRtcRtpTransceiver();
+    addedTransceivers.add(transceiver);
+    return transceiver;
+  }
+
+  @override
   Future<rtc.RTCDataChannel> createDataChannel(
     String label,
     rtc.RTCDataChannelInit dataChannelDict,
@@ -462,6 +669,34 @@ class FakeRtcPeerConnection extends _UnusedRtcApi
 
   @override
   Future<void> dispose() async => disposeCount++;
+}
+
+class FakeRtcRtpTransceiver extends _UnusedRtcApi
+    implements rtc.RTCRtpTransceiver {
+  int stopCount = 0;
+
+  @override
+  Future<void> stop() async => stopCount++;
+}
+
+/// A remote track. Only `kind` and `id` are ever read: no media is simulated,
+/// because none crosses the adapter.
+class FakeMediaStreamTrack extends _UnusedRtcApi
+    implements rtc.MediaStreamTrack {
+  FakeMediaStreamTrack({required this.kind, required this.id});
+
+  @override
+  final String kind;
+
+  @override
+  final String id;
+}
+
+class FakeMediaStream extends _UnusedRtcApi implements rtc.MediaStream {
+  FakeMediaStream(this.id);
+
+  @override
+  final String id;
 }
 
 class FakeRtcDataChannel extends _UnusedRtcApi implements rtc.RTCDataChannel {
