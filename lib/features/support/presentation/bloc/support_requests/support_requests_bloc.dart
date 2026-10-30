@@ -22,6 +22,11 @@ const String kAssignSucceededNotice =
 ///
 /// REST is the source of truth: the queue is loaded on open and reloaded on
 /// demand. The only write is `assign`, and at most one may be in flight.
+///
+/// At most one `GET /support-requests` is in flight too. A reload asked for
+/// meanwhile — by hand, by `support-request:updated` or by a reconnection — is
+/// neither started next to it nor lost: it is coalesced into one more GET
+/// once the current one ends.
 class SupportRequestsBloc
     extends Bloc<SupportRequestsEvent, SupportRequestsState> {
   SupportRequestsBloc({
@@ -34,6 +39,7 @@ class SupportRequestsBloc
     on<SupportRequestsRefreshRequested>(_onRefreshRequested);
     on<SupportRequestAssignRequested>(_onAssignRequested);
     on<SupportRequestsNoticeDismissed>(_onNoticeDismissed);
+    on<SupportRequestsPendingRefreshDiscarded>(_onPendingRefreshDiscarded);
   }
 
   final LoadSupportRequests _loadSupportRequests;
@@ -44,11 +50,20 @@ class SupportRequestsBloc
   /// `GET /support-requests`.
   bool _isLoading = false;
 
+  /// A reload was asked for while another one was in flight.
+  ///
+  /// The in-flight GET may have been read before the change that motivated
+  /// the request — a `support-request:updated` emitted right after commit, for
+  /// instance — so dropping it could leave the queue stale until somebody
+  /// reloads by hand. It is a flag, not a counter: however many requests
+  /// arrive during one GET, they are all answered by a single GET after it.
+  bool _isRefreshPending = false;
+
   Future<void> _onRequested(
     SupportRequestsRequested event,
     Emitter<SupportRequestsState> emit,
   ) async {
-    if (_isLoading) return;
+    if (_deferIfLoading()) return;
     emit(const SupportRequestsLoading());
     await _load(emit);
   }
@@ -57,7 +72,7 @@ class SupportRequestsBloc
     SupportRequestsRefreshRequested event,
     Emitter<SupportRequestsState> emit,
   ) async {
-    if (_isLoading) return;
+    if (_deferIfLoading()) return;
     final current = state;
     if (current is SupportRequestsLoaded) {
       emit(
@@ -114,7 +129,8 @@ class SupportRequestsBloc
         // The request moved on without us — taken by somebody else, already
         // answered, or the device went offline. Re-read the queue instead of
         // guessing what it looks like now.
-        if (failure is ConflictFailure || failure is NotFoundFailure) {
+        if ((failure is ConflictFailure || failure is NotFoundFailure) &&
+            !_deferIfLoading()) {
           await _load(emit, keepFailure: true);
         }
     }
@@ -130,18 +146,57 @@ class SupportRequestsBloc
     emit(current.copyWith(clearFailure: true, clearNotice: true));
   }
 
+  /// The user session is over: whatever was pending is not worth a request.
+  ///
+  /// A GET already in flight cannot be recalled, but nothing follows it.
+  void _onPendingRefreshDiscarded(
+    SupportRequestsPendingRefreshDiscarded event,
+    Emitter<SupportRequestsState> emit,
+  ) => _isRefreshPending = false;
+
+  /// Records a reload for later instead of starting a second GET next to the
+  /// one in flight. Answers whether it did.
+  bool _deferIfLoading() {
+    if (!_isLoading) return false;
+    _isRefreshPending = true;
+    return true;
+  }
+
+  /// Loads the queue, then once more for as long as a reload was asked for
+  /// during the previous GET.
+  ///
+  /// Every pass starts by clearing the flag, so a GET can only be followed by
+  /// another one when something asked for it *while it was running*. That is
+  /// what bounds a burst to one extra GET and makes a loop impossible: a
+  /// failure — network or otherwise — consumes the pending reload and never
+  /// creates one. A `401` stops everything; the session is being closed.
   Future<void> _load(
     Emitter<SupportRequestsState> emit, {
     bool keepFailure = false,
   }) async {
-    final previous = state;
     _isLoading = true;
-    final Result<List<SupportRequest>> result;
     try {
-      result = await _loadSupportRequests();
+      do {
+        _isRefreshPending = false;
+        final isSessionOver = await _loadOnce(emit, keepFailure: keepFailure);
+        if (isSessionOver) break;
+      } while (_isRefreshPending && !isClosed);
     } finally {
       _isLoading = false;
+      _isRefreshPending = false;
     }
+  }
+
+  /// One `GET /support-requests`. Answers whether it ended in a `401`.
+  Future<bool> _loadOnce(
+    Emitter<SupportRequestsState> emit, {
+    required bool keepFailure,
+  }) async {
+    final previous = state;
+    final result = await _loadSupportRequests();
+    // Another GET follows this one, so the section keeps showing that it is
+    // refreshing instead of flickering in between.
+    final isFollowedUp = _isRefreshPending && !isClosed;
 
     switch (result) {
       case Success<List<SupportRequest>>(:final value):
@@ -151,24 +206,28 @@ class SupportRequestsBloc
         emit(
           base.copyWith(
             requests: value,
-            isRefreshing: false,
+            isRefreshing: isFollowedUp,
             clearAssigningRequestId: true,
             clearFailure: !keepFailure,
           ),
         );
+        return false;
       case Failed<List<SupportRequest>>(:final failure):
+        if (failure is AuthFailure) _isRefreshPending = false;
         // A failed refresh must not throw away the queue the user is reading.
         if (previous is SupportRequestsLoaded) {
           emit(
             previous.copyWith(
-              isRefreshing: false,
+              isRefreshing: isFollowedUp && failure is! AuthFailure,
               clearAssigningRequestId: true,
               failure: keepFailure ? previous.failure ?? failure : failure,
             ),
           );
-        } else {
+        } else if (!isFollowedUp || failure is AuthFailure) {
+          // A first load that will be retried right away stays `Loading`.
           emit(SupportRequestsFailure(failure));
         }
+        return failure is AuthFailure;
     }
   }
 

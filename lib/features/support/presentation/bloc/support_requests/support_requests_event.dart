@@ -12,14 +12,24 @@ final class SupportRequestsRequested extends SupportRequestsEvent {
   const SupportRequestsRequested();
 }
 
-/// Manual refresh.
+/// Re-reads the queue from `GET /support-requests`.
 ///
-/// There is no `/technicians` Socket.IO in the web client yet, so a state
-/// change made on the tablet (accept/reject) becomes visible only after an
-/// explicit reload. Polling every few seconds is deliberately not used as a
-/// stand-in for realtime.
+/// Dispatched by the ACTUALIZAR buttons and by the console coordinator — on
+/// `support-request:updated`, when the tablet answered a request assigned to
+/// this technician, and after a socket reconnection. A new `WAITING` request
+/// is not announced over realtime, so it still needs an explicit reload.
+/// Polling every few seconds is deliberately not used as a stand-in.
+///
+/// Asked for while a GET is in flight, it is not dropped: it is coalesced into
+/// a single GET that runs as soon as the current one ends.
 final class SupportRequestsRefreshRequested extends SupportRequestsEvent {
   const SupportRequestsRefreshRequested();
+}
+
+/// The user session ended: a reload coalesced behind the GET in flight is
+/// dropped, so no request is made on behalf of a signed-out technician.
+final class SupportRequestsPendingRefreshDiscarded extends SupportRequestsEvent {
+  const SupportRequestsPendingRefreshDiscarded();
 }
 
 /// The technician pressed "TOMAR SOLICITUD" on a request.

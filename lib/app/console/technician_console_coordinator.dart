@@ -10,6 +10,7 @@ import '../../features/technician_realtime/domain/client/technician_realtime_cli
 import '../../features/technician_realtime/domain/entities/remote_session_active_notice.dart';
 import '../../features/technician_realtime/domain/entities/remote_session_closed_notice.dart';
 import '../../features/technician_realtime/domain/entities/signaling_error_code.dart';
+import '../../features/technician_realtime/domain/entities/support_request_updated_notice.dart';
 import '../../features/technician_realtime/domain/entities/technician_realtime_status.dart';
 import '../../features/technician_realtime/presentation/bloc/signaling_join/signaling_join_bloc.dart';
 import '../../features/technician_realtime/presentation/bloc/technician_realtime/technician_realtime_bloc.dart';
@@ -29,6 +30,7 @@ const String kRealtimeSessionRejectedNotice =
 /// authenticated                      -> connect /technicians + GET current
 /// signed out                         -> disconnect + forget the session
 /// socket connected + live session    -> remote-session:join
+/// socket reconnected                 -> reload the support request queue
 /// socket lost                        -> the join is no longer valid
 /// joined + peer ready + live session -> negotiate WebRTC
 /// joined without the peer            -> wait: an offer would reach nobody
@@ -37,7 +39,8 @@ const String kRealtimeSessionRejectedNotice =
 /// CONNECTING + connected + control   -> POST /remote-sessions/:id/activate
 /// remote-session:active              -> GET current (never the event as state)
 /// remote-session:closed              -> GET current (never the event as state)
-/// live session disappeared           -> reload the support request queue
+/// support-request:updated            -> GET /support-requests (idem)
+/// live session disappeared          -> reload the support request queue
 /// socket handshake rejected          -> the user session is over
 /// relay refused NOT_JOINED           -> join the room again, once
 /// relay refused UNAUTHORIZED         -> GET current (never a sign out)
@@ -101,6 +104,15 @@ class TechnicianConsoleCoordinator {
   /// has just become `COMPLETED`.
   bool _hadLiveSession = false;
 
+  /// The last socket connection seen while signed in, or `null` before the
+  /// first one.
+  ///
+  /// Only used to tell a reconnection from the first handshake: events emitted
+  /// while the socket was down are lost for good, so a reconnection re-reads
+  /// the queue, while the first connection needs nothing — the console has
+  /// just loaded it.
+  int? _lastConnectionId;
+
   bool _isStarted = false;
 
   /// What the counters below belong to. They are reset whenever a new socket
@@ -157,6 +169,9 @@ class TechnicianConsoleCoordinator {
       ..add(
         _realtimeClient.remoteSessionActivated.listen(_onRemoteSessionActive),
       )
+      ..add(
+        _realtimeClient.supportRequestUpdated.listen(_onSupportRequestUpdated),
+      )
       ..add(_signalingClient.relayRefusals.listen(_onRelayRefused));
 
     // The console is opened by an already authenticated session, so the
@@ -189,7 +204,11 @@ class TechnicianConsoleCoordinator {
     // connection and its data channel go with it.
     _webRtcSessionBloc.add(const WebRtcSessionTerminated());
     _remoteSessionBloc.add(const RemoteSessionCleared());
+    // A reload coalesced behind a GET in flight would otherwise run after the
+    // sign out.
+    _supportRequestsBloc.add(const SupportRequestsPendingRefreshDiscarded());
     _hadLiveSession = false;
+    _lastConnectionId = null;
     _requestedNegotiation = null;
     _forgetWebRtcReadiness();
     _clearRelayGuards();
@@ -208,6 +227,14 @@ class TechnicianConsoleCoordinator {
     }
 
     if (status.isConnected) {
+      final previousConnectionId = _lastConnectionId;
+      _lastConnectionId = status.connectionId;
+      if (previousConnectionId != null &&
+          previousConnectionId != status.connectionId) {
+        // `support-request:updated` is not replayed: whatever the tablet
+        // answered while the socket was down is only known to REST.
+        _supportRequestsBloc.add(const SupportRequestsRefreshRequested());
+      }
       _resetRelayGuards(connectionId: status.connectionId);
       _joinLiveSessionIfPossible();
       // Readiness is never carried over a reconnection: this socket has to be
@@ -316,6 +343,20 @@ class TechnicianConsoleCoordinator {
     // current session is not closed locally, not even when the ids match.
     // REST decides, here as everywhere else.
     _remoteSessionBloc.add(const RemoteSessionRefreshRequested());
+  }
+
+  /// `support-request:updated` arrived over `/technicians`: the tablet
+  /// accepted, rejected or cancelled a request assigned to this technician.
+  void _onSupportRequestUpdated(SupportRequestUpdatedNotice notice) {
+    // A console that is signing out has no queue worth a request, and no User
+    // JWT to spend on one.
+    if (_userSessionBloc.state is! UserSessionAuthenticated) return;
+
+    // The event is a trigger, never the state: it carries no status, so no
+    // row is looked up or rewritten here, and no assistance is started. The
+    // whole queue is re-read, as documented, whatever id the event names;
+    // the BLoC's in-flight guard is what keeps a burst from piling up GETs.
+    _supportRequestsBloc.add(const SupportRequestsRefreshRequested());
   }
 
   /// A `webrtc:*` relay was refused by the backend.

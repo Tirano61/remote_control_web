@@ -421,6 +421,301 @@ void main() {
     });
   });
 
+  group('coalesced refresh', () {
+    final assigned = buildSupportRequest(
+      status: SupportRequestStatus.assigned,
+      technician: technicianId,
+    );
+    final accepted = buildSupportRequest(
+      status: SupportRequestStatus.accepted,
+      technician: technicianId,
+    );
+
+    /// Lets the event loop drain, so every pass of the reload loop that can
+    /// run does run.
+    Future<void> settle() async {
+      for (var i = 0; i < 12; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+    }
+
+    /// A bloc whose first load already answered [assigned]; the next GET is
+    /// held by the returned gate.
+    Future<(SupportRequestsBloc, Completer<void>)> loadedBloc() async {
+      repository.requests = [assigned];
+      final bloc = buildBloc();
+      bloc.add(const SupportRequestsRequested());
+      await settle();
+      expect(repository.loadCount, 1);
+      final gate = Completer<void>();
+      repository.loadGate = gate.future;
+      return (bloc, gate);
+    }
+
+    SupportRequestsLoaded loaded(SupportRequestsBloc bloc) =>
+        bloc.state as SupportRequestsLoaded;
+
+    test('a refresh during a GET runs after it, never next to it', () async {
+      final (bloc, gate) = await loadedBloc();
+
+      // GET #1 reads the backend before the tablet answers...
+      bloc.add(const SupportRequestsRefreshRequested());
+      await settle();
+      // ...which commits ACCEPTED and asks for a reload meanwhile.
+      repository.requests = [accepted];
+      bloc.add(const SupportRequestsRefreshRequested());
+      await settle();
+      expect(repository.loadCount, 2, reason: 'no GET next to the first one');
+
+      gate.complete();
+      await settle();
+
+      // GET #1 answered ASSIGNED; GET #2 is what brings ACCEPTED in.
+      expect(repository.loadCount, 3);
+      expect(loaded(bloc).requests.single.status, SupportRequestStatus.accepted);
+      expect(loaded(bloc).isRefreshing, isFalse);
+
+      await bloc.close();
+    });
+
+    test('the queue keeps saying it refreshes between both GETs', () async {
+      final (bloc, gate) = await loadedBloc();
+      bloc.add(const SupportRequestsRefreshRequested());
+      await settle();
+      bloc.add(const SupportRequestsRefreshRequested());
+      await settle();
+
+      final second = Completer<void>();
+      gate.complete();
+      repository.loadGate = second.future;
+      await settle();
+
+      // GET #1 answered, GET #2 is running: no flicker to "idle" in between.
+      expect(repository.loadCount, 3);
+      expect(loaded(bloc).isRefreshing, isTrue);
+
+      second.complete();
+      await settle();
+      expect(loaded(bloc).isRefreshing, isFalse);
+
+      await bloc.close();
+    });
+
+    test('a burst during one GET costs exactly one more GET', () async {
+      final (bloc, gate) = await loadedBloc();
+      bloc.add(const SupportRequestsRefreshRequested());
+      await settle();
+
+      for (var i = 0; i < 4; i++) {
+        bloc.add(const SupportRequestsRefreshRequested());
+      }
+      await settle();
+      gate.complete();
+      await settle();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      // The first load, GET #1 and a single GET #2 for the whole burst.
+      expect(repository.loadCount, 1 + 2);
+
+      await bloc.close();
+    });
+
+    test('a refresh during the follow-up GET is not lost either', () async {
+      final (bloc, gate) = await loadedBloc();
+      bloc.add(const SupportRequestsRefreshRequested());
+      await settle();
+      bloc.add(const SupportRequestsRefreshRequested());
+      await settle();
+
+      final second = Completer<void>();
+      gate.complete();
+      repository.loadGate = second.future;
+      await settle();
+      expect(repository.loadCount, 3, reason: 'GET #2 is in flight');
+
+      // A later, real change while GET #2 is still out.
+      repository.requests = [accepted];
+      bloc.add(const SupportRequestsRefreshRequested());
+      await settle();
+      expect(repository.loadCount, 3);
+
+      second.complete();
+      await settle();
+
+      expect(repository.loadCount, 4, reason: 'GET #3');
+      expect(loaded(bloc).requests.single.status, SupportRequestStatus.accepted);
+
+      await bloc.close();
+    });
+
+    test('the first load coalesces a refresh as well', () async {
+      repository.requests = [assigned];
+      final gate = Completer<void>();
+      repository.loadGate = gate.future;
+      final bloc = buildBloc();
+
+      bloc.add(const SupportRequestsRequested());
+      await settle();
+      repository.requests = [accepted];
+      bloc.add(const SupportRequestsRefreshRequested());
+      await settle();
+      expect(repository.loadCount, 1);
+
+      gate.complete();
+      await settle();
+
+      expect(repository.loadCount, 2);
+      expect(loaded(bloc).requests.single.status, SupportRequestStatus.accepted);
+
+      await bloc.close();
+    });
+
+    test('a network error consumes the pending refresh, once', () async {
+      final (bloc, gate) = await loadedBloc();
+      bloc.add(const SupportRequestsRefreshRequested());
+      await settle();
+      bloc.add(const SupportRequestsRefreshRequested());
+      await settle();
+
+      repository.loadFailure = const NetworkFailure();
+      gate.complete();
+      await settle();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      // GET #1 failed, the pending GET #2 was tried and failed too, and
+      // nothing tries again on its own: no retry loop, no backoff.
+      expect(repository.loadCount, 3);
+      expect(loaded(bloc).requests.single.status, SupportRequestStatus.assigned);
+      expect(loaded(bloc).failure, isA<NetworkFailure>());
+      expect(loaded(bloc).isRefreshing, isFalse);
+
+      await bloc.close();
+    });
+
+    test('a network error without a pending refresh is not retried', () async {
+      final (bloc, gate) = await loadedBloc();
+      repository.loadFailure = const NetworkFailure();
+      bloc.add(const SupportRequestsRefreshRequested());
+      gate.complete();
+      await settle();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(repository.loadCount, 2);
+      expect(loaded(bloc).failure, isA<NetworkFailure>());
+
+      await bloc.close();
+    });
+
+    test('a failed first load with a pending refresh shows the retry', () async {
+      repository
+        ..requests = [assigned]
+        ..loadFailure = const NetworkFailure();
+      final gate = Completer<void>();
+      repository.loadGate = gate.future;
+      final bloc = buildBloc();
+      bloc.add(const SupportRequestsRequested());
+      await settle();
+      bloc.add(const SupportRequestsRefreshRequested());
+      await settle();
+
+      final states = <SupportRequestsState>[];
+      final subscription = bloc.stream.listen(states.add);
+      repository.loadFailure = null;
+      gate.complete();
+      await settle();
+
+      // The first failure is not flashed while the retry is already running.
+      expect(states.whereType<SupportRequestsFailure>(), isEmpty);
+      expect(repository.loadCount, 2);
+      expect(loaded(bloc).requests, hasLength(1));
+
+      await subscription.cancel();
+      await bloc.close();
+    });
+
+    test('a 401 drops the pending refresh: the session is ending', () async {
+      final (bloc, gate) = await loadedBloc();
+      bloc.add(const SupportRequestsRefreshRequested());
+      await settle();
+      bloc.add(const SupportRequestsRefreshRequested());
+      await settle();
+
+      repository.loadFailure = const AuthFailure();
+      gate.complete();
+      await settle();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(repository.loadCount, 2, reason: 'no GET after the 401');
+      expect(loaded(bloc).failure, isA<AuthFailure>());
+      expect(loaded(bloc).isRefreshing, isFalse);
+
+      // The guard is not left stuck: a new request is served normally.
+      repository.loadFailure = null;
+      bloc.add(const SupportRequestsRefreshRequested());
+      await settle();
+      expect(repository.loadCount, 3);
+
+      await bloc.close();
+    });
+
+    test('a discarded pending refresh is never run', () async {
+      final (bloc, gate) = await loadedBloc();
+      bloc.add(const SupportRequestsRefreshRequested());
+      await settle();
+      bloc
+        ..add(const SupportRequestsRefreshRequested())
+        ..add(const SupportRequestsPendingRefreshDiscarded());
+      await settle();
+
+      gate.complete();
+      await settle();
+
+      expect(repository.loadCount, 2);
+
+      await bloc.close();
+    });
+
+    test('a closed bloc runs no pending refresh', () async {
+      final (bloc, gate) = await loadedBloc();
+      bloc.add(const SupportRequestsRefreshRequested());
+      await settle();
+      bloc.add(const SupportRequestsRefreshRequested());
+      await settle();
+
+      final closing = bloc.close();
+      gate.complete();
+      await closing;
+      await settle();
+
+      expect(repository.loadCount, 2);
+    });
+
+    test('a 409 during a GET in flight reloads once, after it', () async {
+      repository.requests = [buildSupportRequest()];
+      final bloc = buildBloc();
+      bloc.add(const SupportRequestsRequested());
+      await settle();
+      final gate = Completer<void>();
+      repository
+        ..loadGate = gate.future
+        ..assignFailure = const ConflictFailure();
+
+      bloc.add(const SupportRequestsRefreshRequested());
+      await settle();
+      bloc.add(const SupportRequestAssignRequested(requestId));
+      await settle();
+      expect(repository.loadCount, 2, reason: 'the 409 reload waits its turn');
+
+      gate.complete();
+      await settle();
+
+      expect(repository.loadCount, 3);
+      expect(loaded(bloc).isRefreshing, isFalse);
+
+      await bloc.close();
+    });
+  });
+
   group('notice', () {
     test('can be dismissed', () async {
       repository.requests = [buildSupportRequest()];

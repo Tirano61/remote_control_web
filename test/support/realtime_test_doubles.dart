@@ -7,6 +7,7 @@ import 'package:remote_control_web/features/technician_realtime/domain/entities/
 import 'package:remote_control_web/features/technician_realtime/domain/entities/remote_session_active_notice.dart';
 import 'package:remote_control_web/features/technician_realtime/domain/entities/remote_session_closed_notice.dart';
 import 'package:remote_control_web/features/technician_realtime/domain/entities/remote_session_peer_joined_notice.dart';
+import 'package:remote_control_web/features/technician_realtime/domain/entities/support_request_updated_notice.dart';
 import 'package:remote_control_web/features/technician_realtime/domain/entities/technician_realtime_status.dart';
 
 /// Scripted [TechnicianRealtimeClient], and the [SignalingTransport] built on
@@ -26,6 +27,9 @@ class FakeTechnicianRealtimeClient
       StreamController<RemoteSessionActiveNotice>.broadcast();
   final StreamController<RemoteSessionPeerJoinedNotice> _peerJoinedController =
       StreamController<RemoteSessionPeerJoinedNotice>.broadcast();
+  final StreamController<SupportRequestUpdatedNotice>
+  _supportRequestUpdatedController =
+      StreamController<SupportRequestUpdatedNotice>.broadcast();
 
   TechnicianRealtimeStatus _status = const TechnicianRealtimeDisconnected();
 
@@ -73,6 +77,10 @@ class FakeTechnicianRealtimeClient
   @override
   Stream<RemoteSessionActiveNotice> get remoteSessionActivated =>
       _activeController.stream;
+
+  @override
+  Stream<SupportRequestUpdatedNotice> get supportRequestUpdated =>
+      _supportRequestUpdatedController.stream;
 
   @override
   Stream<RemoteSessionPeerJoinedNotice> get peerJoined =>
@@ -151,6 +159,7 @@ class FakeTechnicianRealtimeClient
     await _closedController.close();
     await _activeController.close();
     await _peerJoinedController.close();
+    await _supportRequestUpdatedController.close();
     await _signalingController.close();
   }
 
@@ -211,6 +220,14 @@ class FakeTechnicianRealtimeClient
     );
   }
 
+  /// `support-request:updated`: the tablet answered an assigned request.
+  void emitSupportRequestUpdated(String supportRequestId) {
+    if (_supportRequestUpdatedController.isClosed) return;
+    _supportRequestUpdatedController.add(
+      SupportRequestUpdatedNotice(supportRequestId: supportRequestId),
+    );
+  }
+
   void emitRemoteSessionClosed(
     String remoteSessionId, {
     String? endedBy = 'DEVICE',
@@ -250,6 +267,10 @@ class FakeRealtimeSocketGateway implements RealtimeSocketGateway {
   void Function(Object? error)? _onConnectError;
   void Function()? _onReconnectAttempt;
   final Map<String, void Function(Object? data)> _eventHandlers = {};
+
+  /// How many handlers were registered per event on this gateway, so a test
+  /// can prove a listener is not registered twice.
+  final Map<String, int> eventRegistrations = {};
   void Function(Object? ack)? _pendingAck;
 
   @override
@@ -268,8 +289,10 @@ class FakeRealtimeSocketGateway implements RealtimeSocketGateway {
       _onReconnectAttempt = handler;
 
   @override
-  void onEvent(String event, void Function(Object? data) handler) =>
-      _eventHandlers[event] = handler;
+  void onEvent(String event, void Function(Object? data) handler) {
+    eventRegistrations[event] = (eventRegistrations[event] ?? 0) + 1;
+    _eventHandlers[event] = handler;
+  }
 
   @override
   void connect() => connectCount++;

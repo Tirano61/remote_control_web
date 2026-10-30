@@ -13,6 +13,7 @@ const String secretToken = 'eyJhbGciOiJIUzI1NiJ9.SUPER-SECRET-JWT.signature';
 
 void main() {
   const sessionId = '3d1b9e64-9a0f-4c88-9d0a-6f2a5c7e8b10';
+  const supportRequestId = '8f14e45f-ceea-4d3c-b4e2-2f4b3c9a1d77';
 
   test('a full realtime lifecycle never prints the User JWT', () async {
     final factory = RecordingGatewayFactory();
@@ -51,6 +52,10 @@ void main() {
           TechnicianRealtimeContract.remoteSessionClosedEvent,
           {'remoteSessionId': sessionId, 'endedBy': 'DEVICE'},
         );
+        gateway.emitServerEvent(
+          TechnicianRealtimeContract.supportRequestUpdatedEvent,
+          {'supportRequestId': supportRequestId},
+        );
         gateway.dropConnection();
         gateway.reportConnectError({'message': 'Unauthorized'});
         await client.disconnect();
@@ -79,5 +84,9 @@ void main() {
       contains('remote-session:peer-joined received $sessionId'),
     );
     expect(output, contains('remote-session:closed received $sessionId'));
+    expect(
+      output,
+      contains('support-request:updated received $supportRequestId'),
+    );
   });
 }

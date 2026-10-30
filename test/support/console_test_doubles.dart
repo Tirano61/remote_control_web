@@ -146,6 +146,12 @@ class FakeSupportRequestRepository implements SupportRequestRepository {
   /// call awaits this future before answering.
   Future<void>? assignGate;
 
+  /// Same idea for `GET /support-requests`: keeps a load in flight so other
+  /// triggers can arrive meanwhile. The data is read before waiting on it and
+  /// [loadFailure] after, so changing [requests] while a load waits is a
+  /// commit the GET in flight does not see.
+  Future<void>? loadGate;
+
   int loadCount = 0;
   final List<String> assignedIds = [];
 
@@ -154,10 +160,15 @@ class FakeSupportRequestRepository implements SupportRequestRepository {
     SupportRequestStatus? status,
   }) async {
     loadCount++;
-    final failure = loadFailure;
-    if (failure != null) return Failed(failure);
+    // What the backend had when the GET was read — before a commit that
+    // happens while the response is still on its way.
     final source = _loaded ? requestsAfterFirstLoad ?? requests : requests;
     _loaded = true;
+    final gate = loadGate;
+    if (gate != null) await gate;
+    // The outcome, on the other hand, is decided when the response arrives.
+    final failure = loadFailure;
+    if (failure != null) return Failed(failure);
     if (status == null) return Success(source);
     return Success(
       source.where((request) => request.status == status).toList(growable: false),
