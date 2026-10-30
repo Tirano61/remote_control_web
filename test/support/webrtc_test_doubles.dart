@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/widgets.dart';
 import 'package:remote_control_web/features/signaling/domain/client/technician_signaling_client.dart';
 import 'package:remote_control_web/features/signaling/domain/entities/remote_signaling_message.dart';
 import 'package:remote_control_web/features/signaling/domain/entities/signaling_relay_result.dart';
@@ -10,6 +11,7 @@ import 'package:remote_control_web/features/webrtc/domain/entities/remote_video_
 import 'package:remote_control_web/features/webrtc/domain/entities/webrtc_connection_state.dart';
 import 'package:remote_control_web/features/webrtc/domain/entities/webrtc_ice_configuration.dart';
 import 'package:remote_control_web/features/webrtc/domain/entities/webrtc_peer_event.dart';
+import 'package:remote_control_web/features/webrtc/presentation/remote_screen/remote_video_renderer.dart';
 
 /// Scripted [WebRtcPeerClient].
 ///
@@ -146,8 +148,12 @@ class FakeWebRtcPeerSession implements WebRtcPeerSession {
   void emitControlChannelMessage(String text) =>
       _emit(ControlChannelMessageReceived(text));
 
-  void emitRemoteVideoTrack([String id = 'remote-screen-0']) =>
-      _emit(RemoteVideoTrackAvailable(FakeRemoteVideoTrack(id)));
+  /// Returns the handle, so identity can be asserted further up.
+  FakeRemoteVideoTrack emitRemoteVideoTrack([String id = 'remote-screen-0']) {
+    final track = FakeRemoteVideoTrack(id);
+    _emit(RemoteVideoTrackAvailable(track));
+    return track;
+  }
 
   void _emit(WebRtcPeerEvent event) {
     if (_events.isClosed) return;
@@ -162,6 +168,89 @@ class FakeRemoteVideoTrack implements RemoteVideoTrack {
 
   @override
   final String id;
+}
+
+/// Hands out [FakeRemoteVideoRenderer]s and keeps every one it created, so a
+/// test can tell "the same renderer" from "a new one".
+class FakeRemoteVideoRendererFactory {
+  final List<FakeRemoteVideoRenderer> created = [];
+
+  FakeRemoteVideoRenderer get last => created.last;
+
+  RemoteVideoRenderer create() {
+    final renderer = FakeRemoteVideoRenderer();
+    created.add(renderer);
+    return renderer;
+  }
+}
+
+/// Scripted [RemoteVideoRenderer]: no browser, no frames.
+///
+/// It records the lifecycle it was driven through, and its view is an empty
+/// box whose key names the track on screen — which is all a widget test can
+/// meaningfully look at.
+class FakeRemoteVideoRenderer extends ChangeNotifier
+    implements RemoteVideoRenderer {
+  int initializeCount = 0;
+  int detachCount = 0;
+  int disposeCount = 0;
+
+  /// Every track [attach] was given, in order.
+  final List<RemoteVideoTrack> attachedTracks = [];
+
+  RemoteVideoTrack? _track;
+  double? _videoAspectRatio;
+  bool _isDisposed = false;
+
+  bool get isDisposed => _isDisposed;
+
+  @override
+  Future<void> initialize() async => initializeCount++;
+
+  @override
+  Future<RemoteVideoAttachResult> attach(RemoteVideoTrack track) async {
+    if (_isDisposed) return RemoteVideoAttachResult.disposed;
+    attachedTracks.add(track);
+    _track = track;
+    notifyListeners();
+    return RemoteVideoAttachResult.attached;
+  }
+
+  @override
+  Future<void> detach() async {
+    detachCount++;
+    if (_isDisposed || _track == null) return;
+    _track = null;
+    notifyListeners();
+  }
+
+  @override
+  Future<void> dispose() async {
+    disposeCount++;
+    if (_isDisposed) return;
+    _isDisposed = true;
+    _track = null;
+    super.dispose();
+  }
+
+  @override
+  RemoteVideoTrack? get track => _track;
+
+  @override
+  bool get isDisplaying => !_isDisposed && _track != null;
+
+  @override
+  double? get aspectRatio => isDisplaying ? _videoAspectRatio : null;
+
+  @override
+  Widget buildView(BuildContext context) =>
+      SizedBox.expand(key: Key('fake_remote_video_${_track?.id}'));
+
+  /// What the first decoded frames (or a rotation) would report.
+  void reportVideoAspectRatio(double aspectRatio) {
+    _videoAspectRatio = aspectRatio;
+    if (!_isDisposed) notifyListeners();
+  }
 }
 
 /// Scripted [TechnicianSignalingClient].

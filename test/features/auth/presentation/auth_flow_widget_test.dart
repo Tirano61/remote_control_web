@@ -55,6 +55,7 @@ void main() {
         transport: realtime,
       ),
       webRtcPeerClient: FakeWebRtcPeerClient(),
+      remoteVideoRendererFactory: FakeRemoteVideoRendererFactory().create,
     );
     await tester.pumpWidget(RemoteControlApp(dependencies: dependencies));
   }

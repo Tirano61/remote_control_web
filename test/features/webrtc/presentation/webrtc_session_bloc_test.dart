@@ -94,17 +94,18 @@ void main() {
       expect(bloc.state.isControlChannelOpen, isTrue);
     });
 
-    test('a track arriving does not change the connection state', () async {
+    test('a track arriving does not change the connection itself', () async {
       await connect();
-      final connected = bloc.state;
 
       peers.last.emitRemoteVideoTrack();
       await settle();
 
-      // Announced, not acted upon: nothing renders it yet, and "a screen is
-      // available" is a separate question from "the peers can talk".
-      expect(bloc.state, same(connected));
+      // "A screen is available" is a separate question from "the peers can
+      // talk": the connection is exactly what it was.
       expect(bloc.state, isA<WebRtcConnected>());
+      expect(bloc.state.isConnected, isTrue);
+      expect(bloc.state.isControlChannelOpen, isTrue);
+      expect(bloc.state.remoteSessionId, sessionId);
     });
 
     test('a track arriving mid-negotiation completes nothing', () async {
@@ -127,6 +128,160 @@ void main() {
 
       expect(bloc.state.remoteSessionId, otherSessionId);
       expect(bloc.state, isA<WebRtcConnecting>());
+      // The stale peer's frames never reach the screen.
+      expect(bloc.state.remoteVideoTrack, isNull);
+    });
+  });
+
+  group('the remote video track', () {
+    test('no screen until a track arrives', () async {
+      await connect();
+
+      expect(bloc.state.remoteVideoTrack, isNull);
+      expect(bloc.state.hasRemoteVideo, isFalse);
+    });
+
+    test('RemoteVideoTrackAvailable keeps the track in the state', () async {
+      await connect();
+
+      final track = peers.last.emitRemoteVideoTrack('screen-0');
+      await settle();
+
+      expect(bloc.state.remoteVideoTrack, same(track));
+      expect(bloc.state.hasRemoteVideo, isTrue);
+    });
+
+    test('a track received while connecting is still there once connected', () async {
+      await negotiate();
+      // `ontrack` fires when the answer is applied, before ICE completes.
+      final track = peers.last.emitRemoteVideoTrack();
+      await settle();
+      expect(bloc.state.remoteVideoTrack, same(track));
+
+      peers.last
+        ..emitControlChannelState(WebRtcDataChannelState.open)
+        ..emitPeerState(WebRtcPeerConnectionState.connected);
+      await settle();
+
+      expect(bloc.state, isA<WebRtcConnected>());
+      expect(bloc.state.remoteVideoTrack, same(track));
+    });
+
+    test('a control channel change keeps the track', () async {
+      await connect();
+      final track = peers.last.emitRemoteVideoTrack();
+      await settle();
+
+      peers.last.emitControlChannelState(WebRtcDataChannelState.closing);
+      await settle();
+
+      expect(bloc.state.controlChannelState, WebRtcDataChannelState.closing);
+      expect(bloc.state.remoteVideoTrack, same(track));
+    });
+
+    test('a later track of the same peer connection replaces it', () async {
+      await connect();
+      peers.last.emitRemoteVideoTrack('screen-a');
+      await settle();
+
+      final second = peers.last.emitRemoteVideoTrack('screen-b');
+      await settle();
+
+      expect(bloc.state.remoteVideoTrack, same(second));
+    });
+
+    test('a new generation starts without a screen and takes its own', () async {
+      await connect();
+      final first = peers.last.emitRemoteVideoTrack('screen-a');
+      await settle();
+
+      await negotiate(otherSessionId);
+      expect(bloc.state.remoteVideoTrack, isNull);
+
+      // The replaced peer keeps firing for a while: ignored.
+      peers.sessions.first.emitRemoteVideoTrack('late-a');
+      await settle();
+      expect(bloc.state.remoteVideoTrack, isNull);
+
+      final second = peers.last.emitRemoteVideoTrack('screen-b');
+      await settle();
+
+      expect(bloc.state.remoteVideoTrack, same(second));
+      expect(bloc.state.remoteVideoTrack, isNot(same(first)));
+    });
+
+    test('WebRTC terminating clears it', () async {
+      await connect();
+      peers.last.emitRemoteVideoTrack();
+      await settle();
+
+      bloc.add(const WebRtcSessionTerminated());
+      await settle();
+
+      expect(bloc.state, isA<WebRtcIdle>());
+      expect(bloc.state.remoteVideoTrack, isNull);
+    });
+
+    test('a track after the assistance ended is ignored', () async {
+      await connect();
+      final closed = peers.last;
+      bloc.add(const WebRtcSessionTerminated());
+      await settle();
+
+      closed.emitRemoteVideoTrack();
+      await settle();
+
+      expect(bloc.state, isA<WebRtcIdle>());
+      expect(bloc.state.remoteVideoTrack, isNull);
+    });
+
+    test('a failed peer connection takes the screen with it', () async {
+      await connect();
+      peers.last.emitRemoteVideoTrack();
+      await settle();
+
+      peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+      await settle();
+
+      expect(bloc.state, isA<WebRtcFailed>());
+      expect(bloc.state.remoteVideoTrack, isNull);
+    });
+
+    test('a closed peer connection takes the screen with it', () async {
+      await connect();
+      peers.last.emitRemoteVideoTrack();
+      await settle();
+
+      peers.last.emitPeerState(WebRtcPeerConnectionState.closed);
+      await settle();
+
+      expect(bloc.state, isA<WebRtcClosed>());
+      expect(bloc.state.remoteVideoTrack, isNull);
+    });
+
+    test('a transient disconnection keeps it, as it keeps the peer', () async {
+      await connect();
+      final track = peers.last.emitRemoteVideoTrack();
+      await settle();
+
+      peers.last.emitPeerState(WebRtcPeerConnectionState.disconnected);
+      await settle();
+
+      // The existing policy: `disconnected` destroys nothing.
+      expect(bloc.state, isA<WebRtcInterrupted>());
+      expect(bloc.state.remoteVideoTrack, same(track));
+    });
+
+    test('losing signaling keeps a connected screen', () async {
+      await connect();
+      final track = peers.last.emitRemoteVideoTrack();
+      await settle();
+
+      bloc.add(const WebRtcSignalingLost());
+      await settle();
+
+      expect(bloc.state, isA<WebRtcConnected>());
+      expect(bloc.state.remoteVideoTrack, same(track));
     });
   });
 

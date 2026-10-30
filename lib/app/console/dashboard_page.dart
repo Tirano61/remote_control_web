@@ -17,6 +17,7 @@ import '../../features/support/presentation/widgets/support_requests_section.dar
 import '../../features/technician_realtime/presentation/bloc/signaling_join/signaling_join_bloc.dart';
 import '../../features/technician_realtime/presentation/bloc/technician_realtime/technician_realtime_bloc.dart';
 import '../../features/webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dart';
+import '../../features/webrtc/presentation/remote_screen/remote_video_renderer.dart';
 import '../composition_root.dart';
 import 'technician_console_coordinator.dart';
 
@@ -65,7 +66,10 @@ class DashboardPage extends StatelessWidget {
       ],
       child: _ConsoleCoordinatorScope(
         dependencies: dependencies,
-        child: _ConsoleScaffold(user: user),
+        child: _ConsoleScaffold(
+          user: user,
+          remoteVideoRendererFactory: dependencies.remoteVideoRendererFactory,
+        ),
       ),
     );
   }
@@ -117,9 +121,13 @@ class _ConsoleCoordinatorScopeState extends State<_ConsoleCoordinatorScope> {
 }
 
 class _ConsoleScaffold extends StatelessWidget {
-  const _ConsoleScaffold({required this.user});
+  const _ConsoleScaffold({
+    required this.user,
+    required this.remoteVideoRendererFactory,
+  });
 
   final AuthenticatedUser user;
+  final RemoteVideoRendererFactory remoteVideoRendererFactory;
 
   @override
   Widget build(BuildContext context) {
@@ -159,7 +167,9 @@ class _ConsoleScaffold extends StatelessWidget {
                   children: [
                     // A live assistance comes first: it is what the technician
                     // is doing right now.
-                    const ActiveAssistanceSection(),
+                    ActiveAssistanceSection(
+                      remoteVideoRendererFactory: remoteVideoRendererFactory,
+                    ),
                     SupportRequestsSection(
                       technicianId: user.id,
                       now: DateTime.now(),

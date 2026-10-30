@@ -12,6 +12,7 @@ import 'package:remote_control_web/features/remote_session/domain/entities/remot
 import 'package:remote_control_web/features/signaling/data/technician_signaling_client_impl.dart';
 import 'package:remote_control_web/features/support/domain/entities/support_request_status.dart';
 import 'package:remote_control_web/features/webrtc/domain/entities/webrtc_connection_state.dart';
+import 'package:remote_control_web/features/webrtc/presentation/widgets/remote_screen_view.dart';
 
 import '../../../support/auth_test_doubles.dart';
 import '../../../support/console_test_doubles.dart';
@@ -27,6 +28,7 @@ void main() {
   late FakeRemoteSessionRepository remoteSessions;
   late FakeTechnicianRealtimeClient realtime;
   late FakeWebRtcPeerClient peers;
+  late FakeRemoteVideoRendererFactory renderers;
 
   setUp(() {
     auth = FakeAuthRemoteDataSource()..checkStatusResponse = technicianSession;
@@ -36,6 +38,7 @@ void main() {
     remoteSessions = FakeRemoteSessionRepository();
     realtime = FakeTechnicianRealtimeClient();
     peers = FakeWebRtcPeerClient();
+    renderers = FakeRemoteVideoRendererFactory();
   });
 
   /// The request this technician owns and the tablet already accepted.
@@ -59,8 +62,11 @@ void main() {
     }
   }
 
-  Future<void> pumpConsole(WidgetTester tester) async {
-    tester.view.physicalSize = const Size(1400, 1400);
+  Future<void> pumpConsole(
+    WidgetTester tester, {
+    Size viewSize = const Size(1400, 1400),
+  }) async {
+    tester.view.physicalSize = viewSize;
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
 
@@ -80,6 +86,7 @@ void main() {
             transport: realtime,
           ),
           webRtcPeerClient: peers,
+          remoteVideoRendererFactory: renderers.create,
         ),
       ),
     );
@@ -481,6 +488,221 @@ void main() {
       expect(find.byKey(const Key('webrtc_status')), findsNothing);
     });
   });
+
+  group('remote screen', () {
+    /// A CONNECTING session whose tablet is in the room: the negotiation
+    /// starts and the offer is relayed.
+    Future<void> pumpNegotiating(
+      WidgetTester tester, {
+      Size viewSize = const Size(1400, 1400),
+    }) async {
+      remoteSessions.current = buildRemoteSession();
+      realtime.peerJoinedOnJoin = true;
+      await pumpConsole(tester, viewSize: viewSize);
+      await connectSocket(tester);
+      realtime.answerRelayAck({
+        'delivered': true,
+        'remoteSessionId': remoteSessionId,
+      });
+      await settleUi(tester);
+    }
+
+    /// Peer connection connected and `control` open: the console activates
+    /// the session and the backend answers ACTIVE.
+    Future<void> establish(WidgetTester tester) async {
+      peers.last
+        ..emitControlChannelState(WebRtcDataChannelState.open)
+        ..emitPeerState(WebRtcPeerConnectionState.connected);
+      await settleUi(tester);
+    }
+
+    Finder video(String id) => find.byKey(Key('fake_remote_video_$id'));
+    final waiting = find.text(kWaitingForRemoteScreenNotice);
+    final surface = find.byKey(const Key('remote_screen_surface'));
+
+    testWidgets('an assistance without a picture is complete and waits for it', (
+      tester,
+    ) async {
+      await pumpNegotiating(tester);
+      await establish(tester);
+
+      // Regression: video is not part of what makes the assistance work.
+      expect(remoteSessions.activatedIds, [remoteSessionId]);
+      expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
+      expect(
+        tester.widget<Text>(find.byKey(const Key('webrtc_status'))).data,
+        'Conexión remota establecida',
+      );
+      expect(
+        tester.widget<Text>(find.byKey(const Key('webrtc_debug_status'))).data,
+        'WebRTC: conectado · Canal de control: abierto',
+      );
+      expect(find.text('FINALIZAR ASISTENCIA'), findsOneWidget);
+      // MediaProjection may still be waiting for consent on the tablet: a
+      // placeholder, never an error.
+      expect(waiting, findsOneWidget);
+      expect(find.byKey(const Key('remote_screen_video')), findsNothing);
+      expect(renderers.created, hasLength(1));
+      expect(renderers.last.attachedTracks, isEmpty);
+    });
+
+    testWidgets('the tablet screen replaces the placeholder', (tester) async {
+      await pumpNegotiating(tester);
+      await establish(tester);
+
+      final track = peers.last.emitRemoteVideoTrack('screen-0');
+      await settleUi(tester);
+      renderers.last.reportVideoAspectRatio(1280 / 800);
+      await settleUi(tester);
+
+      expect(renderers.last.attachedTracks, [same(track)]);
+      expect(video('screen-0'), findsOneWidget);
+      expect(waiting, findsNothing);
+      // The diagnostics stay around the picture.
+      expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
+      expect(find.byKey(const Key('webrtc_status')), findsOneWidget);
+      expect(find.text('FINALIZAR ASISTENCIA'), findsOneWidget);
+    });
+
+    testWidgets('CONNECTING -> ACTIVE keeps the renderer and the picture', (
+      tester,
+    ) async {
+      await pumpNegotiating(tester);
+      // `ontrack` fires when the answer is applied, before ICE completes and
+      // well before the backend says ACTIVE.
+      final track = peers.last.emitRemoteVideoTrack('screen-0');
+      await settleUi(tester);
+      expect(
+        find.text('Estado: Conectando con el dispositivo...'),
+        findsOneWidget,
+      );
+      expect(video('screen-0'), findsOneWidget);
+      final renderer = renderers.last;
+
+      await establish(tester);
+
+      expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
+      expect(renderers.created, [same(renderer)]);
+      expect(renderer.disposeCount, 0);
+      expect(renderer.detachCount, 0);
+      expect(renderer.attachedTracks, [same(track)]);
+      expect(video('screen-0'), findsOneWidget);
+    });
+
+    testWidgets('a new track of the session moves to the same renderer', (
+      tester,
+    ) async {
+      await pumpNegotiating(tester);
+      await establish(tester);
+      final a = peers.last.emitRemoteVideoTrack('screen-a');
+      await settleUi(tester);
+
+      final b = peers.last.emitRemoteVideoTrack('screen-b');
+      await settleUi(tester);
+
+      expect(renderers.created, hasLength(1));
+      expect(renderers.last.attachedTracks, [same(a), same(b)]);
+      expect(video('screen-b'), findsOneWidget);
+      expect(video('screen-a'), findsNothing);
+    });
+
+    testWidgets('FINALIZAR ASISTENCIA releases the picture', (tester) async {
+      await pumpNegotiating(tester);
+      await establish(tester);
+      peers.last.emitRemoteVideoTrack('screen-0');
+      await settleUi(tester);
+
+      await tester.tap(find.byKey(const Key('close_remote_session_button')));
+      await settleUi(tester);
+
+      expect(surface, findsNothing);
+      expect(renderers.created, hasLength(1));
+      expect(renderers.last.disposeCount, 1);
+      expect(renderers.last.isDisplaying, isFalse);
+    });
+
+    testWidgets('a session closed from the tablet releases the picture', (
+      tester,
+    ) async {
+      await pumpNegotiating(tester);
+      await establish(tester);
+      peers.last.emitRemoteVideoTrack('screen-0');
+      await settleUi(tester);
+
+      remoteSessions.current = null;
+      realtime.emitRemoteSessionClosed(remoteSessionId);
+      await settleUi(tester);
+
+      expect(find.byKey(const Key('active_assistance_section')), findsNothing);
+      expect(renderers.last.disposeCount, 1);
+    });
+
+    testWidgets('a failed peer connection takes the picture away', (
+      tester,
+    ) async {
+      await pumpNegotiating(tester);
+      await establish(tester);
+      peers.last.emitRemoteVideoTrack('screen-0');
+      await settleUi(tester);
+
+      peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+      await settleUi(tester);
+
+      expect(surface, findsNothing);
+      expect(renderers.last.disposeCount, 1);
+      // The assistance itself is still the backend's to end.
+      expect(find.text('FINALIZAR ASISTENCIA'), findsOneWidget);
+      expect(
+        tester.widget<Text>(find.byKey(const Key('webrtc_status'))).data,
+        'No se pudo establecer la conexión remota.',
+      );
+    });
+
+    testWidgets('signing out releases the picture', (tester) async {
+      await pumpNegotiating(tester);
+      await establish(tester);
+      peers.last.emitRemoteVideoTrack('screen-0');
+      await settleUi(tester);
+
+      await tester.tap(find.byKey(const Key('logout_button')));
+      await settleUi(tester);
+
+      expect(surface, findsNothing);
+      expect(renderers.last.disposeCount, 1);
+    });
+
+    for (final viewSize in const [
+      Size(1280, 720),
+      Size(1024, 768),
+      Size(800, 600),
+      Size(420, 800),
+    ]) {
+      testWidgets(
+        'fits ${viewSize.width.toInt()}x${viewSize.height.toInt()} '
+        'without overflow',
+        (tester) async {
+          await pumpNegotiating(tester, viewSize: viewSize);
+          await establish(tester);
+          peers.last.emitRemoteVideoTrack('screen-0');
+          await settleUi(tester);
+
+          for (final aspectRatio in const [1280 / 800, 800 / 1280]) {
+            renderers.last.reportVideoAspectRatio(aspectRatio);
+            await settleUi(tester);
+
+            expect(tester.takeException(), isNull);
+            final size = tester.getSize(surface);
+            expect(size.width, lessThanOrEqualTo(viewSize.width));
+            expect(size.height, lessThanOrEqualTo(viewSize.height));
+            // Never stretched: the box has the picture's own proportions.
+            expect(size.width / size.height, closeTo(aspectRatio, 0.01));
+          }
+          expect(find.text('FINALIZAR ASISTENCIA'), findsOneWidget);
+        },
+      );
+    }
+  });
+
 
   group('closed from the tablet', () {
     testWidgets('the assistance disappears after re-reading the backend', (
