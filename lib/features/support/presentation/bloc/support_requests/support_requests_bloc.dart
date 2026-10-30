@@ -24,7 +24,8 @@ const String kAssignSucceededNotice =
 /// demand. The only write is `assign`, and at most one may be in flight.
 ///
 /// At most one `GET /support-requests` is in flight too. A reload asked for
-/// meanwhile — by hand, by `support-request:updated` or by a reconnection — is
+/// meanwhile — by hand, by `support-request:updated`, by
+/// `support-request:queue-updated` or by a reconnection — is
 /// neither started next to it nor lost: it is coalesced into one more GET
 /// once the current one ends.
 class SupportRequestsBloc

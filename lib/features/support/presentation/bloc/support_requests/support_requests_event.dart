@@ -16,9 +16,9 @@ final class SupportRequestsRequested extends SupportRequestsEvent {
 ///
 /// Dispatched by the ACTUALIZAR buttons and by the console coordinator — on
 /// `support-request:updated`, when the tablet answered a request assigned to
-/// this technician, and after a socket reconnection. A new `WAITING` request
-/// is not announced over realtime, so it still needs an explicit reload.
-/// Polling every few seconds is deliberately not used as a stand-in.
+/// this technician, on `support-request:queue-updated`, when the shared
+/// `WAITING` queue changed, and after a socket reconnection. Polling every few
+/// seconds is deliberately not used as a stand-in.
 ///
 /// Asked for while a GET is in flight, it is not dropped: it is coalesced into
 /// a single GET that runs as soon as the current one ends.

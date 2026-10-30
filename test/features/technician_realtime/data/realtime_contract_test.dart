@@ -4,6 +4,7 @@ import 'package:remote_control_web/features/technician_realtime/data/models/join
 import 'package:remote_control_web/features/technician_realtime/data/models/remote_session_active_notice_dto.dart';
 import 'package:remote_control_web/features/technician_realtime/data/models/remote_session_closed_notice_dto.dart';
 import 'package:remote_control_web/features/technician_realtime/data/models/remote_session_peer_joined_dto.dart';
+import 'package:remote_control_web/features/technician_realtime/data/models/support_request_queue_updated_notice_dto.dart';
 import 'package:remote_control_web/features/technician_realtime/data/models/support_request_updated_notice_dto.dart';
 import 'package:remote_control_web/features/technician_realtime/data/gateway/realtime_connect_error.dart';
 import 'package:remote_control_web/features/technician_realtime/data/realtime_contract.dart';
@@ -458,6 +459,77 @@ void main() {
 
     test('it reads the documented id field', () {
       final notice = SupportRequestUpdatedNoticeDto.fromEvent({
+        TechnicianRealtimeContract.supportRequestIdField: supportRequestId,
+      });
+
+      expect(notice!.supportRequestId, supportRequestId);
+    });
+  });
+
+  group('support-request:queue-updated', () {
+    const supportRequestId = '8f14e45f-ceea-4d3c-b4e2-2f4b3c9a1d77';
+
+    test('the event name is the documented one', () {
+      expect(
+        TechnicianRealtimeContract.supportRequestQueueUpdatedEvent,
+        'support-request:queue-updated',
+      );
+      // Its own event: the shared queue is not `support-request:updated`,
+      // which only reaches the owner of an assigned request.
+      for (final other in [
+        TechnicianRealtimeContract.supportRequestUpdatedEvent,
+        TechnicianRealtimeContract.remoteSessionActiveEvent,
+        TechnicianRealtimeContract.remoteSessionClosedEvent,
+        TechnicianRealtimeContract.remoteSessionPeerJoinedEvent,
+        TechnicianRealtimeContract.joinEvent,
+      ]) {
+        expect(
+          TechnicianRealtimeContract.supportRequestQueueUpdatedEvent,
+          isNot(other),
+        );
+      }
+    });
+
+    test('the payload is exactly { supportRequestId }', () {
+      final notice = SupportRequestQueueUpdatedNoticeDto.fromEvent({
+        'supportRequestId': supportRequestId,
+      });
+
+      expect(notice, isNotNull);
+      expect(notice!.supportRequestId, supportRequestId);
+      expect(notice.props, [supportRequestId]);
+    });
+
+    test('extra fields are ignored: it is a trigger, not the state', () {
+      final notice = SupportRequestQueueUpdatedNoticeDto.fromEvent({
+        'supportRequestId': supportRequestId,
+        'status': 'WAITING',
+        'deviceId': '550e8400-e29b-41d4-a716-446655440000',
+        'technicianId': 'someone-else',
+      });
+
+      expect(notice!.props, [supportRequestId]);
+    });
+
+    test('an invalid payload is ignored without throwing', () {
+      for (final data in <Object?>[
+        null,
+        'queue-updated',
+        42,
+        <Object?>[supportRequestId],
+        <String, Object?>{},
+        {'supportRequestId': null},
+        {'supportRequestId': 42},
+        {'supportRequestId': ''},
+        {'supportRequestId': '   '},
+        {'remoteSessionId': supportRequestId},
+      ]) {
+        expect(SupportRequestQueueUpdatedNoticeDto.fromEvent(data), isNull);
+      }
+    });
+
+    test('it reads the same documented id field', () {
+      final notice = SupportRequestQueueUpdatedNoticeDto.fromEvent({
         TechnicianRealtimeContract.supportRequestIdField: supportRequestId,
       });
 

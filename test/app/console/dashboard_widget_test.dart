@@ -589,6 +589,105 @@ void main() {
     });
   });
 
+  group('support-request:queue-updated', () {
+    const otherTechnicianId = '99999999-8888-7777-6666-555555555555';
+
+    testWidgets('a new WAITING request appears without ACTUALIZAR or F5', (
+      tester,
+    ) async {
+      supportRequests
+        ..requests = []
+        ..requestsAfterFirstLoad = [buildSupportRequest()];
+      await pumpConsole(tester);
+      expect(
+        find.text('No hay solicitudes esperando un técnico.'),
+        findsOneWidget,
+      );
+      expect(find.text('TOMAR SOLICITUD'), findsNothing);
+
+      // The tablet asked for help; every console is told the queue changed.
+      realtime.emitSupportRequestQueueUpdated(requestId);
+      await tester.pumpAndSettle();
+
+      expect(supportRequests.loadCount, 2);
+      expect(
+        find.byKey(const ValueKey('assign_button_$requestId')),
+        findsOneWidget,
+      );
+      expect(find.text('No hay solicitudes esperando un técnico.'), findsNothing);
+    });
+
+    testWidgets('a request taken by another technician stops being available', (
+      tester,
+    ) async {
+      supportRequests
+        ..requests = [buildSupportRequest()]
+        ..requestsAfterFirstLoad = [
+          buildSupportRequest(
+            status: SupportRequestStatus.assigned,
+            technician: otherTechnicianId,
+            assignedAt: DateTime.utc(2026, 3, 11, 9, 31),
+          ),
+        ];
+      await pumpConsole(tester);
+      expect(
+        find.byKey(const ValueKey('assign_button_$requestId')),
+        findsOneWidget,
+      );
+
+      realtime.emitSupportRequestQueueUpdated(requestId);
+      await tester.pumpAndSettle();
+
+      // Exactly what ACTUALIZAR shows for somebody else's request.
+      expect(
+        find.byKey(const ValueKey('assign_button_$requestId')),
+        findsNothing,
+      );
+      expect(find.text('TOMAR SOLICITUD'), findsNothing);
+      expect(find.text('EN CURSO CON OTROS TÉCNICOS (1)'), findsOneWidget);
+      expect(find.text('ASIGNADAS A TI (1)'), findsNothing);
+      expect(supportRequests.assignedIds, isEmpty);
+    });
+
+    testWidgets('a WAITING request cancelled by the tablet leaves the queue', (
+      tester,
+    ) async {
+      supportRequests
+        ..requests = [buildSupportRequest()]
+        ..requestsAfterFirstLoad = [
+          buildSupportRequest(
+            status: SupportRequestStatus.cancelled,
+            closedAt: DateTime.utc(2026, 3, 11, 9, 31),
+          ),
+        ];
+      await pumpConsole(tester);
+
+      realtime.emitSupportRequestQueueUpdated(requestId);
+      await tester.pumpAndSettle();
+
+      expect(find.text('TOMAR SOLICITUD'), findsNothing);
+      expect(find.text('HISTORIAL (1)'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('support_history_tile')));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Solicitud cancelada'), findsOneWidget);
+    });
+
+    testWidgets('a 401 on the refresh ends the session as usual', (
+      tester,
+    ) async {
+      supportRequests.requests = [buildSupportRequest()];
+      await pumpConsole(tester);
+
+      supportRequests.loadFailure = const AuthFailure();
+      realtime.emitSupportRequestQueueUpdated(requestId);
+      await tester.pumpAndSettle();
+
+      expect(find.byType(LoginPage), findsOneWidget);
+      expect(storage.token, isNull);
+      expect(realtime.disconnectCount, greaterThanOrEqualTo(1));
+    });
+  });
+
   group('security', () {
     testWidgets('the User JWT is never rendered', (tester) async {
       devices.devices = [buildDevice()];

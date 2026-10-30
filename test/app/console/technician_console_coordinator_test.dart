@@ -1104,6 +1104,309 @@ void main() {
     });
   });
 
+  group('support-request:queue-updated', () {
+    const otherTechnicianId = '99999999-8888-7777-6666-555555555555';
+    final waiting = buildSupportRequest();
+    final takenByOther = buildSupportRequest(
+      status: SupportRequestStatus.assigned,
+      technician: otherTechnicianId,
+      assignedAt: DateTime.utc(2026, 3, 11, 9, 31),
+    );
+    final cancelled = buildSupportRequest(
+      status: SupportRequestStatus.cancelled,
+      closedAt: DateTime.utc(2026, 3, 11, 9, 31),
+    );
+
+    /// The console with the queue loaded and the socket up. [initially] is
+    /// what the first `GET /support-requests` answers, [afterwards] what
+    /// every later one does.
+    Future<void> signInWithQueue({
+      required List<SupportRequest> initially,
+      List<SupportRequest>? afterwards,
+    }) async {
+      remoteSessions.current = null;
+      supportRequests
+        ..requests = initially
+        ..requestsAfterFirstLoad = afterwards;
+      await signIn();
+      realtime.emitConnected();
+      supportRequestsBloc.add(const SupportRequestsRequested());
+      await settle();
+    }
+
+    SupportRequestsLoaded queue() =>
+        supportRequestsBloc.state as SupportRequestsLoaded;
+
+    test('a new WAITING request is read from GET /support-requests', () async {
+      await signInWithQueue(initially: const [], afterwards: [waiting]);
+      expect(queue().waiting, isEmpty);
+      final loadsBefore = supportRequests.loadCount;
+
+      realtime.emitSupportRequestQueueUpdated(requestId);
+      await settle();
+
+      expect(supportRequests.loadCount, loadsBefore + 1);
+      expect(queue().waiting.map((r) => r.id), [requestId]);
+      expect(queue().isRefreshing, isFalse);
+      // A trigger for the queue and nothing else.
+      expect(supportRequests.assignedIds, isEmpty);
+      expect(remoteSessions.createdSupportRequestIds, isEmpty);
+      expect(realtime.joinedSessionIds, isEmpty);
+      expect(peers.sessions, isEmpty);
+    });
+
+    test('a request taken by another console leaves WAITING', () async {
+      await signInWithQueue(initially: [waiting], afterwards: [takenByOther]);
+      expect(queue().waiting, hasLength(1));
+
+      realtime.emitSupportRequestQueueUpdated(requestId);
+      await settle();
+
+      expect(queue().waiting, isEmpty);
+      // REST says whose it is; the console neither assigned nor adopted it.
+      expect(queue().assignedTo(technicianId), isEmpty);
+      expect(queue().requests.single.technicianId, otherTechnicianId);
+      expect(supportRequests.assignedIds, isEmpty);
+    });
+
+    test('a WAITING request cancelled by the tablet leaves WAITING', () async {
+      await signInWithQueue(initially: [waiting], afterwards: [cancelled]);
+
+      realtime.emitSupportRequestQueueUpdated(requestId);
+      await settle();
+
+      expect(queue().waiting, isEmpty);
+      expect(queue().history.map((r) => r.id), [requestId]);
+    });
+
+    test('the event alone never adds, removes or changes a row', () async {
+      await signInWithQueue(initially: [waiting], afterwards: [takenByOther]);
+      final gate = Completer<void>();
+      supportRequests.loadGate = gate.future;
+
+      // Its id is a request this console does not even show.
+      realtime.emitSupportRequestQueueUpdated('a-request-not-on-screen');
+      await settle();
+
+      expect(queue().isRefreshing, isTrue);
+      expect(queue().requests, [waiting]);
+
+      gate.complete();
+      await settle();
+
+      // Whatever REST answers, and only that.
+      expect(queue().requests, [takenByOther]);
+    });
+
+    test('an event during a GET in flight is not lost', () async {
+      await signInWithQueue(initially: const []);
+      final loadsBefore = supportRequests.loadCount;
+      final gate = Completer<void>();
+      supportRequests.loadGate = gate.future;
+
+      // GET #1 is out and reads an empty queue.
+      supportRequestsBloc.add(const SupportRequestsRefreshRequested());
+      await settle();
+
+      // The tablet asks for help: commit, then the event, while GET #1
+      // travels.
+      supportRequests.requests = [waiting];
+      realtime.emitSupportRequestQueueUpdated(requestId);
+      await settle();
+      expect(supportRequests.loadCount, loadsBefore + 1);
+
+      gate.complete();
+      await settle();
+
+      // GET #1 answered the stale empty queue; GET #2 brought the request.
+      expect(supportRequests.loadCount, loadsBefore + 2);
+      expect(queue().waiting.map((r) => r.id), [requestId]);
+      expect(queue().isRefreshing, isFalse);
+    });
+
+    test('a burst during a GET in flight costs one extra GET', () async {
+      await signInWithQueue(initially: const [], afterwards: [waiting]);
+      final loadsBefore = supportRequests.loadCount;
+      final gate = Completer<void>();
+      supportRequests.loadGate = gate.future;
+      supportRequestsBloc.add(const SupportRequestsRefreshRequested());
+      await settle();
+
+      realtime
+        ..emitSupportRequestQueueUpdated(requestId)
+        ..emitSupportRequestQueueUpdated('another-request')
+        ..emitSupportRequestQueueUpdated(requestId);
+      await settle();
+      expect(supportRequests.loadCount, loadsBefore + 1);
+
+      gate.complete();
+      supportRequests.loadGate = null;
+      await settle();
+
+      expect(supportRequests.loadCount, loadsBefore + 2);
+      expect(queue().waiting.map((r) => r.id), [requestId]);
+      expect(queue().isRefreshing, isFalse);
+
+      // Nothing loops on its own.
+      await settle();
+      expect(supportRequests.loadCount, loadsBefore + 2);
+    });
+
+    for (final queueFirst in [true, false]) {
+      final order = queueFirst
+          ? 'queue-updated then updated'
+          : 'updated then queue-updated';
+
+      test('$order, during a GET in flight, coalesce', () async {
+        final mine = buildSupportRequest(
+          id: 'mine',
+          status: SupportRequestStatus.assigned,
+          technician: technicianId,
+        );
+        await signInWithQueue(initially: [mine]);
+        final loadsBefore = supportRequests.loadCount;
+        final gate = Completer<void>();
+        supportRequests.loadGate = gate.future;
+        supportRequestsBloc.add(const SupportRequestsRefreshRequested());
+        await settle();
+
+        // Both changes commit while GET #1 travels: a new WAITING request
+        // and the tablet accepting the one assigned here.
+        final accepted = mine.copyWith(status: SupportRequestStatus.accepted);
+        supportRequests.requests = [waiting, accepted];
+        if (queueFirst) {
+          realtime
+            ..emitSupportRequestQueueUpdated(requestId)
+            ..emitSupportRequestUpdated('mine');
+        } else {
+          realtime
+            ..emitSupportRequestUpdated('mine')
+            ..emitSupportRequestQueueUpdated(requestId);
+        }
+        await settle();
+        expect(supportRequests.loadCount, loadsBefore + 1);
+
+        gate.complete();
+        supportRequests.loadGate = null;
+        await settle();
+
+        expect(supportRequests.loadCount, loadsBefore + 2);
+        expect(queue().waiting.map((r) => r.id), [requestId]);
+        expect(
+          queue().assignedTo(technicianId).single.status,
+          SupportRequestStatus.accepted,
+        );
+        expect(queue().isRefreshing, isFalse);
+        expect(queue().failure, isNull);
+      });
+
+      test('$order, while idle, cost one GET plus one follow-up', () async {
+        await signInWithQueue(initially: const [], afterwards: [waiting]);
+        final loadsBefore = supportRequests.loadCount;
+
+        if (queueFirst) {
+          realtime
+            ..emitSupportRequestQueueUpdated(requestId)
+            ..emitSupportRequestUpdated(requestId);
+        } else {
+          realtime
+            ..emitSupportRequestUpdated(requestId)
+            ..emitSupportRequestQueueUpdated(requestId);
+        }
+        await settle();
+
+        // The first starts a GET, the second is coalesced behind it.
+        expect(supportRequests.loadCount, loadsBefore + 2);
+        expect(queue().waiting.map((r) => r.id), [requestId]);
+        expect(queue().isRefreshing, isFalse);
+      });
+    }
+
+    test('a reconnection still re-reads the queue, once', () async {
+      await signInWithQueue(initially: const [], afterwards: [waiting]);
+      final loadsBefore = supportRequests.loadCount;
+
+      // The request was created while the socket was down: its event is lost.
+      realtime.emitReconnecting();
+      await settle();
+      realtime.emitConnected();
+      await settle();
+
+      expect(supportRequests.loadCount, loadsBefore + 1);
+      expect(queue().waiting.map((r) => r.id), [requestId]);
+    });
+
+    test('an event after signing out requests nothing', () async {
+      await signInWithQueue(initially: [waiting]);
+      userSessionBloc.add(const UserSessionSignOutRequested());
+      await settle();
+      final loadsBefore = supportRequests.loadCount;
+
+      realtime.emitSupportRequestQueueUpdated(requestId);
+      await settle();
+
+      expect(supportRequests.loadCount, loadsBefore);
+    });
+
+    test('a pending refresh does not survive signing out', () async {
+      await signInWithQueue(initially: const []);
+      final loadsBefore = supportRequests.loadCount;
+      final gate = Completer<void>();
+      supportRequests.loadGate = gate.future;
+      supportRequestsBloc.add(const SupportRequestsRefreshRequested());
+      await settle();
+      realtime.emitSupportRequestQueueUpdated(requestId);
+      await settle();
+
+      userSessionBloc.add(const UserSessionSignOutRequested());
+      await settle();
+      gate.complete();
+      await settle();
+
+      expect(supportRequests.loadCount, loadsBefore + 1);
+    });
+
+    test('a 401 during a GET in flight runs no pending refresh', () async {
+      await signInWithQueue(initially: const []);
+      final loadsBefore = supportRequests.loadCount;
+      final gate = Completer<void>();
+      supportRequests.loadGate = gate.future;
+      supportRequestsBloc.add(const SupportRequestsRefreshRequested());
+      await settle();
+      realtime.emitSupportRequestQueueUpdated(requestId);
+      await settle();
+
+      supportRequests.loadFailure = const AuthFailure();
+      gate.complete();
+      await settle();
+
+      expect(supportRequests.loadCount, loadsBefore + 1);
+      expect(queue().failure, isA<AuthFailure>());
+    });
+
+    test('a network failure keeps the queue, and a later event syncs', () async {
+      await signInWithQueue(initially: [waiting]);
+
+      supportRequests.loadFailure = const NetworkFailure();
+      realtime.emitSupportRequestQueueUpdated(requestId);
+      await settle();
+
+      expect(queue().requests, [waiting]);
+      expect(queue().failure, isA<NetworkFailure>());
+      expect(userSessionBloc.state, isA<UserSessionAuthenticated>());
+
+      // The network is back and the request was taken meanwhile.
+      supportRequests
+        ..loadFailure = null
+        ..requests = [takenByOther];
+      realtime.emitSupportRequestQueueUpdated(requestId);
+      await settle();
+
+      expect(queue().waiting, isEmpty);
+      expect(queue().failure, isNull);
+    });
+  });
+
   group('refused relay', () {
     const sdp = 'v=0 o=- 46117 2 IN IP4 127.0.0.1';
     const offer = WebRtcOffer(remoteSessionId: remoteSessionId, sdp: sdp);

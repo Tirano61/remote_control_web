@@ -10,6 +10,7 @@ import '../../features/technician_realtime/domain/client/technician_realtime_cli
 import '../../features/technician_realtime/domain/entities/remote_session_active_notice.dart';
 import '../../features/technician_realtime/domain/entities/remote_session_closed_notice.dart';
 import '../../features/technician_realtime/domain/entities/signaling_error_code.dart';
+import '../../features/technician_realtime/domain/entities/support_request_queue_updated_notice.dart';
 import '../../features/technician_realtime/domain/entities/support_request_updated_notice.dart';
 import '../../features/technician_realtime/domain/entities/technician_realtime_status.dart';
 import '../../features/technician_realtime/presentation/bloc/signaling_join/signaling_join_bloc.dart';
@@ -40,6 +41,7 @@ const String kRealtimeSessionRejectedNotice =
 /// remote-session:active              -> GET current (never the event as state)
 /// remote-session:closed              -> GET current (never the event as state)
 /// support-request:updated            -> GET /support-requests (idem)
+/// support-request:queue-updated      -> GET /support-requests (idem)
 /// live session disappeared          -> reload the support request queue
 /// socket handshake rejected          -> the user session is over
 /// relay refused NOT_JOINED           -> join the room again, once
@@ -172,6 +174,11 @@ class TechnicianConsoleCoordinator {
       ..add(
         _realtimeClient.supportRequestUpdated.listen(_onSupportRequestUpdated),
       )
+      ..add(
+        _realtimeClient.supportRequestQueueUpdated.listen(
+          _onSupportRequestQueueUpdated,
+        ),
+      )
       ..add(_signalingClient.relayRefusals.listen(_onRelayRefused));
 
     // The console is opened by an already authenticated session, so the
@@ -231,8 +238,10 @@ class TechnicianConsoleCoordinator {
       _lastConnectionId = status.connectionId;
       if (previousConnectionId != null &&
           previousConnectionId != status.connectionId) {
-        // `support-request:updated` is not replayed: whatever the tablet
-        // answered while the socket was down is only known to REST.
+        // Neither `support-request:updated` nor
+        // `support-request:queue-updated` is replayed: whatever the tablet
+        // answered, created or cancelled while the socket was down is only
+        // known to REST.
         _supportRequestsBloc.add(const SupportRequestsRefreshRequested());
       }
       _resetRelayGuards(connectionId: status.connectionId);
@@ -356,6 +365,21 @@ class TechnicianConsoleCoordinator {
     // row is looked up or rewritten here, and no assistance is started. The
     // whole queue is re-read, as documented, whatever id the event names;
     // the BLoC's in-flight guard is what keeps a burst from piling up GETs.
+    _supportRequestsBloc.add(const SupportRequestsRefreshRequested());
+  }
+
+  /// `support-request:queue-updated` arrived over `/technicians`: the shared
+  /// `WAITING` queue changed — a new request, one taken by a technician (this
+  /// one or another), or one cancelled by the tablet before being taken.
+  ///
+  /// It is kept apart from [_onSupportRequestUpdated] on purpose: different
+  /// audience, different meaning. Both answer with the same GET today.
+  void _onSupportRequestQueueUpdated(SupportRequestQueueUpdatedNotice notice) {
+    if (_userSessionBloc.state is! UserSessionAuthenticated) return;
+
+    // No card is added, removed or moved from the event: REST says whether the
+    // request is `WAITING`, `ASSIGNED` or `CANCELLED`. A burst — every console
+    // hears every change — is coalesced by the BLoC's pending refresh.
     _supportRequestsBloc.add(const SupportRequestsRefreshRequested());
   }
 
