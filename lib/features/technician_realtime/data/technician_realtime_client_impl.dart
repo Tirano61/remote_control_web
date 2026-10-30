@@ -11,6 +11,7 @@ import '../domain/entities/remote_session_active_notice.dart';
 import '../domain/entities/remote_session_closed_notice.dart';
 import '../domain/entities/remote_session_peer_joined_notice.dart';
 import '../domain/entities/signaling_error_code.dart';
+import '../domain/entities/support_request_updated_notice.dart';
 import '../domain/entities/technician_realtime_status.dart';
 import 'gateway/realtime_connect_error.dart';
 import 'gateway/realtime_socket_gateway.dart';
@@ -19,6 +20,7 @@ import 'models/join_remote_session_ack_dto.dart';
 import 'models/remote_session_active_notice_dto.dart';
 import 'models/remote_session_closed_notice_dto.dart';
 import 'models/remote_session_peer_joined_dto.dart';
+import 'models/support_request_updated_notice_dto.dart';
 import 'realtime_contract.dart';
 
 /// Socket.IO implementation of the `/technicians` namespace.
@@ -75,6 +77,9 @@ class TechnicianRealtimeClientImpl
       StreamController<RemoteSessionActiveNotice>.broadcast();
   final StreamController<RemoteSessionPeerJoinedNotice> _peerJoinedController =
       StreamController<RemoteSessionPeerJoinedNotice>.broadcast();
+  final StreamController<SupportRequestUpdatedNotice>
+  _supportRequestUpdatedController =
+      StreamController<SupportRequestUpdatedNotice>.broadcast();
 
   /// Relayed `webrtc:*` events, forwarded raw to the signaling client.
   final StreamController<SignalingWireEvent> _signalingController =
@@ -110,6 +115,10 @@ class TechnicianRealtimeClientImpl
   @override
   Stream<RemoteSessionActiveNotice> get remoteSessionActivated =>
       _activeController.stream;
+
+  @override
+  Stream<SupportRequestUpdatedNotice> get supportRequestUpdated =>
+      _supportRequestUpdatedController.stream;
 
   @override
   Stream<RemoteSessionPeerJoinedNotice> get peerJoined =>
@@ -225,6 +234,20 @@ class TechnicianRealtimeClientImpl
       if (!_closedController.isClosed) _closedController.add(notice);
     });
 
+    gateway.onEvent(TechnicianRealtimeContract.supportRequestUpdatedEvent, (
+      data,
+    ) {
+      if (!identical(_gateway, gateway)) return;
+      final notice = SupportRequestUpdatedNoticeDto.fromEvent(data);
+      if (notice == null) return;
+      logDebug(
+        'support-request:updated received ${notice.supportRequestId}',
+      );
+      if (!_supportRequestUpdatedController.isClosed) {
+        _supportRequestUpdatedController.add(notice);
+      }
+    });
+
     _emit(const TechnicianRealtimeConnecting());
     gateway.connect();
   }
@@ -301,6 +324,7 @@ class TechnicianRealtimeClientImpl
     await _closedController.close();
     await _activeController.close();
     await _peerJoinedController.close();
+    await _supportRequestUpdatedController.close();
     await _signalingController.close();
   }
 

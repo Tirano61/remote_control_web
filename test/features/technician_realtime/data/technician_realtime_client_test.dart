@@ -565,6 +565,132 @@ void main() {
     });
   });
 
+  group('support-request:updated', () {
+    const supportRequestId = '8f14e45f-ceea-4d3c-b4e2-2f4b3c9a1d77';
+
+    test('is published as a typed notice, without having joined', () async {
+      await client.connect();
+      final gateway = factory.last;
+      gateway.completeHandshake();
+
+      final received = client.supportRequestUpdated.first;
+      gateway.emitServerEvent(
+        TechnicianRealtimeContract.supportRequestUpdatedEvent,
+        {'supportRequestId': supportRequestId},
+      );
+
+      expect((await received).supportRequestId, supportRequestId);
+      // Addressed to the technician: no join, no session, nothing emitted.
+      expect(gateway.emitted, isEmpty);
+    });
+
+    test('an invalid payload produces no notice', () async {
+      await client.connect();
+      final gateway = factory.last;
+      gateway.completeHandshake();
+
+      var received = 0;
+      client.supportRequestUpdated.listen((_) => received++);
+      for (final data in <Object?>[
+        null,
+        'updated',
+        <Object?>[supportRequestId],
+        <String, Object?>{},
+        {'supportRequestId': null},
+        {'supportRequestId': 42},
+        {'supportRequestId': ''},
+      ]) {
+        gateway.emitServerEvent(
+          TechnicianRealtimeContract.supportRequestUpdatedEvent,
+          data,
+        );
+      }
+      await Future<void>.delayed(Duration.zero);
+
+      expect(received, 0);
+    });
+
+    test('a replaced socket is ignored and the new one listens once', () async {
+      await client.connect();
+      final first = factory.last;
+      first.completeHandshake();
+      var received = 0;
+      client.supportRequestUpdated.listen((_) => received++);
+
+      await client.disconnect();
+      await client.connect();
+      final second = factory.last;
+      second.completeHandshake();
+      expect(second, isNot(same(first)));
+      // The old socket was released, not kept alongside the new one.
+      expect(first.disposeCount, 1);
+
+      first.emitServerEvent(
+        TechnicianRealtimeContract.supportRequestUpdatedEvent,
+        {'supportRequestId': supportRequestId},
+      );
+      second.emitServerEvent(
+        TechnicianRealtimeContract.supportRequestUpdatedEvent,
+        {'supportRequestId': supportRequestId},
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      // Only the live socket counts, and it delivers exactly once.
+      expect(received, 1);
+      for (final gateway in [first, second]) {
+        expect(
+          gateway.eventRegistrations[
+              TechnicianRealtimeContract.supportRequestUpdatedEvent],
+          1,
+        );
+      }
+    });
+
+    test('it does not interfere with the other notifications', () async {
+      await client.connect();
+      final gateway = factory.last;
+      gateway.completeHandshake();
+      final join = client.joinRemoteSession(sessionId);
+      gateway.answerAck({
+        'joined': true,
+        'remoteSessionId': sessionId,
+        'peerJoined': false,
+      });
+      await join;
+
+      var updated = 0;
+      var active = 0;
+      var closed = 0;
+      var signaling = 0;
+      client.supportRequestUpdated.listen((_) => updated++);
+      client.remoteSessionActivated.listen((_) => active++);
+      client.remoteSessionClosed.listen((_) => closed++);
+      client.signalingEvents.listen((_) => signaling++);
+
+      gateway.emitServerEvent(
+        TechnicianRealtimeContract.supportRequestUpdatedEvent,
+        {'supportRequestId': supportRequestId},
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect((updated, active, closed, signaling), (1, 0, 0, 0));
+
+      gateway
+        ..emitServerEvent(
+          TechnicianRealtimeContract.remoteSessionActiveEvent,
+          {'remoteSessionId': sessionId},
+        )
+        ..emitServerEvent(
+          TechnicianRealtimeContract.remoteSessionClosedEvent,
+          {'remoteSessionId': sessionId, 'endedBy': 'DEVICE'},
+        );
+      await Future<void>.delayed(Duration.zero);
+      expect((updated, active, closed, signaling), (1, 1, 1, 0));
+
+      // A domain notification is not membership.
+      expect(client.joinedRemoteSessionId, sessionId);
+    });
+  });
+
   group('remote-session:closed', () {
     test('is delivered without having joined anything', () async {
       await client.connect();

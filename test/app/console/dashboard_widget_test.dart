@@ -432,6 +432,163 @@ void main() {
     });
   });
 
+  group('support-request:updated', () {
+    final assigned = buildSupportRequest(
+      status: SupportRequestStatus.assigned,
+      technician: technicianId,
+    );
+
+    testWidgets('the tablet accepts and INICIAR ASISTENCIA appears without F5', (
+      tester,
+    ) async {
+      supportRequests
+        ..requests = [assigned]
+        ..requestsAfterFirstLoad = [
+          buildSupportRequest(
+            status: SupportRequestStatus.accepted,
+            technician: technicianId,
+          ),
+        ];
+      await pumpConsole(tester);
+      expect(
+        find.text('Estado: Esperando autorización del usuario'),
+        findsOneWidget,
+      );
+      expect(find.text('INICIAR ASISTENCIA'), findsNothing);
+
+      // The backend committed ACCEPTED and told the assigned technician.
+      realtime.emitSupportRequestUpdated(requestId);
+      await tester.pumpAndSettle();
+
+      expect(supportRequests.loadCount, 2);
+      expect(
+        find.text('Estado: Usuario autorizó la asistencia'),
+        findsOneWidget,
+      );
+      expect(find.text('INICIAR ASISTENCIA'), findsOneWidget);
+      // Nothing was started on the technician's behalf.
+      expect(remoteSessions.createdSupportRequestIds, isEmpty);
+    });
+
+    testWidgets('the tablet rejects and the request moves to the history', (
+      tester,
+    ) async {
+      supportRequests
+        ..requests = [assigned]
+        ..requestsAfterFirstLoad = [
+          buildSupportRequest(
+            status: SupportRequestStatus.rejected,
+            technician: technicianId,
+            closedAt: DateTime.utc(2026, 3, 11, 9, 32),
+          ),
+        ];
+      await pumpConsole(tester);
+
+      realtime.emitSupportRequestUpdated(requestId);
+      await tester.pumpAndSettle();
+
+      // Exactly what ACTUALIZAR or an F5 would show.
+      expect(find.text('ASIGNADAS A TI (1)'), findsNothing);
+      expect(find.text('HISTORIAL (1)'), findsOneWidget);
+      expect(find.text('INICIAR ASISTENCIA'), findsNothing);
+    });
+
+    testWidgets('the tablet cancels and the request moves to the history', (
+      tester,
+    ) async {
+      supportRequests
+        ..requests = [assigned]
+        ..requestsAfterFirstLoad = [
+          buildSupportRequest(
+            status: SupportRequestStatus.cancelled,
+            technician: technicianId,
+            closedAt: DateTime.utc(2026, 3, 11, 9, 32),
+          ),
+        ];
+      await pumpConsole(tester);
+
+      realtime.emitSupportRequestUpdated(requestId);
+      await tester.pumpAndSettle();
+
+      expect(find.text('HISTORIAL (1)'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('support_history_tile')));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Solicitud cancelada'), findsOneWidget);
+    });
+
+    testWidgets('an acceptance during a GET in flight still shows up', (
+      tester,
+    ) async {
+      supportRequests.requests = [assigned];
+      await pumpConsole(tester);
+      final gate = Completer<void>();
+      supportRequests.loadGate = gate.future;
+
+      // GET #1 is out and reads ASSIGNED.
+      await tester.tap(find.byKey(const Key('support_refresh_button')));
+      await tester.pump();
+
+      // The tablet accepts: commit, then the event, while GET #1 travels.
+      supportRequests.requests = [
+        buildSupportRequest(
+          status: SupportRequestStatus.accepted,
+          technician: technicianId,
+        ),
+      ];
+      realtime.emitSupportRequestUpdated(requestId);
+      await tester.pump();
+      expect(supportRequests.loadCount, 2);
+
+      gate.complete();
+      await tester.pumpAndSettle();
+
+      // GET #1 answered ASSIGNED, GET #2 ACCEPTED — without F5.
+      expect(supportRequests.loadCount, 3);
+      expect(
+        find.text('Estado: Usuario autorizó la asistencia'),
+        findsOneWidget,
+      );
+      expect(find.text('INICIAR ASISTENCIA'), findsOneWidget);
+    });
+
+    testWidgets('a 401 with a refresh pending signs out without another GET', (
+      tester,
+    ) async {
+      supportRequests.requests = [assigned];
+      await pumpConsole(tester);
+      final gate = Completer<void>();
+      supportRequests.loadGate = gate.future;
+      await tester.tap(find.byKey(const Key('support_refresh_button')));
+      await tester.pump();
+      realtime.emitSupportRequestUpdated(requestId);
+      await tester.pump();
+
+      supportRequests.loadFailure = const AuthFailure();
+      gate.complete();
+      await tester.pumpAndSettle();
+
+      expect(find.byType(LoginPage), findsOneWidget);
+      expect(storage.token, isNull);
+      expect(supportRequests.loadCount, 2);
+    });
+
+    testWidgets('a 401 on the refresh ends the session as usual', (
+      tester,
+    ) async {
+      supportRequests.requests = [assigned];
+      await pumpConsole(tester);
+
+      supportRequests.loadFailure = const AuthFailure();
+      realtime.emitSupportRequestUpdated(requestId);
+      await tester.pumpAndSettle();
+
+      expect(find.byType(LoginPage), findsOneWidget);
+      expect(find.byType(DashboardPage), findsNothing);
+      expect(storage.token, isNull);
+      expect(realtime.disconnectCount, greaterThanOrEqualTo(1));
+    });
+  });
+
   group('security', () {
     testWidgets('the User JWT is never rendered', (tester) async {
       devices.devices = [buildDevice()];

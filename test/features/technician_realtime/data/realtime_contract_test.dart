@@ -4,6 +4,7 @@ import 'package:remote_control_web/features/technician_realtime/data/models/join
 import 'package:remote_control_web/features/technician_realtime/data/models/remote_session_active_notice_dto.dart';
 import 'package:remote_control_web/features/technician_realtime/data/models/remote_session_closed_notice_dto.dart';
 import 'package:remote_control_web/features/technician_realtime/data/models/remote_session_peer_joined_dto.dart';
+import 'package:remote_control_web/features/technician_realtime/data/models/support_request_updated_notice_dto.dart';
 import 'package:remote_control_web/features/technician_realtime/data/gateway/realtime_connect_error.dart';
 import 'package:remote_control_web/features/technician_realtime/data/realtime_contract.dart';
 import 'package:remote_control_web/features/technician_realtime/domain/entities/join_remote_session_result.dart';
@@ -392,8 +393,84 @@ void main() {
     });
   });
 
+  group('support-request:updated', () {
+    const supportRequestId = '8f14e45f-ceea-4d3c-b4e2-2f4b3c9a1d77';
+
+    test('the event name is the documented one', () {
+      expect(
+        TechnicianRealtimeContract.supportRequestUpdatedEvent,
+        'support-request:updated',
+      );
+      // A support request notification, not a session one.
+      for (final other in [
+        TechnicianRealtimeContract.remoteSessionActiveEvent,
+        TechnicianRealtimeContract.remoteSessionClosedEvent,
+        TechnicianRealtimeContract.remoteSessionPeerJoinedEvent,
+        TechnicianRealtimeContract.joinEvent,
+      ]) {
+        expect(
+          TechnicianRealtimeContract.supportRequestUpdatedEvent,
+          isNot(other),
+        );
+      }
+    });
+
+    test('the payload is exactly { supportRequestId }', () {
+      final notice = SupportRequestUpdatedNoticeDto.fromEvent({
+        'supportRequestId': supportRequestId,
+      });
+
+      expect(notice, isNotNull);
+      expect(notice!.supportRequestId, supportRequestId);
+      expect(notice.props, [supportRequestId]);
+    });
+
+    test('extra fields are ignored: it is a trigger, not the state', () {
+      // Even a backend that one day added a status would change nothing: the
+      // console reads the request from `GET /support-requests`.
+      final notice = SupportRequestUpdatedNoticeDto.fromEvent({
+        'supportRequestId': supportRequestId,
+        'status': 'ACCEPTED',
+        'technicianId': 'someone-else',
+        'remoteSessionId': '3d1b9e64-9a0f-4c88-9d0a-6f2a5c7e8b10',
+      });
+
+      expect(notice!.props, [supportRequestId]);
+    });
+
+    test('an invalid payload is ignored without throwing', () {
+      for (final data in <Object?>[
+        null,
+        'updated',
+        42,
+        <Object?>[supportRequestId],
+        <String, Object?>{},
+        {'supportRequestId': null},
+        {'supportRequestId': 42},
+        {'supportRequestId': ''},
+        {'supportRequestId': '   '},
+        // The session id field is not the support request id field.
+        {'remoteSessionId': supportRequestId},
+      ]) {
+        expect(SupportRequestUpdatedNoticeDto.fromEvent(data), isNull);
+      }
+    });
+
+    test('it reads the documented id field', () {
+      final notice = SupportRequestUpdatedNoticeDto.fromEvent({
+        TechnicianRealtimeContract.supportRequestIdField: supportRequestId,
+      });
+
+      expect(notice!.supportRequestId, supportRequestId);
+    });
+  });
+
   group('field names', () {
     test('match the contract exactly', () {
+      expect(
+        TechnicianRealtimeContract.supportRequestIdField,
+        'supportRequestId',
+      );
       expect(TechnicianRealtimeContract.authTokenField, 'token');
       expect(
         TechnicianRealtimeContract.remoteSessionIdField,

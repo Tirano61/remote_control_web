@@ -34,6 +34,17 @@ class TechnicianRealtimeContract {
   /// that asked for the activation receives it too.
   static const String remoteSessionActiveEvent = 'remote-session:active';
 
+  /// Server to client domain notification: the tablet accepted, rejected or
+  /// cancelled a support request assigned to this technician. Requires no
+  /// join and no `RemoteSession`.
+  ///
+  /// Payload: `{ supportRequestId }`. It carries no status: it is a trigger
+  /// for `GET /support-requests`, never the state itself.
+  static const String supportRequestUpdatedEvent = 'support-request:updated';
+
+  /// The only field of `support-request:updated`.
+  static const String supportRequestIdField = 'supportRequestId';
+
   /// Server to client readiness notification: the other end of the session
   /// joined its signaling room after this socket did.
   ///
