@@ -15,9 +15,10 @@ import 'webrtc_contract.dart';
 
 /// Builds a real `RTCPeerConnection` for every negotiation.
 ///
-/// This file and the two mappers next to it are the only ones in the
-/// application that import `package:flutter_webrtc`. Everything else — the
-/// BLoC, the coordinator, the widgets — sees the port and the domain models.
+/// `package:flutter_webrtc` is imported only in this `data` folder: this
+/// adapter, its two mappers, the track handle and the renderer adapter.
+/// Everything else — the BLoC, the coordinator, the widgets — sees the ports
+/// and the domain models.
 class FlutterWebRtcPeerClient implements WebRtcPeerClient {
   const FlutterWebRtcPeerClient({
     RtcPeerConnectionFactory peerConnectionFactory = _createPeerConnection,
@@ -102,12 +103,11 @@ class FlutterWebRtcPeerSession implements WebRtcPeerSession {
   Stream<WebRtcPeerEvent> get events => _events.stream;
 
   /// The video track currently being received, or `null` while the tablet
-  /// sends none — which is the normal state today, since screen capture is not
-  /// implemented on the device yet.
+  /// sends none — before MediaProjection consent, or when it was refused.
   ///
   /// Not part of the port: above the data layer a track is announced by
-  /// [RemoteVideoTrackAvailable] and nothing else. This getter exists for the
-  /// renderer binding that will live next to this adapter, and for the tests
+  /// [RemoteVideoTrackAvailable] and nothing else, and it is that event's
+  /// handle the renderer adapter is given. This getter exists for the tests
   /// that check the reference is dropped on close.
   FlutterWebRtcRemoteVideoTrack? get remoteVideoTrack => _remoteVideoTrack;
 

@@ -60,6 +60,7 @@ void main() {
             transport: realtime,
           ),
           webRtcPeerClient: FakeWebRtcPeerClient(),
+          remoteVideoRendererFactory: FakeRemoteVideoRendererFactory().create,
         ),
       ),
     );

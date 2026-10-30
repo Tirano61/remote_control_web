@@ -13,14 +13,12 @@
 ///      no content; safe to log and safe to compare.
 /// ```
 ///
-/// **Binding a renderer later.** A future stage will display this track with
-/// an `RTCVideoRenderer`, which needs the real media object. The seam is
-/// already decided and does not change this interface: the widget that builds
-/// the view is injected into presentation as a builder, and its only
-/// implementation lives next to the adapter, where the concrete
-/// implementation of this interface can be recognised and unwrapped. So
-/// presentation passes a [RemoteVideoTrack] to a builder and never learns what
-/// is inside — exactly as it passes a `WebRtcOffer` to signaling today.
+/// **Rendering.** The track is displayed with an `RTCVideoRenderer`, which
+/// needs the real media object. Presentation hands this handle to a
+/// `RemoteVideoRenderer` port, whose only implementation lives in `data` next
+/// to the peer connection adapter, where the concrete implementation of this
+/// interface is recognised and unwrapped. So presentation never learns what
+/// is inside — exactly as it passes a `WebRtcOffer` to signaling.
 abstract interface class RemoteVideoTrack {
   /// The track id reported by WebRTC. Opaque, stable for the life of the
   /// track, and free of media content.

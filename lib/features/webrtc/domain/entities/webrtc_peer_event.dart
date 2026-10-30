@@ -91,8 +91,8 @@ final class ControlChannelMessageReceived extends WebRtcPeerEvent {
 ///
 /// It is **not** a connection state. A negotiation is connected when the peer
 /// connection is connected and the `control` channel is open; whether a screen
-/// is also arriving is a separate question, and today the tablet does not send
-/// one yet.
+/// is also arriving is a separate question — the tablet only sends one once
+/// the user granted MediaProjection.
 final class RemoteVideoTrackAvailable extends WebRtcPeerEvent {
   const RemoteVideoTrackAvailable(this.track);
 

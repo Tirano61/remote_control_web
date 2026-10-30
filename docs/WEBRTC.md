@@ -1,6 +1,7 @@
 # WebRTC on the technician console — decisions
 
-Stage: Prompt 7 (the offer also asks to receive the tablet's screen).
+Stage: Prompt 11 (the tablet's screen is displayed; remote control is not
+implemented yet).
 
 This document records the choices that are **not** part of the backend
 contract. `docs/backend/REALTIME.md` only relays SDP and ICE and is
@@ -133,25 +134,25 @@ remote_control_web      DataChannel creator      VIDEO recvonly
 remote_control_device   DataChannel receiver     VIDEO sendonly (MediaProjection)
 ```
 
-**Screen capture is not implemented.** The tablet does not create a video track
-yet: `MediaProjection`, the consent dialog it requires and the local
-`VideoTrack` are the next stage on the device side. What exists today is the
-*offer* that makes it possible — a session negotiated without a video section
-could not receive a screen without renegotiating, and renegotiation is
-deliberately not implemented either.
+The tablet captures its screen with `MediaProjection` and attaches the
+resulting `VideoTrack` to the transceiver this offer created, answering it as
+`sendonly`. That path has been observed end to end with a physical tablet up to
+the console receiving the track; no renegotiation is involved, and none is
+implemented.
 
-So this is a normal, healthy state and the console treats it as one:
+A session without a picture is still a normal, healthy state, and the console
+treats it as one:
 
 ```text
 RTCPeerConnection  connected
 control channel    open
-remote video       none
+remote video       none      (consent pending on the tablet, or refused)
 ```
 
 Nothing is degraded by the absence of a screen. The assistance is established
 when the peer connection is `connected` **and** `control` is `open`, exactly as
-before; "control connected" and "screen available" become two different things
-in a later stage, when there is something to display.
+before. "Control connected" and "screen available" are two different facts:
+the second never gates the first, and never gates `POST /remote-sessions/:id/activate`.
 
 ### Why a transceiver
 
@@ -201,15 +202,128 @@ The real `MediaStreamTrack` and the `MediaStream` it was announced in stay
 inside `FlutterWebRtcRemoteVideoTrack`, next to the adapter, so no BLoC and no
 widget imports `package:flutter_webrtc` to know a screen is arriving.
 
-**Binding a renderer later.** `RTCVideoRenderer` needs the real
-`MediaStream`. The seam is already chosen and does not change the domain: the
-widget that builds the view will be injected into presentation as a builder,
-and its only implementation will live next to the adapter, where the concrete
-handle can be recognised and unwrapped. Presentation will hand it a
-`RemoteVideoTrack` and still never learn what is inside.
+The BLoC keeps the handle of the **current** negotiation in its state
+(`WebRtcSessionState.remoteVideoTrack`, `hasRemoteVideo`) and carries it
+through `connecting -> connected -> interrupted`. The generation guard drops
+the track of a replaced or closed peer connection before it reaches the state,
+and every ending of a negotiation forgets it.
 
-Today nothing consumes the event beyond a debug line: there is no renderer, no
-`RTCVideoView`, and no UI for a screen that is not being captured.
+## Rendering the screen
+
+```text
+remote track (onTrack, kind video)
+  -> RemoteVideoTrack                    opaque handle, domain
+  -> RemoteVideoRenderer                 presentation port
+  -> FlutterWebRtcRemoteVideoRenderer    data, the only renderer adapter
+  -> RTCVideoRenderer                    flutter_webrtc
+  -> RTCVideoView                        the visible picture
+```
+
+### The seam
+
+`RemoteVideoRenderer` is a port declared in presentation — it produces a
+widget, so it cannot be a domain one — with a small lifecycle: `initialize`,
+`attach(RemoteVideoTrack)`, `detach`, `dispose`, plus `buildView`, `track`,
+`isDisplaying` and `aspectRatio`. None of `RTCVideoRenderer`, `MediaStream`,
+`MediaStreamTrack` or `RTCVideoView` appears in it.
+
+Its single implementation, `FlutterWebRtcRemoteVideoRenderer`, lives in
+`data` next to the peer connection adapter. It recognises its own concrete
+handle (`is FlutterWebRtcRemoteVideoTrack`) and unwraps it there. A handle it
+does not know is refused with `RemoteVideoAttachResult.unsupportedTrack`: no
+exception, and whatever was on screen is cleared rather than left behind.
+
+The composition root hands the factory to the console
+(`AppDependencies.remoteVideoRendererFactory`); tests hand a fake.
+
+### Lifecycle
+
+One adapter owns exactly one `RTCVideoRenderer`, created with it:
+
+```text
+constructor  RTCVideoRenderer()
+initialize   renderer.initialize()          memoised: once, whoever asks
+attach       renderer.srcObject = stream    replaces the previous track
+detach       renderer.srcObject = null
+dispose      renderer.dispose()             once; waits for a pending initialize
+```
+
+The adapter is owned by `RemoteScreenView`, a `StatefulWidget`: created in
+`initState`, attached or detached in `didUpdateWidget` when the track changes,
+disposed in `dispose`. Nothing is created in `build`.
+
+Every attach, detach and dispose bumps a counter; an attach that finds another
+number after one of its awaits was overtaken and does not touch the renderer.
+The newest request always wins, so a quick `A -> B` never ends with A.
+
+On the web, `RTCVideoView` looks its `<video>` element up once, when it is
+mounted, and that element only exists after `initialize()`. The view is
+therefore only built once the renderer is initialised and a track is bound.
+
+### The stream handed to the renderer
+
+`RTCVideoRenderer` renders streams, not tracks:
+
+* the stream the track was announced in (`onTrack.streams`, from the `msid`)
+  is used as it is when it carries exactly that video track and nothing else —
+  the normal case;
+* otherwise — no `msid`, or a stream that unexpectedly carries audio or a
+  second video — a local stream (`createLocalMediaStream`) wrapping the screen
+  track alone is built. Audio therefore never reaches the renderer, and the web
+  renderer never creates an `<audio>` element.
+
+Neither the track nor any stream is stopped or disposed by the console: they
+belong to the peer connection. Releasing them means dropping the reference.
+Nothing touches the peer connection, the transceiver or any SDP.
+
+### The view
+
+```text
+RTCVideoView(renderer,
+  objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+  mirror:    false)
+```
+
+`contain`, never `cover`: the screen is letterboxed, never cropped or
+stretched. Not mirrored: it is a screen, not a camera.
+
+The surface is laid out with the aspect ratio the stream itself reports
+(`RTCVideoValue`, updated on `canplay` and `resize`). Nothing is hardcoded —
+the physical tablet happens to capture 1280x800, but a rotation or another
+resolution simply reports another ratio and the surface reshapes. The surface
+takes the full width of the assistance block, at most 70% of the window
+height, and the largest box of the video's ratio that fits both.
+
+Until the first frames have told their size, and whenever no track is
+attached, the surface shows **"Esperando pantalla del dispositivo..."**. That
+is decided by the renderer reporting a size, never by a timer.
+
+The surface is visual only: it does not listen to pointer, mouse or keyboard
+events. Remote control is a later stage.
+
+### What the console does not know
+
+Nothing in the protocol tells the web that the tablet refused
+`MediaProjection` or that its capture failed. "Pantalla del dispositivo no
+disponible" is therefore never shown: without a track the console keeps
+waiting, and the assistance stays valid without a picture. If the tablet ever
+signals it, it will have to be a contract between both apps first.
+
+### When the picture goes away
+
+```text
+peer connection failed / closed   negotiation released  -> surface removed
+WebRtcSessionTerminated           (FINALIZAR, closed, sign out) -> idem
+RemoteSession CLOSED / gone       assistance block removed      -> idem
+RemoteSession id changes          surface keyed by id           -> new renderer
+new negotiation, same session     state without track -> detach, then attach
+peer connection disconnected      kept, as the peer is (existing policy)
+RemoteSession CONNECTING -> ACTIVE same widget, same renderer, same picture
+```
+
+The surface only exists while a negotiation of the session on screen is alive,
+so a renderer is disposed whenever its surface leaves the tree, and a WebRTC
+state about another session is never displayed under this one.
 
 ## Candidate ordering
 
@@ -262,8 +376,9 @@ connection anyway.
 ## Teardown
 
 The peer connection, the data channel, the video transceiver, the remote track
-reference, the event subscription and both candidate queues are released
-together, from every ending:
+reference (in the adapter and in the BLoC state), the event subscription and
+both candidate queues are released together, from every ending — and with
+them the remote screen surface, whose `RTCVideoRenderer` is disposed:
 
 ```text
 FINALIZAR ASISTENCIA        (RemoteSession -> Idle)
@@ -296,7 +411,8 @@ Logged in debug: peer connection created, offer created, offer relayed, answer
 received, remote description applied, peer connection connected/failed/closed,
 control channel created and its state, the video `recvonly` transceiver being
 created, a remote video track being received and a non-video track being
-ignored, plus the safe identifiers (`remoteSessionId`, `supportRequestId`,
+ignored, the renderer attaching (by track id), detaching and being disposed,
+plus the safe identifiers (`remoteSessionId`, `supportRequestId`,
 `device.publicId`).
 
 ## Divergence with the copied contract

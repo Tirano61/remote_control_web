@@ -8,6 +8,7 @@ import '../../../../signaling/domain/client/technician_signaling_client.dart';
 import '../../../../signaling/domain/entities/remote_signaling_message.dart';
 import '../../../../signaling/domain/entities/webrtc_ice_candidate.dart';
 import '../../../domain/client/webrtc_peer_client.dart';
+import '../../../domain/entities/remote_video_track.dart';
 import '../../../domain/entities/webrtc_connection_state.dart';
 import '../../../domain/entities/webrtc_ice_configuration.dart';
 import '../../../domain/entities/webrtc_peer_event.dart';
@@ -101,6 +102,13 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
 
   WebRtcDataChannelState _controlChannelState = WebRtcDataChannelState.closed;
 
+  /// The screen the current peer connection is receiving, if any.
+  ///
+  /// It belongs to the negotiation, exactly like the channel state above: it
+  /// is carried into every state that negotiation produces, and forgotten
+  /// with it.
+  RemoteVideoTrack? _remoteVideoTrack;
+
   @override
   Future<void> close() async {
     await _incomingSubscription.cancel();
@@ -161,6 +169,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         WebRtcOffering(
           remoteSessionId: remoteSessionId,
           controlChannelState: _controlChannelState,
+          remoteVideoTrack: _remoteVideoTrack,
         ),
       );
 
@@ -191,6 +200,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
           WebRtcConnecting(
             remoteSessionId: remoteSessionId,
             controlChannelState: _controlChannelState,
+            remoteVideoTrack: _remoteVideoTrack,
           ),
         );
       }
@@ -262,7 +272,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
 
       case ControlChannelStateChanged(state: final channelState):
         _controlChannelState = channelState;
-        final next = _withControlChannelState(state, channelState);
+        final next = _withNegotiationFacts(state);
         if (next != state) emit(next);
 
       case ControlChannelMessageReceived():
@@ -270,15 +280,19 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         // answered, and the payload is not logged.
         break;
 
-      case RemoteVideoTrackAvailable():
-        // The offer already asks for the screen, but nothing displays it yet:
-        // the tablet does not capture one, and no renderer exists. So the
-        // arrival is recorded in the log and changes no state — in particular
-        // it neither completes nor degrades the connection, which is decided
-        // by the peer connection and the `control` channel alone. Surfacing
-        // "screen available" apart from "control connected" is the next
-        // stage's job.
+      case RemoteVideoTrackAvailable(:final track):
+        // The screen of *this* peer connection: the generation guard above
+        // already dropped the track of a replaced or closed one, so a stale
+        // peer can never put its frames on screen. A later track of the same
+        // negotiation replaces the earlier one.
+        //
+        // It is a capability next to the connection, not part of it: neither
+        // the peer state nor the `control` channel changes, and "connected"
+        // still means exactly what it meant before.
         logDebug('remote video track available $remoteSessionId');
+        _remoteVideoTrack = track;
+        final next = _withNegotiationFacts(state);
+        if (next != state) emit(next);
     }
   }
 
@@ -297,6 +311,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
             WebRtcConnecting(
               remoteSessionId: remoteSessionId,
               controlChannelState: _controlChannelState,
+              remoteVideoTrack: _remoteVideoTrack,
             ),
           );
         }
@@ -308,6 +323,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
           WebRtcConnected(
             remoteSessionId: remoteSessionId,
             controlChannelState: _controlChannelState,
+            remoteVideoTrack: _remoteVideoTrack,
           ),
         );
 
@@ -319,6 +335,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
             WebRtcInterrupted(
               remoteSessionId: remoteSessionId,
               controlChannelState: _controlChannelState,
+              remoteVideoTrack: _remoteVideoTrack,
             ),
           );
         }
@@ -463,36 +480,42 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     _pendingLocalIceCandidates.clear();
     _pendingRemoteIceCandidates.clear();
     _controlChannelState = WebRtcDataChannelState.closed;
+    // The track dies with its peer connection; only the reference is held.
+    _remoteVideoTrack = null;
 
     await subscription?.cancel();
     await session?.close();
   }
 
-  /// The same state with a new `control` channel state.
-  static WebRtcSessionState _withControlChannelState(
-    WebRtcSessionState current,
-    WebRtcDataChannelState channelState,
-  ) => switch (current) {
-    WebRtcPreparing(:final remoteSessionId) => WebRtcPreparing(
-      remoteSessionId: remoteSessionId,
-      controlChannelState: channelState,
-    ),
-    WebRtcOffering(:final remoteSessionId) => WebRtcOffering(
-      remoteSessionId: remoteSessionId,
-      controlChannelState: channelState,
-    ),
-    WebRtcConnecting(:final remoteSessionId) => WebRtcConnecting(
-      remoteSessionId: remoteSessionId,
-      controlChannelState: channelState,
-    ),
-    WebRtcConnected(:final remoteSessionId) => WebRtcConnected(
-      remoteSessionId: remoteSessionId,
-      controlChannelState: channelState,
-    ),
-    WebRtcInterrupted(:final remoteSessionId) => WebRtcInterrupted(
-      remoteSessionId: remoteSessionId,
-      controlChannelState: channelState,
-    ),
-    _ => current,
-  };
+  /// The same state, carrying the current `control` channel state and remote
+  /// screen. Anything that is not a live negotiation is returned unchanged.
+  WebRtcSessionState _withNegotiationFacts(WebRtcSessionState current) =>
+      switch (current) {
+        WebRtcPreparing(:final remoteSessionId) => WebRtcPreparing(
+          remoteSessionId: remoteSessionId,
+          controlChannelState: _controlChannelState,
+          remoteVideoTrack: _remoteVideoTrack,
+        ),
+        WebRtcOffering(:final remoteSessionId) => WebRtcOffering(
+          remoteSessionId: remoteSessionId,
+          controlChannelState: _controlChannelState,
+          remoteVideoTrack: _remoteVideoTrack,
+        ),
+        WebRtcConnecting(:final remoteSessionId) => WebRtcConnecting(
+          remoteSessionId: remoteSessionId,
+          controlChannelState: _controlChannelState,
+          remoteVideoTrack: _remoteVideoTrack,
+        ),
+        WebRtcConnected(:final remoteSessionId) => WebRtcConnected(
+          remoteSessionId: remoteSessionId,
+          controlChannelState: _controlChannelState,
+          remoteVideoTrack: _remoteVideoTrack,
+        ),
+        WebRtcInterrupted(:final remoteSessionId) => WebRtcInterrupted(
+          remoteSessionId: remoteSessionId,
+          controlChannelState: _controlChannelState,
+          remoteVideoTrack: _remoteVideoTrack,
+        ),
+        _ => current,
+      };
 }

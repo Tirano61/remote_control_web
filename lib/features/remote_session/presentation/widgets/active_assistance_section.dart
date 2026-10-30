@@ -10,6 +10,8 @@ import '../../../technician_realtime/presentation/bloc/signaling_join/signaling_
 import '../../../technician_realtime/presentation/bloc/technician_realtime/technician_realtime_bloc.dart';
 import '../../../webrtc/domain/entities/webrtc_connection_state.dart';
 import '../../../webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dart';
+import '../../../webrtc/presentation/remote_screen/remote_video_renderer.dart';
+import '../../../webrtc/presentation/widgets/remote_screen_view.dart';
 import '../../domain/entities/remote_session.dart';
 import '../bloc/remote_session/remote_session_bloc.dart';
 
@@ -36,16 +38,32 @@ import '../bloc/remote_session/remote_session_bloc.dart';
 /// `POST /remote-sessions/:id/activate`, so "Conectando con el dispositivo..."
 /// next to "Conexión remota establecida" is a transient window and no longer
 /// the resting state it used to be.
+///
+/// The tablet's screen is the main element of the block, between the device
+/// it belongs to and the diagnostics above. It is a capability next to the
+/// connection: an assistance without a picture yet — MediaProjection consent
+/// still pending on the tablet — is a valid assistance, and every line and
+/// button stays exactly where it was.
 class ActiveAssistanceSection extends StatelessWidget {
-  const ActiveAssistanceSection({super.key});
+  const ActiveAssistanceSection({
+    required this.remoteVideoRendererFactory,
+    super.key,
+  });
+
+  /// Builds the renderer of the remote screen. The only implementation that
+  /// knows WebRTC lives in `data`; this widget never sees it.
+  final RemoteVideoRendererFactory remoteVideoRendererFactory;
 
   @override
   Widget build(BuildContext context) {
     return BlocBuilder<RemoteSessionBloc, RemoteSessionState>(
       builder: (context, state) => switch (state) {
+        // One widget for CONNECTING and ACTIVE alike, so the activation of
+        // the session never tears the remote screen down.
         RemoteSessionLive() => _LiveAssistance(
           key: const Key('active_assistance_section'),
           state: state,
+          remoteVideoRendererFactory: remoteVideoRendererFactory,
         ),
         // Nothing is open, but something went wrong while finding that out.
         RemoteSessionFailure(:final failure) => _AssistanceProblem(
@@ -61,9 +79,14 @@ class ActiveAssistanceSection extends StatelessWidget {
 }
 
 class _LiveAssistance extends StatelessWidget {
-  const _LiveAssistance({required this.state, super.key});
+  const _LiveAssistance({
+    required this.state,
+    required this.remoteVideoRendererFactory,
+    super.key,
+  });
 
   final RemoteSessionLive state;
+  final RemoteVideoRendererFactory remoteVideoRendererFactory;
 
   @override
   Widget build(BuildContext context) {
@@ -124,6 +147,14 @@ class _LiveAssistance extends StatelessWidget {
                 ),
               ),
             const SizedBox(height: 14),
+            // Keyed by the session: another assistance gets another renderer,
+            // and the slot is matched by key however many optional lines
+            // around it come and go.
+            _RemoteScreen(
+              key: ValueKey('remote_screen_${session.id}'),
+              remoteSessionId: session.id,
+              rendererFactory: remoteVideoRendererFactory,
+            ),
             Row(
               children: [
                 if (session.isConnecting) ...[
@@ -189,6 +220,71 @@ class _LiveAssistance extends StatelessWidget {
       ),
     );
   }
+}
+
+/// The tablet's screen, while a peer connection for this session exists.
+///
+/// ```text
+/// negotiating, no track yet    "Esperando pantalla del dispositivo..."
+/// track received               the live picture
+/// failed / closed / none       nothing: the line below says why
+/// ```
+///
+/// The surface only exists while a negotiation for *this* `RemoteSession` is
+/// alive. When it ends — the peer connection failed or closed, WebRTC was
+/// terminated, the session closed or changed — the surface leaves the tree
+/// and its renderer is disposed with it, so no frame of an obsolete peer can
+/// stay on screen.
+///
+/// Whether the tablet refused MediaProjection is not something the web is
+/// told: no message of the protocol says so. The placeholder therefore keeps
+/// waiting rather than guessing a cause.
+class _RemoteScreen extends StatelessWidget {
+  const _RemoteScreen({
+    required this.remoteSessionId,
+    required this.rendererFactory,
+    super.key,
+  });
+
+  final String remoteSessionId;
+  final RemoteVideoRendererFactory rendererFactory;
+
+  /// Share of the window height the picture may take. The rest is left for
+  /// the header, the diagnostics and FINALIZAR ASISTENCIA.
+  static const double _viewportShare = 0.7;
+  static const double _minHeight = 200;
+  static const double _maxHeight = 900;
+
+  @override
+  Widget build(BuildContext context) {
+    final viewportHeight = MediaQuery.sizeOf(context).height;
+    final maxHeight = (viewportHeight * _viewportShare).clamp(
+      _minHeight,
+      _maxHeight,
+    );
+
+    return BlocBuilder<WebRtcSessionBloc, WebRtcSessionState>(
+      buildWhen: (previous, current) =>
+          _isShown(previous) != _isShown(current) ||
+          !identical(previous.remoteVideoTrack, current.remoteVideoTrack),
+      builder: (context, state) {
+        if (!_isShown(state)) return const SizedBox.shrink();
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 16),
+          child: RemoteScreenView(
+            track: state.remoteVideoTrack,
+            rendererFactory: rendererFactory,
+            maxHeight: maxHeight,
+          ),
+        );
+      },
+    );
+  }
+
+  /// A live negotiation of the session on screen. A WebRTC state about any
+  /// other session is never displayed under this one.
+  bool _isShown(WebRtcSessionState state) =>
+      state.hasNegotiation && state.remoteSessionId == remoteSessionId;
 }
 
 /// One line telling the technician whether the assistance channel is ready.
