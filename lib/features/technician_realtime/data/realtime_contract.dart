@@ -42,7 +42,20 @@ class TechnicianRealtimeContract {
   /// for `GET /support-requests`, never the state itself.
   static const String supportRequestUpdatedEvent = 'support-request:updated';
 
-  /// The only field of `support-request:updated`.
+  /// Server to client domain notification: the shared `WAITING` queue changed
+  /// — a new request entered it, or one left it because a technician took it
+  /// (`ASSIGNED`) or the tablet cancelled it (`CANCELLED`). Requires no join.
+  ///
+  /// Unlike `support-request:updated`, it reaches every authenticated socket of
+  /// the namespace, not only the owner of a request. No transition emits both.
+  ///
+  /// Payload: `{ supportRequestId }`. Another trigger for
+  /// `GET /support-requests`, never the state itself.
+  static const String supportRequestQueueUpdatedEvent =
+      'support-request:queue-updated';
+
+  /// The only field of `support-request:updated` and of
+  /// `support-request:queue-updated`.
   static const String supportRequestIdField = 'supportRequestId';
 
   /// Server to client readiness notification: the other end of the session

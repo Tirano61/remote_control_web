@@ -56,6 +56,10 @@ void main() {
           TechnicianRealtimeContract.supportRequestUpdatedEvent,
           {'supportRequestId': supportRequestId},
         );
+        gateway.emitServerEvent(
+          TechnicianRealtimeContract.supportRequestQueueUpdatedEvent,
+          {'supportRequestId': supportRequestId},
+        );
         gateway.dropConnection();
         gateway.reportConnectError({'message': 'Unauthorized'});
         await client.disconnect();
@@ -87,6 +91,10 @@ void main() {
     expect(
       output,
       contains('support-request:updated received $supportRequestId'),
+    );
+    expect(
+      output,
+      contains('support-request:queue-updated received $supportRequestId'),
     );
   });
 }

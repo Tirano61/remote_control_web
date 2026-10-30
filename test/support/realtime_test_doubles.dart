@@ -7,6 +7,7 @@ import 'package:remote_control_web/features/technician_realtime/domain/entities/
 import 'package:remote_control_web/features/technician_realtime/domain/entities/remote_session_active_notice.dart';
 import 'package:remote_control_web/features/technician_realtime/domain/entities/remote_session_closed_notice.dart';
 import 'package:remote_control_web/features/technician_realtime/domain/entities/remote_session_peer_joined_notice.dart';
+import 'package:remote_control_web/features/technician_realtime/domain/entities/support_request_queue_updated_notice.dart';
 import 'package:remote_control_web/features/technician_realtime/domain/entities/support_request_updated_notice.dart';
 import 'package:remote_control_web/features/technician_realtime/domain/entities/technician_realtime_status.dart';
 
@@ -30,6 +31,9 @@ class FakeTechnicianRealtimeClient
   final StreamController<SupportRequestUpdatedNotice>
   _supportRequestUpdatedController =
       StreamController<SupportRequestUpdatedNotice>.broadcast();
+  final StreamController<SupportRequestQueueUpdatedNotice>
+  _supportRequestQueueUpdatedController =
+      StreamController<SupportRequestQueueUpdatedNotice>.broadcast();
 
   TechnicianRealtimeStatus _status = const TechnicianRealtimeDisconnected();
 
@@ -81,6 +85,10 @@ class FakeTechnicianRealtimeClient
   @override
   Stream<SupportRequestUpdatedNotice> get supportRequestUpdated =>
       _supportRequestUpdatedController.stream;
+
+  @override
+  Stream<SupportRequestQueueUpdatedNotice> get supportRequestQueueUpdated =>
+      _supportRequestQueueUpdatedController.stream;
 
   @override
   Stream<RemoteSessionPeerJoinedNotice> get peerJoined =>
@@ -160,6 +168,7 @@ class FakeTechnicianRealtimeClient
     await _activeController.close();
     await _peerJoinedController.close();
     await _supportRequestUpdatedController.close();
+    await _supportRequestQueueUpdatedController.close();
     await _signalingController.close();
   }
 
@@ -225,6 +234,14 @@ class FakeTechnicianRealtimeClient
     if (_supportRequestUpdatedController.isClosed) return;
     _supportRequestUpdatedController.add(
       SupportRequestUpdatedNotice(supportRequestId: supportRequestId),
+    );
+  }
+
+  /// `support-request:queue-updated`: the shared `WAITING` queue changed.
+  void emitSupportRequestQueueUpdated(String supportRequestId) {
+    if (_supportRequestQueueUpdatedController.isClosed) return;
+    _supportRequestQueueUpdatedController.add(
+      SupportRequestQueueUpdatedNotice(supportRequestId: supportRequestId),
     );
   }
 
