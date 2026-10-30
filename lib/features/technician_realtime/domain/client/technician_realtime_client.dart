@@ -2,6 +2,7 @@ import '../entities/join_remote_session_result.dart';
 import '../entities/remote_session_active_notice.dart';
 import '../entities/remote_session_closed_notice.dart';
 import '../entities/remote_session_peer_joined_notice.dart';
+import '../entities/support_request_queue_updated_notice.dart';
 import '../entities/support_request_updated_notice.dart';
 import '../entities/technician_realtime_status.dart';
 
@@ -12,9 +13,9 @@ import '../entities/technician_realtime_status.dart';
 /// implementation owns the transport, the reconnection policy and the token.
 ///
 /// It covers the `/technicians` namespace of `docs/backend/REALTIME.md` as far
-/// as this stage needs it — connection, the `support-request:updated`,
-/// `remote-session:active` and `remote-session:closed` domain notifications
-/// and `remote-session:join`.
+/// as this stage needs it — connection, the `support-request:queue-updated`,
+/// `support-request:updated`, `remote-session:active` and
+/// `remote-session:closed` domain notifications and `remote-session:join`.
 ///
 /// The `webrtc:*` relay travels over the very same socket, but it is a
 /// different concern and has its own port, `TechnicianSignalingClient`. One
@@ -43,6 +44,14 @@ abstract interface class TechnicianRealtimeClient {
   /// They require no join and no `RemoteSession`. A trigger as well: what the
   /// request became is read from `GET /support-requests`.
   Stream<SupportRequestUpdatedNotice> get supportRequestUpdated;
+
+  /// `support-request:queue-updated` notifications: the shared `WAITING`
+  /// queue changed.
+  ///
+  /// Unlike [supportRequestUpdated], they reach every technician and admin,
+  /// not only the owner of a request. They require no join either, and are a
+  /// trigger for `GET /support-requests` as well.
+  Stream<SupportRequestQueueUpdatedNotice> get supportRequestQueueUpdated;
 
   /// Opens the namespace with the User JWT that is valid right now.
   ///
