@@ -39,9 +39,11 @@ import '../features/technician_realtime/domain/client/technician_realtime_client
 import '../features/technician_realtime/presentation/bloc/signaling_join/signaling_join_bloc.dart';
 import '../features/technician_realtime/presentation/bloc/technician_realtime/technician_realtime_bloc.dart';
 import '../features/webrtc/data/flutter_webrtc_peer_client.dart';
+import '../features/webrtc/data/flutter_webrtc_remote_video_renderer.dart';
 import '../features/webrtc/domain/client/webrtc_peer_client.dart';
 import '../features/webrtc/domain/entities/webrtc_ice_configuration.dart';
 import '../features/webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dart';
+import '../features/webrtc/presentation/remote_screen/remote_video_renderer.dart';
 import 'console/technician_console_coordinator.dart';
 
 /// Composition root.
@@ -58,6 +60,7 @@ class AppDependencies {
     required this.technicianRealtimeClient,
     required this.technicianSignalingClient,
     required this.webRtcPeerClient,
+    required this.remoteVideoRendererFactory,
   });
 
   /// Wiring used by the running application.
@@ -111,6 +114,8 @@ class AppDependencies {
       ),
       // The only implementation that knows `flutter_webrtc` exists.
       webRtcPeerClient: const FlutterWebRtcPeerClient(),
+      // The only renderer that knows `RTCVideoRenderer` and `RTCVideoView`.
+      remoteVideoRendererFactory: FlutterWebRtcRemoteVideoRenderer.new,
     );
   }
 
@@ -135,6 +140,11 @@ class AppDependencies {
   /// Builds the peer connections. Replaceable by a fake in tests, which is how
   /// the whole negotiation is exercised without a browser.
   final WebRtcPeerClient webRtcPeerClient;
+
+  /// Builds the renderer of the tablet's screen, one per remote screen
+  /// surface. Replaceable by a fake in tests, where no browser can decode
+  /// video.
+  final RemoteVideoRendererFactory remoteVideoRendererFactory;
 
   /// ICE configuration of every peer connection, built once from the single
   /// place it is configured: `WEBRTC_STUN_URL`, or nothing at all.
