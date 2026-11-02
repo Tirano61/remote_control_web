@@ -3,12 +3,18 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../../../remote_control/domain/entities/normalized_remote_point.dart';
+import '../../../remote_control/presentation/widgets/remote_tap_layer.dart';
 import '../../domain/entities/remote_video_track.dart';
 import '../remote_screen/remote_video_renderer.dart';
 
 /// Shown while there is no picture of the tablet yet.
 const String kWaitingForRemoteScreenNotice =
     'Esperando pantalla del dispositivo...';
+
+/// See [RemoteScreenView.controlStatusBuilder].
+typedef RemoteControlStatusBuilder =
+    Widget Function(BuildContext context, bool hasPicture);
 
 /// The tablet's screen, live.
 ///
@@ -25,13 +31,16 @@ const String kWaitingForRemoteScreenNotice =
 /// mounted widget, and a parent that wants a fresh one — a different remote
 /// session, for instance — gives this widget a different key.
 ///
-/// The surface is visual only. It does not listen to pointers or keys; remote
-/// control is a later stage.
+/// Clicks are only listened to over a real picture and when [onRemoteTap] is
+/// given. The placeholder, the bands left by `contain` and anything outside the
+/// surface never produce a tap. Keys are not listened to at all.
 class RemoteScreenView extends StatefulWidget {
   const RemoteScreenView({
     required this.track,
     required this.rendererFactory,
     required this.maxHeight,
+    this.onRemoteTap,
+    this.controlStatusBuilder,
     super.key,
   });
 
@@ -42,6 +51,15 @@ class RemoteScreenView extends StatefulWidget {
 
   /// The tallest the surface may get. The width comes from the parent.
   final double maxHeight;
+
+  /// Called with the position on the tablet under a click. `null` while remote
+  /// control cannot be used, which leaves the surface visual only.
+  final ValueChanged<NormalizedRemotePoint>? onRemoteTap;
+
+  /// Builds what is said about remote control under the surface. Only this
+  /// widget knows whether a picture is really being displayed: a track exists
+  /// well before its first frame, as long as the tablet waits for consent.
+  final RemoteControlStatusBuilder? controlStatusBuilder;
 
   /// Proportions of the empty frame before the video has said what its own
   /// are. Only the placeholder uses it: the picture is always laid out with
@@ -92,6 +110,8 @@ class _RemoteScreenViewState extends State<RemoteScreenView> {
         // Bound to the picture: until the first frames tell its size, the
         // track is attached but nothing can be seen yet.
         final isWaiting = !isDisplaying || videoAspectRatio == null;
+        final onRemoteTap = widget.onRemoteTap;
+        final controlStatusBuilder = widget.controlStatusBuilder;
 
         return LayoutBuilder(
           builder: (context, constraints) {
@@ -101,32 +121,47 @@ class _RemoteScreenViewState extends State<RemoteScreenView> {
               maxHeight: widget.maxHeight,
             );
 
-            return Center(
-              child: SizedBox(
-                key: const Key('remote_screen_surface'),
-                width: size.width,
-                height: size.height,
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: ColoredBox(
-                    color: Colors.black,
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        // First and always in the same slot, so that a new
-                        // size or the placeholder going away never rebuilds
-                        // the view from scratch.
-                        if (isDisplaying)
-                          KeyedSubtree(
-                            key: const Key('remote_screen_video'),
-                            child: _renderer.buildView(context),
-                          ),
-                        if (isWaiting) const _WaitingForScreen(),
-                      ],
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Center(
+                  child: SizedBox(
+                    key: const Key('remote_screen_surface'),
+                    width: size.width,
+                    height: size.height,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: ColoredBox(
+                        color: Colors.black,
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            // First and always in the same slot, so that a new
+                            // size or the placeholder going away never rebuilds
+                            // the view from scratch.
+                            if (isDisplaying)
+                              KeyedSubtree(
+                                key: const Key('remote_screen_video'),
+                                child: _renderer.buildView(context),
+                              ),
+                            if (isWaiting) const _WaitingForScreen(),
+                            if (!isWaiting && onRemoteTap != null)
+                              RemoteTapLayer(
+                                key: const Key('remote_screen_tap_layer'),
+                                videoAspectRatio: () => _renderer.aspectRatio,
+                                onTap: onRemoteTap,
+                              ),
+                          ],
+                        ),
+                      ),
                     ),
                   ),
                 ),
-              ),
+                if (controlStatusBuilder != null) ...[
+                  const SizedBox(height: 8),
+                  controlStatusBuilder(context, !isWaiting),
+                ],
+              ],
             );
           },
         );
