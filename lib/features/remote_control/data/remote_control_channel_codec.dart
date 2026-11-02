@@ -27,6 +27,8 @@ class RemoteControlChannelCodec {
 
   static const String _tapType = 'tap';
   static const String _swipeType = 'swipe';
+  static const String _backType = 'back';
+  static const String _homeType = 'home';
   static const String _ackType = 'ack';
 
   /// The frame for [command], with exactly the fields of the protocol.
@@ -54,6 +56,16 @@ class RemoteControlChannelCodec {
         _endYKey: end.y,
         _durationMsKey: durationMs,
       }),
+    RemoteBackCommand(:final id) => jsonEncode({
+      _versionKey: _version,
+      _typeKey: _backType,
+      _idKey: id,
+    }),
+    RemoteHomeCommand(:final id) => jsonEncode({
+      _versionKey: _version,
+      _typeKey: _homeType,
+      _idKey: id,
+    }),
   };
 
   /// The acknowledgement in [frame], or `null` when it is not a valid one.

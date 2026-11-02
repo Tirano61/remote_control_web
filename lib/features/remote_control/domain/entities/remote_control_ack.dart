@@ -3,14 +3,15 @@ import 'package:equatable/equatable.dart';
 /// Why the tablet refused a command, as its acknowledgement says.
 enum RemoteControlError {
   /// The accessibility service is not connected on the tablet. The screen can
-  /// still be shared: it only means gestures cannot run.
+  /// still be shared: it only means commands cannot run.
   accessibilityUnavailable('accessibility_unavailable'),
 
   /// No `ACTIVE` session on the tablet's side, or it ended while the command
   /// was queued.
   sessionNotActive('session_not_active'),
 
-  /// Android cancelled or refused the gesture, or too many were queued.
+  /// Android cancelled or refused the gesture or the global action, or too many
+  /// were queued. The name is older than Back and Home, and stays.
   gestureRejected('gesture_rejected'),
 
   /// The tablet could not read the command: a bug on this side.
@@ -28,17 +29,17 @@ enum RemoteControlError {
   /// One of the public codes of the protocol, so it is safe in the log.
   final String code;
 
-  static RemoteControlError fromCode(String code) => values.firstWhere(
-    (error) => error.code == code,
-    orElse: () => unknown,
-  );
+  static RemoteControlError fromCode(String code) =>
+      values.firstWhere((error) => error.code == code, orElse: () => unknown);
 }
 
 /// The tablet's answer to one command.
 ///
-/// `ok: true` means Android reported the gesture **completed**, not that it was
-/// requested. A command may also never get an answer at all, so the sender keeps
-/// its own timeout.
+/// What `ok: true` promises depends on the command. For a tap or a swipe, Android
+/// reported the gesture **completed**, not that it was requested. For Back or
+/// Home, Android **accepted** the global action, which may still be animating and
+/// may have had no visible effect at all. A command may also never get an answer,
+/// so the sender keeps its own timeout.
 final class RemoteControlAck extends Equatable {
   const RemoteControlAck({required this.commandId, this.error});
 

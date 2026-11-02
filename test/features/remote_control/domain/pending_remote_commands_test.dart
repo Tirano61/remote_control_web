@@ -37,6 +37,33 @@ void main() {
       expect(deadline(swipe('a', 350)), const Duration(milliseconds: 3350));
     });
 
+    test('Back and Home alone are their 50 ms and the margin', () {
+      const expected = Duration(milliseconds: 3050);
+
+      expect(deadline(const RemoteBackCommand(id: 'a')), expected);
+      expect(deadline(const RemoteHomeCommand(id: 'a')), expected);
+    });
+
+    test('Back and Home wait for what is ahead, and count for what follows', () {
+      expect(
+        deadline(const RemoteHomeCommand(id: 'b'), [swipe('a', 2000)]),
+        const Duration(milliseconds: 2000 + 50 + 3000),
+      );
+      expect(
+        deadline(tap('b'), [const RemoteBackCommand(id: 'a')]),
+        const Duration(milliseconds: 50 + 50 + 3000),
+      );
+    });
+
+    test('Back and Home stop at the same maximum', () {
+      final ahead = [for (var i = 0; i < 40; i++) swipe('$i', 2000)];
+
+      expect(
+        deadline(const RemoteBackCommand(id: 'last'), ahead),
+        PendingRemoteCommands.maxDeadline,
+      );
+    });
+
     test('no command gets less than three seconds', () {
       expect(deadline(tap('a')), greaterThanOrEqualTo(margin));
       expect(deadline(swipe('a', 50)), greaterThanOrEqualTo(margin));

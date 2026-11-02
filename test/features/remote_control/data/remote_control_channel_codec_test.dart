@@ -23,6 +23,46 @@ void main() {
     });
   });
 
+  group('back', () {
+    test('produces exactly the fields of the protocol', () {
+      expect(
+        RemoteControlChannelCodec.encode(const RemoteBackCommand(id: 'back-1')),
+        '{"v":1,"type":"back","id":"back-1"}',
+      );
+    });
+
+    test('its ack is read like any other', () {
+      expect(
+        RemoteControlChannelCodec.decodeAck(
+          '{"v":1,"type":"ack","id":"back-1","ok":true}',
+        ),
+        const RemoteControlAck(commandId: 'back-1'),
+      );
+    });
+  });
+
+  group('home', () {
+    test('produces exactly the fields of the protocol', () {
+      expect(
+        RemoteControlChannelCodec.encode(const RemoteHomeCommand(id: 'home-1')),
+        '{"v":1,"type":"home","id":"home-1"}',
+      );
+    });
+
+    test('its ack is read like any other', () {
+      expect(
+        RemoteControlChannelCodec.decodeAck(
+          '{"v":1,"type":"ack","id":"home-1","ok":false,'
+          '"error":"gesture_rejected"}',
+        ),
+        const RemoteControlAck(
+          commandId: 'home-1',
+          error: RemoteControlError.gestureRejected,
+        ),
+      );
+    });
+  });
+
   group('swipe', () {
     test('produces exactly the fields of the protocol', () {
       expect(
