@@ -289,6 +289,17 @@ class _RemoteScreen extends StatelessWidget {
                     ),
                   )
                 : null,
+            onRemoteSwipe: canSend
+                ? ({required start, required end, required durationMs}) =>
+                      context.read<WebRtcSessionBloc>().add(
+                        WebRtcRemoteSwipeRequested(
+                          remoteSessionId: remoteSessionId,
+                          start: start,
+                          end: end,
+                          durationMs: durationMs,
+                        ),
+                      )
+                : null,
             controlStatusBuilder: (context, hasPicture) => _RemoteControlLine(
               isAvailable: canSend && hasPicture,
               lastCommand: state.remoteControl.lastCommand,

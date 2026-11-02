@@ -709,7 +709,7 @@ void main() {
 
   group('remote control', () {
     final surface = find.byKey(const Key('remote_screen_surface'));
-    final tapLayer = find.byKey(const Key('remote_screen_tap_layer'));
+    final gestureLayer = find.byKey(const Key('remote_screen_gesture_layer'));
 
     String statusLine(WidgetTester tester) => tester
         .widget<Text>(find.byKey(const Key('remote_control_status')))
@@ -737,6 +737,22 @@ void main() {
 
     Future<void> clickCentre(WidgetTester tester) async {
       await tester.tapAt(tester.getCenter(surface));
+      await settleUi(tester);
+    }
+
+    /// From three quarters of the way down the surface to a quarter, in 350 ms.
+    Future<void> dragUpwards(WidgetTester tester) async {
+      final box = tester.getRect(surface);
+      final gesture = await tester.createGesture();
+      await gesture.down(
+        Offset(box.center.dx, box.top + box.height * 0.75),
+        timeStamp: const Duration(seconds: 10),
+      );
+      await gesture.moveTo(
+        Offset(box.center.dx, box.top + box.height * 0.25),
+        timeStamp: const Duration(seconds: 10, milliseconds: 200),
+      );
+      await gesture.up(timeStamp: const Duration(seconds: 10, milliseconds: 350));
       await settleUi(tester);
     }
 
@@ -780,7 +796,7 @@ void main() {
         expect(find.byKey(const Key('fake_remote_video_screen-0')), findsOneWidget);
         expect(peers.last.isClosed, isFalse);
         expect(remoteSessions.closedIds, isEmpty);
-        expect(tapLayer, findsOneWidget);
+        expect(gestureLayer, findsOneWidget);
       });
     });
 
@@ -839,7 +855,7 @@ void main() {
         findsOneWidget,
       );
       expect(statusLine(tester), 'Control remoto: no disponible');
-      expect(tapLayer, findsNothing);
+      expect(gestureLayer, findsNothing);
 
       await clickCentre(tester);
 
@@ -900,7 +916,7 @@ void main() {
       // The backend has not answered and the picture is still there, but the
       // technician asked to stop.
       expect(surface, findsOneWidget);
-      expect(tapLayer, findsNothing);
+      expect(gestureLayer, findsNothing);
       expect(statusLine(tester), 'Control remoto: no disponible');
       await clickCentre(tester);
       expect(peers.last.sentRemoteControlCommands, hasLength(1));
@@ -941,6 +957,231 @@ void main() {
       expect(surface, findsNothing);
       expect(renderers.last.disposeCount, 1);
       expect(session.sentRemoteControlCommands, hasLength(1));
+    });
+
+    testWidgets('a drag reaches the tablet, and its answer comes back', (
+      tester,
+    ) async {
+      await pumpAssistance(tester);
+
+      await dragUpwards(tester);
+
+      final session = peers.last;
+      final command =
+          session.sentRemoteControlCommands.single as RemoteSwipeCommand;
+      expect(command.start, const NormalizedRemotePoint(0.5, 0.75));
+      expect(command.end, const NormalizedRemotePoint(0.5, 0.25));
+      expect(command.durationMs, 350);
+      expect(statusLine(tester), 'Enviando desplazamiento...');
+
+      session.emitRemoteControlAck(command.id);
+      await settleUi(tester);
+
+      expect(statusLine(tester), 'Desplazamiento enviado');
+    });
+
+    const swipeRefusals = {
+      RemoteControlError.accessibilityUnavailable:
+          'El dispositivo no tiene habilitado el control remoto.',
+      RemoteControlError.gestureRejected:
+          'No se pudo ejecutar el desplazamiento.',
+      RemoteControlError.invalidCommand: 'Control remoto no disponible',
+    };
+
+    swipeRefusals.forEach((error, message) {
+      testWidgets('a swipe refused with ${error.code} ends nothing', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+
+        await dragUpwards(tester);
+        peers.last.emitRemoteControlAck('swipe-1', error: error);
+        await settleUi(tester);
+
+        expect(statusLine(tester), message);
+        expect(peers.last.sentRemoteControlCommands, hasLength(1));
+        expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
+        expect(find.byKey(const Key('fake_remote_video_screen-0')), findsOneWidget);
+        expect(peers.last.isClosed, isFalse);
+        expect(gestureLayer, findsOneWidget);
+      });
+    });
+
+    testWidgets('a swipe answered session_not_active asks REST, once', (
+      tester,
+    ) async {
+      await pumpAssistance(tester);
+      final readsBefore = remoteSessions.currentCount;
+
+      await dragUpwards(tester);
+      peers.last.emitRemoteControlAck(
+        'swipe-1',
+        error: RemoteControlError.sessionNotActive,
+      );
+      await settleUi(tester);
+
+      expect(remoteSessions.currentCount, readsBefore + 1);
+      expect(peers.last.sentRemoteControlCommands, hasLength(1));
+      expect(peers.last.isClosed, isFalse);
+    });
+
+    testWidgets('a swipe nobody answers is reported, not sent again', (
+      tester,
+    ) async {
+      await pumpAssistance(tester);
+
+      await dragUpwards(tester);
+      expect(statusLine(tester), 'Enviando desplazamiento...');
+
+      // Its deadline: 350 ms of work and the three second margin.
+      await tester.pump(const Duration(seconds: 4));
+      await settleUi(tester);
+
+      expect(
+        statusLine(tester),
+        'El dispositivo no confirmó el desplazamiento.',
+      );
+      expect(peers.last.sentRemoteControlCommands, hasLength(1));
+    });
+
+    testWidgets('a tap and a swipe each say what they are', (tester) async {
+      await pumpAssistance(tester);
+
+      await clickCentre(tester);
+      expect(statusLine(tester), 'Enviando toque...');
+
+      await dragUpwards(tester);
+      expect(statusLine(tester), 'Enviando desplazamiento...');
+
+      peers.last.emitRemoteControlAck('swipe-2');
+      await settleUi(tester);
+      expect(statusLine(tester), 'Desplazamiento enviado');
+
+      await clickCentre(tester);
+      peers.last.emitRemoteControlAck('tap-3');
+      await settleUi(tester);
+      expect(statusLine(tester), 'Toque enviado');
+    });
+
+    testWidgets('a drag is not a click, on its way or at its end', (
+      tester,
+    ) async {
+      await pumpAssistance(tester);
+
+      await dragUpwards(tester);
+
+      final commands = peers.last.sentRemoteControlCommands;
+      expect(commands, hasLength(1));
+      expect(commands.single, isA<RemoteSwipeCommand>());
+    });
+
+    testWidgets('nothing can be dragged while the session is CONNECTING', (
+      tester,
+    ) async {
+      remoteSessions.activateFailure = const NetworkFailure();
+      await pumpAssistance(tester);
+      expect(gestureLayer, findsNothing);
+
+      await dragUpwards(tester);
+
+      expect(peers.last.sentRemoteControlCommands, isEmpty);
+    });
+
+    testWidgets('nothing can be dragged before the first frame', (tester) async {
+      remoteSessions.current = buildRemoteSession();
+      realtime.peerJoinedOnJoin = true;
+      await pumpConsole(tester);
+      await connectSocket(tester);
+      realtime.answerRelayAck({
+        'delivered': true,
+        'remoteSessionId': remoteSessionId,
+      });
+      await settleUi(tester);
+      peers.last
+        ..emitControlChannelState(WebRtcDataChannelState.open)
+        ..emitPeerState(WebRtcPeerConnectionState.connected)
+        ..emitRemoteVideoTrack('screen-0');
+      await settleUi(tester);
+      expect(find.text(kWaitingForRemoteScreenNotice), findsOneWidget);
+
+      await dragUpwards(tester);
+
+      expect(peers.last.sentRemoteControlCommands, isEmpty);
+    });
+
+    testWidgets('pressing FINALIZAR cancels the drag under way', (tester) async {
+      await pumpAssistance(tester);
+      final gate = Completer<void>();
+      remoteSessions.closeGate = gate.future;
+      final box = tester.getRect(surface);
+
+      final drag = await tester.startGesture(box.center);
+      await drag.moveBy(const Offset(0, -40));
+      await tester.pump();
+
+      await tester.tap(find.byKey(const Key('close_remote_session_button')));
+      await settleUi(tester);
+      expect(surface, findsOneWidget);
+      expect(gestureLayer, findsNothing);
+
+      await drag.moveBy(const Offset(0, -40));
+      await drag.up();
+      await settleUi(tester);
+
+      expect(peers.last.sentRemoteControlCommands, isEmpty);
+
+      gate.complete();
+      await settleUi(tester);
+      expect(surface, findsNothing);
+      expect(peers.last.sentRemoteControlCommands, isEmpty);
+    });
+
+    testWidgets('pressing FINALIZAR forgets a swipe waiting for its answer', (
+      tester,
+    ) async {
+      await pumpAssistance(tester);
+      final session = peers.last;
+      final gate = Completer<void>();
+      remoteSessions.closeGate = gate.future;
+      await dragUpwards(tester);
+      expect(statusLine(tester), 'Enviando desplazamiento...');
+
+      await tester.tap(find.byKey(const Key('close_remote_session_button')));
+      await settleUi(tester);
+
+      expect(statusLine(tester), 'Control remoto: no disponible');
+
+      // An answer that arrives now has nothing left to speak about.
+      session.emitRemoteControlAck('swipe-1');
+      await settleUi(tester);
+      expect(statusLine(tester), 'Control remoto: no disponible');
+
+      gate.complete();
+      await settleUi(tester);
+      expect(session.sentRemoteControlCommands, hasLength(1));
+    });
+
+    testWidgets('a rotation keeps the swipes working', (tester) async {
+      await pumpAssistance(tester);
+
+      await dragUpwards(tester);
+      renderers.last.reportVideoAspectRatio(800 / 1280);
+      await settleUi(tester);
+      await dragUpwards(tester);
+      renderers.last.reportVideoAspectRatio(1280 / 800);
+      await settleUi(tester);
+      await dragUpwards(tester);
+
+      final commands = peers.last.sentRemoteControlCommands;
+      expect(commands.map((c) => c.id), ['swipe-1', 'swipe-2', 'swipe-3']);
+      for (final command in commands) {
+        expect(
+          (command as RemoteSwipeCommand).start,
+          const NormalizedRemotePoint(0.5, 0.75),
+        );
+        expect(command.end, const NormalizedRemotePoint(0.5, 0.25));
+      }
+      expect(renderers.created, hasLength(1));
     });
 
     testWidgets('a rotation keeps the control working', (tester) async {
