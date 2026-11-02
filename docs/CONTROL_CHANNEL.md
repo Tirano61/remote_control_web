@@ -514,12 +514,53 @@ tests**: it suppresses the accessibility service, and a command would never reac
 `dispatchGesture`. Use `adb logcat`, `dumpsys` and `adb exec-out screencap -p`.
 The toggle and the *full control* dialog are the user's, by hand, always.
 
-### Back and Home have not been observed on the physical tablet yet
+### What has been observed of Back and Home on the physical tablet
 
-Everything about them here is covered by automated tests only: the frames, the
-gate, the independence from the picture, the deadlines, the guard, the refusals and
-the cleanup. Nothing above has been run against a tablet from this side, and neither
-has the tap and swipe regression with these buttons present.
+Chrome and a tablet running Android 14 (800x1280), with `remote_control_device` built
+from `feature/device-remote-control-navigation` (84763a9), and the accessibility toggle
+and every consent done by hand. Frames were read by wrapping `RTCDataChannel` in the
+page during the test, Android's side from `adb logcat` (`RemoteControlInput`) and
+`dumpsys activity`. The real buttons were clicked with the mouse, and the attempts that
+needed an exact time were `PointerEvent`s dispatched on the page, which go through the
+same Flutter path.
+
+```text
+tap regression: AC 7 8 in the Calculator     78, ack ok, tap completed on Android
+swipe regression, Settings list              the list scrolls, ack ok
+Back from a Settings sub-screen              back to the list, back accepted, ack ok,
+                                             Atrás enviado
+Home from Settings                           launcher in front, home accepted, ack ok,
+                                             Inicio enviado
+open app, Back, Home, twice, no F5           same session, channel and peer connection
+ack of a Back or Home                        12 to 210 ms after it was sent
+a Home answered in 20-200 ms, then a tap at
+  209, 307, 336, 352, 363 ms                 nothing sent
+  389, 423, 504, 704 ms                      the tap is sent
+second Back or Home, tap, swipe, in the
+  guard of a Back or of a Home               nothing sent; a tap at 460 ms goes out
+service disabled by hand, Back and Home      ack accessibility_unavailable, no navigation,
+                                             message; session and picture go on
+  a tap 120 ms after that refusal            sent: the guard had ended
+service enabled again                        Back and Home work, same session
+MediaProjection refused by hand: ACTIVE,
+  control open, no picture                   buttons enabled, a click on the surface
+                                             sends nothing, Back and Home navigate
+FINALIZAR during the guard of a Home         not held back, buttons disabled at once,
+                                             nothing more sent, peer connection closed
+every command sent against Android's log     the same count of each kind
+```
+
+Sent and acknowledged, the two ends agree: 74 commands, 66 `ok: true` and 8
+`accessibility_unavailable`.
+
+The pointer layer comes back with the next frame after the guard ends, so that is the
+exact edge: 350 ms and up to one frame. In a browser window that is covered, Chrome
+gave this page 2 frames per second, and taps after the guard kept being lost until a
+frame came. Keep the window in front when measuring this.
+
+Covered by automated tests only, and never seen on the device: an ack of a Back or Home
+later than 350 ms, `gesture_rejected` and `session_not_active` on them, their timeout,
+the channel closing during the guard, and a replaced peer connection during it.
 
 ### What has been observed on the physical tablet
 
