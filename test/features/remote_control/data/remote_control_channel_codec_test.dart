@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_web/features/remote_control/data/remote_control_channel_codec.dart';
 import 'package:remote_control_web/features/remote_control/domain/entities/normalized_remote_point.dart';
@@ -17,6 +19,54 @@ void main() {
           ),
         ),
         '{"v":1,"type":"tap","id":"tap-1","x":0.5,"y":0.25}',
+      );
+    });
+  });
+
+  group('swipe', () {
+    test('produces exactly the fields of the protocol', () {
+      expect(
+        RemoteControlChannelCodec.encode(
+          RemoteSwipeCommand(
+            id: 'swipe-1',
+            start: const NormalizedRemotePoint(0.5, 0.8),
+            end: const NormalizedRemotePoint(0.5, 0.2),
+            durationMs: 350,
+          ),
+        ),
+        '{"v":1,"type":"swipe","id":"swipe-1","startX":0.5,"startY":0.8,'
+        '"endX":0.5,"endY":0.2,"durationMs":350}',
+      );
+    });
+
+    test('the duration is an integer: the tablet refuses 350.0', () {
+      final frame =
+          jsonDecode(
+                RemoteControlChannelCodec.encode(
+                  RemoteSwipeCommand(
+                    id: 'swipe-1',
+                    start: const NormalizedRemotePoint(0, 0),
+                    end: const NormalizedRemotePoint(1, 1),
+                    durationMs: RemoteSwipeCommand.maxDurationMs,
+                  ),
+                ),
+              )
+              as Map<String, dynamic>;
+
+      expect(frame['durationMs'], isA<int>());
+      expect(frame['durationMs'], 2000);
+    });
+
+    test('its ack is read like any other', () {
+      expect(
+        RemoteControlChannelCodec.decodeAck(
+          '{"v":1,"type":"ack","id":"swipe-1","ok":false,'
+          '"error":"gesture_rejected"}',
+        ),
+        const RemoteControlAck(
+          commandId: 'swipe-1',
+          error: RemoteControlError.gestureRejected,
+        ),
       );
     });
   });
@@ -90,7 +140,8 @@ void main() {
       'an empty id': '{"v":1,"type":"ack","id":"","ok":true}',
       'an id that is not a string': '{"v":1,"type":"ack","id":7,"ok":true}',
       'no ok': '{"v":1,"type":"ack","id":"tap-1"}',
-      'an ok that is not a bool': '{"v":1,"type":"ack","id":"tap-1","ok":"yes"}',
+      'an ok that is not a bool':
+          '{"v":1,"type":"ack","id":"tap-1","ok":"yes"}',
       'a refusal with no error': '{"v":1,"type":"ack","id":"tap-1","ok":false}',
       'a refusal whose error is not a string':
           '{"v":1,"type":"ack","id":"tap-1","ok":false,"error":3}',

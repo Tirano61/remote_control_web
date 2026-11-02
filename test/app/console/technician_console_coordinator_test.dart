@@ -734,7 +734,7 @@ void main() {
 
       expect(webRtcSessionBloc.state.canSendRemoteControl, isFalse);
       expect(webRtcSessionBloc.state.remoteControl.pendingCommands, 0);
-      expect(webRtcSessionBloc.state.remoteControl.lastTap, isNull);
+      expect(webRtcSessionBloc.state.remoteControl.lastCommand, isNull);
 
       await tap();
       expect(peers.last.sentRemoteControlCommands, hasLength(1));

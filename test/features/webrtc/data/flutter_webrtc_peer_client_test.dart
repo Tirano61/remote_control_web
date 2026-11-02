@@ -434,6 +434,32 @@ void main() {
         expect(connection.dataChannelLabels, ['control']);
       });
 
+      test('a swipe goes the same way', () async {
+        final session = await createSession();
+        await session.openControlChannel();
+        connection.dataChannel!.channelState =
+            rtc.RTCDataChannelState.RTCDataChannelOpen;
+
+        final isSent = await session.sendRemoteControlCommand(
+          RemoteSwipeCommand(
+            id: 'swipe-1',
+            start: const NormalizedRemotePoint(0.5, 0.8),
+            end: const NormalizedRemotePoint(0.5, 0.2),
+            durationMs: 350,
+          ),
+        );
+
+        expect(isSent, isTrue);
+        final message = connection.dataChannel!.sentMessages.single;
+        expect(message.isBinary, isFalse);
+        expect(
+          message.text,
+          '{"v":1,"type":"swipe","id":"swipe-1","startX":0.5,"startY":0.8,'
+          '"endX":0.5,"endY":0.2,"durationMs":350}',
+        );
+        expect(connection.dataChannelLabels, ['control']);
+      });
+
       test('nothing is sent without a channel', () async {
         final session = await createSession();
 

@@ -150,8 +150,9 @@ class TechnicianConsoleCoordinator {
   int _webRtcReadinessEpisode = 0;
   bool _isWebRtcEstablished = false;
 
-  /// The last tap whose `session_not_active` already asked REST for the truth.
-  String? _reconciledTapId;
+  /// The last command whose `session_not_active` already asked REST for the
+  /// truth.
+  String? _reconciledCommandId;
 
   /// The (connection, session) a negotiation was already asked for.
   ///
@@ -339,17 +340,20 @@ class TechnicianConsoleCoordinator {
     _isWebRtcEstablished = isEstablished;
 
     _activateIfEstablished();
-    _reconcileAfterTapRefusal(state.remoteControl.lastTap);
+    _reconcileAfterCommandRefusal(state.remoteControl.lastCommand);
   }
 
   /// The tablet says this session is not `ACTIVE`, while the console believed it
-  /// was. One of the two is behind and REST decides which: the tap is not sent
-  /// again, and the peer connection is left as it is.
-  void _reconcileAfterTapRefusal(RemoteTapFeedback? tap) {
-    if (tap == null || tap.outcome != RemoteTapOutcome.sessionNotActive) return;
-    // One command, one read: every other state change still carries this tap.
-    if (tap.commandId == _reconciledTapId) return;
-    _reconciledTapId = tap.commandId;
+  /// was. One of the two is behind and REST decides which: the command is not
+  /// sent again, and the peer connection is left as it is.
+  void _reconcileAfterCommandRefusal(RemoteCommandFeedback? command) {
+    if (command == null ||
+        command.outcome != RemoteCommandOutcome.sessionNotActive) {
+      return;
+    }
+    // One command, one read: every other state change still carries this one.
+    if (command.commandId == _reconciledCommandId) return;
+    _reconciledCommandId = command.commandId;
     _remoteSessionBloc.add(const RemoteSessionRefreshRequested());
   }
 
