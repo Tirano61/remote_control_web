@@ -29,7 +29,7 @@ class _FixedCommandIds implements RemoteControlCommandIdGenerator {
   final Iterator<String> _ids;
 
   @override
-  String next() {
+  String next(RemoteCommandKind kind) {
     _ids.moveNext();
     return _ids.current;
   }

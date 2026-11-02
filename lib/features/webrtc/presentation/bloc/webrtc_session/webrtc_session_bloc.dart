@@ -301,7 +301,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
 
     final generation = _generation;
     final command = RemoteTapCommand(
-      id: _commandIdGenerator.next(),
+      id: _commandIdGenerator.next(RemoteCommandKind.tap),
       point: event.point,
     );
     // Tracked before it is sent: the acknowledgement must find it, however
