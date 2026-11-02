@@ -2,14 +2,30 @@ import 'package:equatable/equatable.dart';
 
 import 'normalized_remote_point.dart';
 
+/// What a Back or a Home counts for in the tablet's queue. Not how long Android
+/// takes to animate it: nothing says that, and nothing here waits for it.
+const Duration remoteNavigationEstimatedWork = Duration(milliseconds: 50);
+
+/// How long after a Back or a Home was sent the screen is assumed to be still on
+/// its way somewhere else. See `RemoteNavigationGuard`.
+const Duration remoteNavigationSettleDuration = Duration(milliseconds: 350);
+
 /// The kinds of command the protocol defines.
-enum RemoteCommandKind { tap, swipe }
+enum RemoteCommandKind {
+  tap,
+  swipe,
+  back,
+  home;
+
+  /// A global action of Android, as opposed to a touch on the picture.
+  bool get isNavigation => this == back || this == home;
+}
 
 /// Something the technician asks the tablet to do over the `control` channel.
 ///
 /// Sealed on purpose: the protocol is an agreement with `remote_control_device`,
 /// and a command exists here only once both sides implement it. Today that is
-/// the tap and the swipe, and nothing else.
+/// the tap, the swipe, Back and Home, and nothing else.
 sealed class RemoteControlCommand extends Equatable {
   const RemoteControlCommand({required this.id});
 
@@ -19,7 +35,7 @@ sealed class RemoteControlCommand extends Equatable {
 
   RemoteCommandKind get kind;
 
-  /// How long the gesture keeps the tablet's queue busy once it starts: what any
+  /// How long the command keeps the tablet's queue busy once it starts: what any
   /// command sent after this one has to wait for.
   Duration get estimatedWork;
 }
@@ -89,4 +105,41 @@ final class RemoteSwipeCommand extends RemoteControlCommand {
   /// The id only: coordinates are not logged.
   @override
   String toString() => 'RemoteSwipeCommand($id)';
+}
+
+/// A global action of Android: nothing but its id goes on the wire.
+///
+/// Not a touch at some corner of the screen, so it needs no picture to have been
+/// aimed at. That is the whole difference with a tap or a swipe, and why it can
+/// be used while the tablet shares no screen.
+sealed class RemoteNavigationCommand extends RemoteControlCommand {
+  const RemoteNavigationCommand({required super.id});
+
+  @override
+  Duration get estimatedWork => remoteNavigationEstimatedWork;
+
+  @override
+  List<Object?> get props => [id];
+}
+
+/// Android's Back.
+final class RemoteBackCommand extends RemoteNavigationCommand {
+  const RemoteBackCommand({required super.id});
+
+  @override
+  RemoteCommandKind get kind => RemoteCommandKind.back;
+
+  @override
+  String toString() => 'RemoteBackCommand($id)';
+}
+
+/// Android's Home.
+final class RemoteHomeCommand extends RemoteNavigationCommand {
+  const RemoteHomeCommand({required super.id});
+
+  @override
+  RemoteCommandKind get kind => RemoteCommandKind.home;
+
+  @override
+  String toString() => 'RemoteHomeCommand($id)';
 }

@@ -7,7 +7,8 @@ enum RemoteCommandOutcome {
   /// Handed to the channel; no acknowledgement yet.
   pending,
 
-  /// The tablet reported the gesture completed.
+  /// The tablet reported the gesture completed, or Android accepted the global
+  /// action.
   confirmed,
 
   accessibilityUnavailable,
@@ -41,7 +42,7 @@ final class RemoteCommandFeedback extends Equatable {
 
   final String commandId;
 
-  /// Whether the technician should read about a touch or about a stroke.
+  /// Whether the technician should read about a touch, a stroke, Back or Home.
   final RemoteCommandKind kind;
 
   final RemoteCommandOutcome outcome;
@@ -56,6 +57,7 @@ final class RemoteControlStatus extends Equatable {
     this.isSessionActive = false,
     this.lastCommand,
     this.pendingCommands = 0,
+    this.isNavigationSettling = false,
   });
 
   /// REST says the session of this negotiation is `ACTIVE`, and it is not being
@@ -67,6 +69,14 @@ final class RemoteControlStatus extends Equatable {
   /// Commands sent and not yet settled.
   final int pendingCommands;
 
+  /// A Back or a Home is under way, and no new command of any kind is taken.
+  final bool isNavigationSettling;
+
   @override
-  List<Object?> get props => [isSessionActive, lastCommand, pendingCommands];
+  List<Object?> get props => [
+    isSessionActive,
+    lastCommand,
+    pendingCommands,
+    isNavigationSettling,
+  ];
 }

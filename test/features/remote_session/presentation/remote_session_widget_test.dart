@@ -1203,6 +1203,400 @@ void main() {
       }
       expect(renderers.created, hasLength(1));
     });
+
+    group('Back and Home', () {
+      final backButton = find.byKey(const Key('remote_back_button'));
+      final homeButton = find.byKey(const Key('remote_home_button'));
+      final navigationStatus = find.byKey(const Key('remote_navigation_status'));
+
+      bool isEnabled(WidgetTester tester, Finder button) =>
+          tester.widget<OutlinedButton>(button).onPressed != null;
+
+      String navigationLine(WidgetTester tester) =>
+          tester.widget<Text>(navigationStatus).data!;
+
+      List<RemoteControlCommand> sent() => peers.last.sentRemoteControlCommands;
+
+      Future<void> press(WidgetTester tester, Finder button) async {
+        await tester.tap(button);
+        await tester.pump();
+        await tester.pump();
+      }
+
+      /// ACTIVE, connected and `control` open, with no track at all.
+      Future<void> pumpWithoutVideo(WidgetTester tester) async {
+        remoteSessions.current = buildRemoteSession();
+        realtime.peerJoinedOnJoin = true;
+        await pumpConsole(tester);
+        await connectSocket(tester);
+        realtime.answerRelayAck({
+          'delivered': true,
+          'remoteSessionId': remoteSessionId,
+        });
+        await settleUi(tester);
+        peers.last
+          ..emitControlChannelState(WebRtcDataChannelState.open)
+          ..emitPeerState(WebRtcPeerConnectionState.connected);
+        await settleUi(tester);
+      }
+
+      /// Past what is left of the guard, once the answer has arrived.
+      Future<void> outliveGuard(WidgetTester tester) =>
+          tester.pump(remoteNavigationSettleDuration);
+
+      testWidgets('both are there, by name, and enabled', (tester) async {
+        await pumpAssistance(tester);
+
+        expect(find.text('Atrás'), findsOneWidget);
+        expect(find.text('Inicio'), findsOneWidget);
+        expect(isEnabled(tester, backButton), isTrue);
+        expect(isEnabled(tester, homeButton), isTrue);
+        expect(navigationStatus, findsNothing);
+      });
+
+      testWidgets('ACTIVE and control open without video: enabled', (
+        tester,
+      ) async {
+        await pumpWithoutVideo(tester);
+
+        expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
+        expect(find.text(kWaitingForRemoteScreenNotice), findsOneWidget);
+        expect(statusLine(tester), 'Control remoto: no disponible');
+        expect(gestureLayer, findsNothing);
+        expect(isEnabled(tester, backButton), isTrue);
+        expect(isEnabled(tester, homeButton), isTrue);
+
+        await press(tester, homeButton);
+        expect(sent(), const [RemoteHomeCommand(id: 'home-1')]);
+        expect(navigationLine(tester), 'Enviando Inicio...');
+
+        peers.last.emitRemoteControlAck('home-1');
+        await tester.pump();
+        expect(navigationLine(tester), 'Inicio enviado');
+        // The line about gestures is still right: there is nothing to aim at.
+        expect(statusLine(tester), 'Control remoto: no disponible');
+      });
+
+      testWidgets('disabled while the session is CONNECTING', (tester) async {
+        remoteSessions.activateFailure = const NetworkFailure();
+        await pumpAssistance(tester);
+        expect(
+          find.text('Estado: Conectando con el dispositivo...'),
+          findsOneWidget,
+        );
+
+        expect(isEnabled(tester, backButton), isFalse);
+        expect(isEnabled(tester, homeButton), isFalse);
+        await tester.tap(backButton, warnIfMissed: false);
+        await settleUi(tester);
+
+        expect(sent(), isEmpty);
+      });
+
+      testWidgets('disabled before the peers are connected', (tester) async {
+        remoteSessions.current = buildRemoteSession();
+        await pumpConsole(tester);
+
+        expect(backButton, findsOneWidget);
+        expect(isEnabled(tester, backButton), isFalse);
+        expect(isEnabled(tester, homeButton), isFalse);
+      });
+
+      testWidgets('disabled with the control channel closed', (tester) async {
+        await pumpAssistance(tester);
+
+        peers.last.emitControlChannelState(WebRtcDataChannelState.closed);
+        await settleUi(tester);
+
+        expect(isEnabled(tester, backButton), isFalse);
+        expect(isEnabled(tester, homeButton), isFalse);
+      });
+
+      testWidgets('there is no assistance without a session', (tester) async {
+        await pumpConsole(tester);
+
+        expect(backButton, findsNothing);
+        expect(homeButton, findsNothing);
+      });
+
+      testWidgets('Back: its frame, its answer, its words', (tester) async {
+        await pumpAssistance(tester);
+
+        await press(tester, backButton);
+        expect(sent(), const [RemoteBackCommand(id: 'back-1')]);
+        expect(navigationLine(tester), 'Enviando Atrás...');
+
+        peers.last.emitRemoteControlAck('back-1');
+        await tester.pump();
+        expect(navigationLine(tester), 'Atrás enviado');
+      });
+
+      testWidgets('Home: its frame, its answer, its words', (tester) async {
+        await pumpAssistance(tester);
+
+        await press(tester, homeButton);
+        expect(sent(), const [RemoteHomeCommand(id: 'home-1')]);
+        expect(navigationLine(tester), 'Enviando Inicio...');
+
+        peers.last.emitRemoteControlAck('home-1');
+        await tester.pump();
+        expect(navigationLine(tester), 'Inicio enviado');
+      });
+
+      testWidgets('the line under the picture keeps talking about gestures', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+
+        await press(tester, homeButton);
+        expect(statusLine(tester), 'Control remoto: listo');
+
+        peers.last.emitRemoteControlAck(
+          'home-1',
+          error: RemoteControlError.gestureRejected,
+        );
+        await tester.pump();
+        expect(statusLine(tester), 'Control remoto: listo');
+
+        await clickCentre(tester);
+        expect(statusLine(tester), 'Enviando toque...');
+        expect(navigationStatus, findsNothing);
+      });
+
+      const refusals = {
+        RemoteControlError.accessibilityUnavailable:
+            'El dispositivo no tiene habilitado el control remoto.',
+        RemoteControlError.gestureRejected: 'No se pudo ejecutar la acción.',
+        RemoteControlError.invalidCommand: 'Control remoto no disponible',
+        RemoteControlError.unsupportedCommand: 'Control remoto no disponible',
+      };
+
+      refusals.forEach((error, message) {
+        testWidgets('${error.code} is explained, ends nothing, frees the rest', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+
+          await press(tester, homeButton);
+          peers.last.emitRemoteControlAck('home-1', error: error);
+          await tester.pump();
+          await tester.pump();
+
+          expect(navigationLine(tester), message);
+          expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
+          expect(
+            find.byKey(const Key('fake_remote_video_screen-0')),
+            findsOneWidget,
+          );
+          expect(peers.last.isClosed, isFalse);
+          expect(remoteSessions.closedIds, isEmpty);
+          expect(sent(), hasLength(1));
+          expect(isEnabled(tester, backButton), isTrue);
+          expect(gestureLayer, findsOneWidget);
+        });
+      });
+
+      testWidgets('session_not_active asks REST, once, and sends nothing', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+        final readsBefore = remoteSessions.currentCount;
+
+        await press(tester, backButton);
+        peers.last.emitRemoteControlAck(
+          'back-1',
+          error: RemoteControlError.sessionNotActive,
+        );
+        await settleUi(tester);
+
+        expect(remoteSessions.currentCount, readsBefore + 1);
+        expect(sent(), hasLength(1));
+        expect(peers.last.isClosed, isFalse);
+        expect(
+          navigationLine(tester),
+          'La asistencia no está activa en el dispositivo.',
+        );
+      });
+
+      testWidgets('no answer in time says the action was not confirmed', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+
+        await press(tester, backButton);
+        await tester.pump(const Duration(milliseconds: 3050));
+        await tester.pump();
+
+        expect(navigationLine(tester), 'El dispositivo no confirmó la acción.');
+        expect(isEnabled(tester, backButton), isTrue);
+        expect(sent(), hasLength(1));
+      });
+
+      testWidgets('a double click is one action', (tester) async {
+        await pumpAssistance(tester);
+
+        await press(tester, backButton);
+        expect(isEnabled(tester, backButton), isFalse);
+        expect(isEnabled(tester, homeButton), isFalse);
+        await tester.tap(backButton, warnIfMissed: false);
+        await tester.pump();
+
+        expect(sent(), const [RemoteBackCommand(id: 'back-1')]);
+
+        peers.last.emitRemoteControlAck('back-1');
+        await outliveGuard(tester);
+        await tester.pump();
+        expect(isEnabled(tester, backButton), isTrue);
+      });
+
+      testWidgets('a click during the guard is nothing, and works afterwards', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+
+        await press(tester, homeButton);
+        peers.last.emitRemoteControlAck('home-1');
+        await tester.pump(const Duration(milliseconds: 50));
+        expect(navigationLine(tester), 'Inicio enviado');
+
+        expect(gestureLayer, findsNothing);
+        await tester.tapAt(tester.getCenter(surface));
+        await tester.pump(const Duration(milliseconds: 150));
+        expect(sent(), hasLength(1));
+
+        await tester.pump(remoteNavigationSettleDuration);
+        await tester.pump();
+        expect(gestureLayer, findsOneWidget);
+        expect(isEnabled(tester, homeButton), isTrue);
+
+        await clickCentre(tester);
+        expect(sent(), hasLength(2));
+        expect(sent().last, isA<RemoteTapCommand>());
+      });
+
+      testWidgets('a drag during the guard is nothing, and works afterwards', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+
+        await press(tester, backButton);
+        peers.last.emitRemoteControlAck('back-1');
+        await tester.pump();
+
+        await dragUpwards(tester);
+        expect(sent(), hasLength(1));
+
+        await outliveGuard(tester);
+        await tester.pump();
+        await dragUpwards(tester);
+        expect(sent(), hasLength(2));
+        expect(sent().last, isA<RemoteSwipeCommand>());
+      });
+
+      testWidgets('a press that starts in the guard is not picked up', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+        await press(tester, homeButton);
+        peers.last.emitRemoteControlAck('home-1');
+        await tester.pump();
+
+        final gesture = await tester.createGesture();
+        await gesture.down(tester.getCenter(surface));
+        await tester.pump(remoteNavigationSettleDuration);
+        await tester.pump();
+        expect(gestureLayer, findsOneWidget);
+        await gesture.up();
+        await settleUi(tester);
+
+        expect(sent(), hasLength(1));
+      });
+
+      testWidgets('the guard leaves the picture and its renderer alone', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+
+        await press(tester, homeButton);
+        peers.last.emitRemoteControlAck('home-1');
+        await tester.pump();
+
+        expect(
+          find.byKey(const Key('fake_remote_video_screen-0')),
+          findsOneWidget,
+        );
+        await outliveGuard(tester);
+        await tester.pump();
+
+        expect(renderers.created, hasLength(1));
+        expect(renderers.last.disposeCount, 0);
+        expect(renderers.last.detachCount, 0);
+        expect(peers.last.isClosed, isFalse);
+      });
+
+      testWidgets('the buttons are not part of the picture', (tester) async {
+        await pumpAssistance(tester);
+        final picture = tester.getRect(surface);
+
+        expect(tester.getRect(backButton).top, greaterThan(picture.bottom));
+        expect(tester.getRect(homeButton).top, greaterThan(picture.bottom));
+
+        await press(tester, backButton);
+
+        expect(sent().whereType<RemoteTapCommand>(), isEmpty);
+        expect(sent().whereType<RemoteSwipeCommand>(), isEmpty);
+      });
+
+      testWidgets('FINALIZAR is not held by the guard, and clears it', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+        final session = peers.last;
+        final gate = Completer<void>();
+        remoteSessions.closeGate = gate.future;
+
+        await press(tester, backButton);
+        expect(navigationLine(tester), 'Enviando Atrás...');
+
+        await tester.tap(find.byKey(const Key('close_remote_session_button')));
+        await tester.pump();
+        await tester.pump();
+        await tester.pump();
+
+        expect(remoteSessions.closedIds, hasLength(1));
+        expect(navigationStatus, findsNothing);
+        expect(isEnabled(tester, backButton), isFalse);
+        expect(isEnabled(tester, homeButton), isFalse);
+
+        // An answer that arrives now has nothing left to speak about.
+        session.emitRemoteControlAck('back-1');
+        await settleUi(tester);
+        expect(navigationStatus, findsNothing);
+        expect(session.sentRemoteControlCommands, hasLength(1));
+
+        gate.complete();
+        await settleUi(tester);
+
+        expect(backButton, findsNothing);
+        expect(homeButton, findsNothing);
+        expect(session.sentRemoteControlCommands, hasLength(1));
+      });
+
+      testWidgets('a close that failed gives Back and Home back', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+        remoteSessions.closeFailure = const NetworkFailure();
+
+        await press(tester, homeButton);
+        await tester.tap(find.byKey(const Key('close_remote_session_button')));
+        await settleUi(tester);
+
+        expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
+        expect(isEnabled(tester, backButton), isTrue);
+        expect(isEnabled(tester, homeButton), isTrue);
+      });
+    });
   });
 
   group('closed from the tablet', () {

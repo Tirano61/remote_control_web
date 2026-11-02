@@ -17,12 +17,13 @@ remote-session:peer-joined
 remote-session:closed
 webrtc:offer / webrtc:answer / webrtc:ice-candidate relay
 RTCPeerConnection (flutter_webrtc), technician side as the offerer
-the control RTCDataChannel, opened but silent
+the control RTCDataChannel
+the tablet's screen, received as remote video
+remote control over that channel: tap, swipe, back and home
 ```
 
-Not implemented yet: video, `MediaProjection`, screen rendering and the remote
-control commands (tap, swipe, back, home, text). The `control` channel carries
-no protocol at all — this stage only establishes connectivity.
+Not implemented yet: recent apps and text input. The commands and what each one
+needs are in [docs/CONTROL_CHANNEL.md](docs/CONTROL_CHANNEL.md).
 
 The WebRTC decisions that are not part of the backend contract — offerer role,
 readiness, ICE/TURN, candidate ordering, teardown — are written down in

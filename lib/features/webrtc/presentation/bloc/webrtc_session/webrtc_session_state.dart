@@ -58,17 +58,24 @@ sealed class WebRtcSessionState extends Equatable {
   /// The remote control side of this negotiation.
   RemoteControlStatus get remoteControl => const RemoteControlStatus();
 
-  /// Whether a command may be sent right now.
+  /// Whether a global action, Back or Home, can reach the tablet.
   ///
   /// Every condition matters on its own: an open channel on a session that is
-  /// not `ACTIVE` would only get `session_not_active` back, and a click with no
-  /// track has no picture to have been aimed at. Whether the picture is really
-  /// being displayed is only known to the surface, which checks it too.
-  bool get canSendRemoteControl =>
-      isConnected &&
-      isControlChannelOpen &&
-      hasRemoteVideo &&
-      remoteControl.isSessionActive;
+  /// not `ACTIVE` would only get `session_not_active` back. The picture is not
+  /// one of them. These are not touches, and the tablet runs them whether or not
+  /// it is sharing its screen.
+  ///
+  /// A Back or a Home still settling holds everything back for a moment without
+  /// making anything unavailable: see [RemoteControlStatus.isNavigationSettling].
+  bool get canSendRemoteNavigation =>
+      isConnected && isControlChannelOpen && remoteControl.isSessionActive;
+
+  /// Whether a gesture on the picture can reach the tablet.
+  ///
+  /// All of the above, and a track: a click with none has no picture to have
+  /// been aimed at. Whether the picture is really being displayed is only known
+  /// to the surface, which checks it too.
+  bool get canSendRemoteControl => canSendRemoteNavigation && hasRemoteVideo;
 
   /// Whether losing the signaling socket must leave the peer connection alone.
   ///

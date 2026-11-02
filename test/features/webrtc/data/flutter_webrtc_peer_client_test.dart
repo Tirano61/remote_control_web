@@ -460,6 +460,34 @@ void main() {
         expect(connection.dataChannelLabels, ['control']);
       });
 
+      test('Back and Home go out on the same channel, as protocol frames', () async {
+        final session = await createSession();
+        await session.openControlChannel();
+        connection.dataChannel!.channelState =
+            rtc.RTCDataChannelState.RTCDataChannelOpen;
+
+        expect(
+          await session.sendRemoteControlCommand(
+            const RemoteBackCommand(id: 'back-1'),
+          ),
+          isTrue,
+        );
+        expect(
+          await session.sendRemoteControlCommand(
+            const RemoteHomeCommand(id: 'home-2'),
+          ),
+          isTrue,
+        );
+
+        expect(
+          connection.dataChannel!.sentMessages.map((m) => m.text),
+          [
+            '{"v":1,"type":"back","id":"back-1"}',
+            '{"v":1,"type":"home","id":"home-2"}',
+          ],
+        );
+      });
+
       test('nothing is sent without a channel', () async {
         final session = await createSession();
 
