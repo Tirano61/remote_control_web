@@ -1,7 +1,7 @@
 # Control channel — `remote_control_web`
 
-How what the technician does on the picture becomes a gesture on the tablet, seen
-from the web.
+How what the technician does on the picture becomes a gesture on the tablet, and
+what the Atrás and Inicio buttons become, seen from the web.
 
 The protocol itself is an agreement with `remote_control_device`, carried peer
 to peer: the backend never sees it. Its source is
@@ -29,13 +29,30 @@ pointer down, move, up on the picture
   -> RemoteCommandFeedback           the line under the picture
 ```
 
+The buttons join that path at the event, and only the end of it differs:
+
+```text
+Atrás, Inicio
+  -> WebRtcRemoteBackRequested       the BLoC checks its own gate
+     WebRtcRemoteHomeRequested
+  -> RemoteBackCommand               id from the same generator
+     RemoteHomeCommand
+  -> PendingRemoteCommands           the same map, the same deadlines
+     RemoteNavigationGuard           starts now, see Back and Home
+  -> RemoteControlChannelCodec
+  -> `control` data channel
+  -> Android performGlobalAction
+  -> ack
+  -> RemoteCommandFeedback           the line next to the buttons
+```
+
 Presentation knows normalized coordinates, gesture intents and a status. It does
 not know `RTCDataChannel`, `RTCDataChannelMessage`, `jsonEncode` or `flutter_webrtc`.
 
 ## Protocol v1
 
-`tap` and `swipe`. One text frame holding one JSON object, on the existing
-`control` channel. No other channel is created.
+`tap`, `swipe`, `back` and `home`. One text frame holding one JSON object, on the
+existing `control` channel. No other channel is created.
 
 ```json
 {"v":1,"type":"tap","id":"tap-1","x":0.5,"y":0.25}
@@ -43,6 +60,14 @@ not know `RTCDataChannel`, `RTCDataChannelMessage`, `jsonEncode` or `flutter_web
 
 ```json
 {"v":1,"type":"swipe","id":"swipe-2","startX":0.5,"startY":0.8,"endX":0.5,"endY":0.2,"durationMs":350}
+```
+
+```json
+{"v":1,"type":"back","id":"back-3"}
+```
+
+```json
+{"v":1,"type":"home","id":"home-4"}
 ```
 
 ```json
@@ -56,7 +81,8 @@ not know `RTCDataChannel`, `RTCDataChannelMessage`, `jsonEncode` or `flutter_web
 In a swipe the four coordinates are the same kind of value as a tap's, and
 `durationMs` is an integer in `50..2000`. The tablet refuses `350.0`, and refuses
 a swipe whose start equals its end. A tap has no `durationMs`: Android holds it
-for its own 50 ms.
+for its own 50 ms. `back` and `home` carry their id and nothing else: they are not
+touches, so no coordinate and no duration means anything to them.
 
 An ack is valid when `v == 1`, `type == "ack"`, `id` is a non-empty string and
 `ok` is a bool; with `ok: false`, `error` must also be a string. Anything else is
@@ -64,8 +90,18 @@ ignored without an exception, and a binary frame too. A failure code this versio
 does not know is still a failure (`RemoteControlError.unknown`): the tablet did
 answer, and ignoring it would only leave the technician waiting for the timeout.
 
-`ok: true` means Android reported the gesture **completed**, not that it was
-requested.
+What `ok: true` promises depends on the command, because Android promises different
+things:
+
+```text
+tap, swipe    Android reported the gesture completed, not merely that it was requested
+back, home    Android accepted the global action
+```
+
+`performGlobalAction` returns a boolean and has no callback. A `back` or `home` that
+was acknowledged may still be animating, and may have had no visible effect at all:
+Back with nothing to go back to, for instance. So `Inicio enviado` says the tablet
+took the action, never that the launcher is on screen.
 
 ## From a pointer to a coordinate
 
@@ -242,6 +278,102 @@ If anything is missing nothing is sent. **Gestures are not queued** while
 connecting: a touch that lands seconds later, on whatever is on screen by then, is
 worse than a click that did nothing.
 
+## Back and Home
+
+Two buttons in the assistance block, `Atrás` and `Inicio`, below the picture and
+outside its pointer layer. They do not go through `RemoteControlGestureLayer` or the
+coordinate conversion, and that layer knows nothing about them.
+
+### They need no picture
+
+```text
+                                              tap, swipe     back, home
+RemoteSession ACTIVE, and not being closed    yes            yes
+RTCPeerConnectionState connected              yes            yes
+control channel open                          yes            yes
+aimed at the current session                  yes            yes
+a remote video track                          yes            no
+the renderer really displaying a picture      yes            no
+```
+
+`canSendRemoteNavigation` and `canSendRemoteControl` on the state say exactly that,
+and the second is the first plus the track. A tap needs a picture because its
+coordinates are a position on it. A Back is a global action of Android, and the
+tablet runs it whether or not it is sharing its screen.
+
+So without a picture the buttons work while the line under the surface says
+`Control remoto: no disponible`. Both are right: that line is about gestures.
+
+While any of those conditions is missing the buttons are shown disabled, and nothing
+is sent. The BLoC checks again when the event arrives.
+
+### The settle guard
+
+Android answers as soon as it accepts the action, with the transition still running:
+
+```text
+HOME -> ack at once -> a tap right away -> it lands on the previous screen,
+                                           or on the transition
+```
+
+So for **350 ms** (`remoteNavigationSettleDuration`) from the moment a Back or Home
+is sent, and for as long as it is unanswered, no new command of any kind is taken
+(`RemoteNavigationGuard`). It ends when **both** have happened:
+
+```text
+accepted by Android     ack ok: true
+350 ms since it was sent
+```
+
+```text
+ack at  80 ms    held until 350 ms
+ack at 500 ms    ends there and then, with nothing added
+```
+
+| While it holds | |
+| --- | --- |
+| a tap, a swipe | dropped, never queued: the surface has no pointer layer for that moment, and the BLoC drops them too |
+| a press that starts then | not picked up afterwards, like any press the layer did not see begin |
+| another Back or Home | the buttons are disabled, and the BLoC drops them too: a double click is one action |
+| FINALIZAR ASISTENCIA | not held back |
+| the picture, the channel, the peer connection, Android | untouched: frames keep arriving |
+
+It is a guess about how long a transition takes, and it does not claim otherwise. A
+slower transition can outlast it; the technician can see the picture. Nothing on the
+wire tells when Android finished, and nothing is sent on the wire about the guard.
+
+A command that was not accepted **ends it at once**, because nothing is animating:
+
+```text
+accessibility_unavailable, gesture_rejected, session_not_active,
+invalid_command, unsupported_command, unknown code     at the answer
+timeout                                                at its deadline
+channel refused the message                            at that moment
+```
+
+The answer to an older tap or swipe, whatever it says, is not an answer to the Back,
+and does not end its guard.
+
+### What they say
+
+The line next to the buttons follows the last command when it was one of them. The
+line under the picture goes back to `Control remoto: listo`, and speaks again at the
+next gesture, when this one goes quiet. There is no history.
+
+| Situation | Back | Home |
+| --- | --- | --- |
+| ack pending | `Enviando Atrás...` | `Enviando Inicio...` |
+| `ok: true` | `Atrás enviado` | `Inicio enviado` |
+| `gesture_rejected` | `No se pudo ejecutar la acción.` | the same |
+| timeout | `El dispositivo no confirmó la acción.` | the same |
+| `accessibility_unavailable` | `El dispositivo no tiene habilitado el control remoto.` | the same |
+| `session_not_active` | `La asistencia no está activa en el dispositivo.` | the same |
+| `invalid_command`, `unsupported_command`, unknown | `Control remoto no disponible` | the same |
+| anything needed is missing | nothing: the buttons are disabled | the same |
+
+`gesture_rejected` is the protocol's name for a refused global action too. The
+technician did not make a gesture, so they do not read that word.
+
 ## Pending commands
 
 ```text
@@ -256,7 +388,9 @@ commandId -> pending command (with its deadline)
 | ack after the timeout | ignored; the timeout stands |
 | ack of an older command | settles it; says nothing about the last one |
 
-The line under the picture follows the **last** command. There is no history.
+Back and Home use this same map. The line under the picture follows the **last**
+tap or swipe; there is no history, and Back and Home have
+[their own line](#what-they-say).
 
 | Situation | Tap | Swipe |
 | --- | --- | --- |
@@ -274,8 +408,8 @@ The line under the picture follows the **last** command. There is no history.
 
 A command is sent at most once, whatever happens to it. A gesture may have run
 with its acknowledgement lost, so sending it again could press something twice.
-A swipe that expired is not repeated either: it could scroll twice. The technician
-repeats the gesture if they want to.
+A swipe that expired is not repeated either: it could scroll twice, and a Back could
+leave two screens behind. The technician repeats the action if they want to.
 
 ### ACK timeout
 
@@ -291,12 +425,18 @@ deadline = min(work of what is still pending ahead
                + margin,
                45 s)
 
-work     tap 50 ms, swipe its durationMs
+work     tap 50 ms, swipe its durationMs,
+         back and home 50 ms  (remoteNavigationEstimatedWork)
 margin   3 s  (WebRtcSessionBloc.defaultRemoteCommandMargin)
 ```
 
+The 50 ms of a Back or Home are what it counts for in that sum, not how long Android
+animates it. They have no timeout of their own.
+
 ```text
 a tap alone                      3.05 s    the minimum is the margin: never under 3 s
+a back or a home alone           3.05 s
+a home behind a swipe of 2 s     5.05 s
 a swipe of 350 ms alone          3.35 s
 swipe 2 s behind a swipe of 2 s  7 s
 the 17th long swipe in a row     37 s
@@ -326,15 +466,17 @@ invalid_command             a log line and a message: a bug or a version mismatc
 unsupported_command         idem
 ```
 
-None of them closes the `RemoteSession` or the peer connection.
+The same for Back and Home, and each of them also ends the
+[settle guard](#the-settle-guard). None of them closes the `RemoteSession` or the
+peer connection.
 
 ## Cleanup
 
 ```text
-channel closing/closed       pending cleared at once, tap and swipe, no deadline
+channel closing/closed       pending cleared at once, every kind, no deadline
                              waited for, a command still pending shown as not
                              available
-session leaves ACTIVE        gestures stop, pending and feedback cleared
+session leaves ACTIVE        commands stop, pending and feedback cleared
 FINALIZAR pressed            idem, at the press and not at the backend's answer;
                              a press under way is dropped with the layer;
                              a close that fails gives the control back
@@ -343,6 +485,9 @@ sign out                     idem, and the peer connection goes
 peer connection failed       pending and feedback released with the negotiation
 new peer connection          starts with nothing pending
 ```
+
+The settle guard goes in every one of those, at once and with its timer: it never
+survives into another session, peer connection or channel.
 
 The pointer layer exists only while control is available. A pointer already down
 when it goes away keeps reporting to the old layer, which ignores it, and a layer
@@ -353,11 +498,12 @@ that comes back does not pick it up: only a new press starts a gesture.
 Commands belong to the negotiation that sent them, and the existing generation
 guard covers them: an ack is a peer event, so one from a replaced or closed peer
 connection is dropped before it can touch anything, and a deadline carries the
-generation it was started in. An old `swipe-1` can therefore not resolve a new
-`swipe-1`, even if a generator repeated the id.
+generation it was started in, and so does the settle time of a Back or Home. An old
+`swipe-1` can therefore not resolve a new `swipe-1`, even if a generator repeated the
+id, and an old `back-1` cannot end the guard of a new one.
 
-The default generator counts `tap-1`, `swipe-2`, `tap-3`, ... on one counter for
-as long as the page lives, and does not restart with a negotiation. It is injectable
+The default generator counts `tap-1`, `swipe-2`, `back-3`, `home-4`, ... on one
+counter for as long as the page lives, and does not restart with a negotiation. It is injectable
 (`RemoteControlCommandIdGenerator`), and never derives an id from coordinates or
 screen content.
 
@@ -367,6 +513,54 @@ screen content.
 tests**: it suppresses the accessibility service, and a command would never reach
 `dispatchGesture`. Use `adb logcat`, `dumpsys` and `adb exec-out screencap -p`.
 The toggle and the *full control* dialog are the user's, by hand, always.
+
+### What has been observed of Back and Home on the physical tablet
+
+Chrome and a tablet running Android 14 (800x1280), with `remote_control_device` built
+from `feature/device-remote-control-navigation` (84763a9), and the accessibility toggle
+and every consent done by hand. Frames were read by wrapping `RTCDataChannel` in the
+page during the test, Android's side from `adb logcat` (`RemoteControlInput`) and
+`dumpsys activity`. The real buttons were clicked with the mouse, and the attempts that
+needed an exact time were `PointerEvent`s dispatched on the page, which go through the
+same Flutter path.
+
+```text
+tap regression: AC 7 8 in the Calculator     78, ack ok, tap completed on Android
+swipe regression, Settings list              the list scrolls, ack ok
+Back from a Settings sub-screen              back to the list, back accepted, ack ok,
+                                             Atrás enviado
+Home from Settings                           launcher in front, home accepted, ack ok,
+                                             Inicio enviado
+open app, Back, Home, twice, no F5           same session, channel and peer connection
+ack of a Back or Home                        12 to 210 ms after it was sent
+a Home answered in 20-200 ms, then a tap at
+  209, 307, 336, 352, 363 ms                 nothing sent
+  389, 423, 504, 704 ms                      the tap is sent
+second Back or Home, tap, swipe, in the
+  guard of a Back or of a Home               nothing sent; a tap at 460 ms goes out
+service disabled by hand, Back and Home      ack accessibility_unavailable, no navigation,
+                                             message; session and picture go on
+  a tap 120 ms after that refusal            sent: the guard had ended
+service enabled again                        Back and Home work, same session
+MediaProjection refused by hand: ACTIVE,
+  control open, no picture                   buttons enabled, a click on the surface
+                                             sends nothing, Back and Home navigate
+FINALIZAR during the guard of a Home         not held back, buttons disabled at once,
+                                             nothing more sent, peer connection closed
+every command sent against Android's log     the same count of each kind
+```
+
+Sent and acknowledged, the two ends agree: 74 commands, 66 `ok: true` and 8
+`accessibility_unavailable`.
+
+The pointer layer comes back with the next frame after the guard ends, so that is the
+exact edge: 350 ms and up to one frame. In a browser window that is covered, Chrome
+gave this page 2 frames per second, and taps after the guard kept being lost until a
+frame came. Keep the window in front when measuring this.
+
+Covered by automated tests only, and never seen on the device: an ack of a Back or Home
+later than 350 ms, `gesture_rejected` and `session_not_active` on them, their timeout,
+the channel closing during the guard, and a replaced peer connection during it.
 
 ### What has been observed on the physical tablet
 
@@ -440,6 +634,10 @@ tap command sent <id>            swipe command sent <id>
 tap confirmed <id>               swipe confirmed <id>
 tap timed out <id>               swipe timed out <id>
 remote tap ignored <session>     remote swipe ignored <session>
+back command sent <id>           home command sent <id>
+back confirmed <id>              home confirmed <id>
+back timed out <id>              home timed out <id>
+remote back ignored <session>    remote home ignored <session>
 remote control command rejected: <code>
 control message ignored <remoteSessionId>
 control ack ignored <id>

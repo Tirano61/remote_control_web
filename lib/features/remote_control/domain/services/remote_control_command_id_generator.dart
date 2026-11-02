@@ -5,7 +5,7 @@ abstract interface class RemoteControlCommandIdGenerator {
   String next(RemoteCommandKind kind);
 }
 
-/// `tap-1`, `swipe-2`, `tap-3`, ...
+/// `tap-1`, `swipe-2`, `back-3`, `home-4`, ...
 ///
 /// One counter for every kind, unique for as long as the page lives, which is
 /// longer than any session: the counter does not restart with a new negotiation,

@@ -1774,6 +1774,81 @@ void main() {
     });
   });
 
+  /// The rest is in `webrtc_session_bloc_navigation_test.dart`, on a fake clock.
+  group('Back and Home end with their negotiation', () {
+    const settleTime = Duration(milliseconds: 20);
+
+    Future<void> ready() async {
+      await bloc.close();
+      bloc = WebRtcSessionBloc(
+        peerClient: peers,
+        signalingClient: signaling,
+        iceConfiguration: const WebRtcIceConfiguration(),
+        navigationSettleDuration: settleTime,
+      );
+      await connect();
+      bloc.add(const WebRtcRemoteSessionActivityChanged(sessionId));
+      await settle();
+    }
+
+    test('the assistance ending clears the guard and what is pending', () async {
+      await ready();
+      bloc.add(const WebRtcRemoteBackRequested(remoteSessionId: sessionId));
+      await settle();
+      expect(bloc.state.remoteControl.isNavigationSettling, isTrue);
+
+      bloc.add(const WebRtcSessionTerminated());
+      await settle();
+
+      expect(bloc.state, isA<WebRtcIdle>());
+      expect(bloc.state.remoteControl, const RemoteControlStatus());
+    });
+
+    test('nothing of it survives into the next assistance', () async {
+      await ready();
+      bloc.add(const WebRtcRemoteHomeRequested(remoteSessionId: sessionId));
+      await settle();
+
+      bloc.add(const WebRtcSessionTerminated());
+      await settle();
+      await connect();
+      bloc.add(const WebRtcRemoteSessionActivityChanged(sessionId));
+      await settle();
+
+      final next = bloc.state.remoteControl;
+      expect(next.isNavigationSettling, isFalse);
+      expect(next.pendingCommands, 0);
+      expect(next.lastCommand, isNull);
+
+      bloc.add(const WebRtcRemoteBackRequested(remoteSessionId: sessionId));
+      await settle();
+      expect(peers.last.sentRemoteControlCommands, hasLength(1));
+    });
+
+    test('another session replacing this one clears them too', () async {
+      await ready();
+      bloc.add(const WebRtcRemoteHomeRequested(remoteSessionId: sessionId));
+      await settle();
+
+      await negotiate(otherSessionId);
+
+      expect(bloc.state.remoteSessionId, otherSessionId);
+      expect(bloc.state.remoteControl.isNavigationSettling, isFalse);
+      expect(bloc.state.remoteControl.pendingCommands, 0);
+    });
+
+    test('a settle time that ends after closing the BLoC is harmless', () async {
+      await ready();
+      bloc.add(const WebRtcRemoteBackRequested(remoteSessionId: sessionId));
+      await settle();
+
+      await bloc.close();
+      await Future<void>.delayed(settleTime * 2);
+
+      expect(bloc.isClosed, isTrue);
+    });
+  });
+
   group('signaling loss', () {
     test('an incomplete negotiation is cleaned up', () async {
       await negotiate();

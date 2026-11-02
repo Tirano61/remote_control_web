@@ -10,6 +10,7 @@ import '../../../../remote_control/domain/entities/remote_control_command.dart';
 import '../../../../remote_control/domain/entities/remote_control_status.dart';
 import '../../../../remote_control/domain/services/pending_remote_commands.dart';
 import '../../../../remote_control/domain/services/remote_control_command_id_generator.dart';
+import '../../../../remote_control/domain/services/remote_navigation_guard.dart';
 import '../../../../signaling/domain/client/technician_signaling_client.dart';
 import '../../../../signaling/domain/entities/remote_signaling_message.dart';
 import '../../../../signaling/domain/entities/webrtc_ice_candidate.dart';
@@ -57,7 +58,8 @@ part 'webrtc_session_state.dart';
 /// and an acknowledgement from a replaced peer connection is dropped like any
 /// other late callback. A command is sent at most once. Nothing queues a gesture
 /// and nothing repeats one, because it may have run even when its acknowledgement
-/// was lost.
+/// was lost. While a Back or a Home settles, new commands are dropped rather than
+/// held for later, for the same reason.
 ///
 /// Security: SDP and ICE candidate contents never reach the log, and neither do
 /// the coordinates of a gesture. What is logged is the lifecycle — created, relayed,
@@ -69,20 +71,27 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     required WebRtcIceConfiguration iceConfiguration,
     RemoteControlCommandIdGenerator? commandIdGenerator,
     Duration remoteCommandMargin = defaultRemoteCommandMargin,
+    Duration navigationSettleDuration = remoteNavigationSettleDuration,
   }) : _peerClient = peerClient,
        _signalingClient = signalingClient,
        _iceConfiguration = iceConfiguration,
        _commandIdGenerator =
            commandIdGenerator ?? SequentialRemoteControlCommandIdGenerator(),
        _pendingCommands = PendingRemoteCommands(margin: remoteCommandMargin),
+       _navigationGuard = RemoteNavigationGuard(
+         settleDuration: navigationSettleDuration,
+       ),
        super(const WebRtcIdle()) {
     on<WebRtcNegotiationRequested>(_onNegotiationRequested);
     on<WebRtcSignalingLost>(_onSignalingLost);
     on<WebRtcSessionTerminated>(_onTerminated);
     on<WebRtcRemoteTapRequested>(_onRemoteTapRequested);
     on<WebRtcRemoteSwipeRequested>(_onRemoteSwipeRequested);
+    on<WebRtcRemoteBackRequested>(_onRemoteBackRequested);
+    on<WebRtcRemoteHomeRequested>(_onRemoteHomeRequested);
     on<WebRtcRemoteSessionActivityChanged>(_onRemoteSessionActivityChanged);
     on<_WebRtcRemoteCommandTimedOut>(_onRemoteCommandTimedOut);
+    on<_WebRtcRemoteNavigationSettled>(_onRemoteNavigationSettled);
     on<_WebRtcPeerReported>(_onPeerReported);
     on<_WebRtcSignalingReported>(_onSignalingReported);
 
@@ -148,10 +157,15 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   /// The most recent command of the current negotiation.
   RemoteCommandFeedback? _lastRemoteCommand;
 
+  /// Holds new commands back while a Back or a Home of the current negotiation
+  /// is under way.
+  final RemoteNavigationGuard _navigationGuard;
+
   @override
   Future<void> close() async {
     // Before anything is awaited: a deadline must not outlive this call.
     _pendingCommands.clear();
+    _navigationGuard.clear();
     await _incomingSubscription.cancel();
     _generation++;
     await _releaseNegotiation();
@@ -293,7 +307,10 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     WebRtcRemoteTapRequested event,
     Emitter<WebRtcSessionState> emit,
   ) async {
-    final session = _sessionAcceptingCommands(event.remoteSessionId);
+    final session = _sessionAcceptingCommands(
+      event.remoteSessionId,
+      isAvailable: state.canSendRemoteControl,
+    );
     if (session == null) {
       logDebug('remote tap ignored ${event.remoteSessionId}');
       return;
@@ -313,7 +330,10 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     WebRtcRemoteSwipeRequested event,
     Emitter<WebRtcSessionState> emit,
   ) async {
-    final session = _sessionAcceptingCommands(event.remoteSessionId);
+    final session = _sessionAcceptingCommands(
+      event.remoteSessionId,
+      isAvailable: state.canSendRemoteControl,
+    );
     if (session == null) {
       logDebug('remote swipe ignored ${event.remoteSessionId}');
       return;
@@ -330,19 +350,66 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     );
   }
 
-  /// The session a gesture aimed at [remoteSessionId] may be sent on, if any.
-  WebRtcPeerSession? _sessionAcceptingCommands(String remoteSessionId) {
+  /// The Atrás button.
+  Future<void> _onRemoteBackRequested(
+    WebRtcRemoteBackRequested event,
+    Emitter<WebRtcSessionState> emit,
+  ) async {
+    final session = _sessionAcceptingCommands(
+      event.remoteSessionId,
+      isAvailable: state.canSendRemoteNavigation,
+    );
+    if (session == null) {
+      logDebug('remote back ignored ${event.remoteSessionId}');
+      return;
+    }
+    await _sendRemoteCommand(
+      session,
+      RemoteBackCommand(id: _commandIdGenerator.next(RemoteCommandKind.back)),
+      emit,
+    );
+  }
+
+  /// The Inicio button.
+  Future<void> _onRemoteHomeRequested(
+    WebRtcRemoteHomeRequested event,
+    Emitter<WebRtcSessionState> emit,
+  ) async {
+    final session = _sessionAcceptingCommands(
+      event.remoteSessionId,
+      isAvailable: state.canSendRemoteNavigation,
+    );
+    if (session == null) {
+      logDebug('remote home ignored ${event.remoteSessionId}');
+      return;
+    }
+    await _sendRemoteCommand(
+      session,
+      RemoteHomeCommand(id: _commandIdGenerator.next(RemoteCommandKind.home)),
+      emit,
+    );
+  }
+
+  /// The session a command aimed at [remoteSessionId] may be sent on, if any.
+  ///
+  /// [isAvailable] is what this kind of command asks of the state. A Back or a
+  /// Home settling holds back every kind alike.
+  WebRtcPeerSession? _sessionAcceptingCommands(
+    String remoteSessionId, {
+    required bool isAvailable,
+  }) {
     final session = _session;
     if (session == null ||
         session.remoteSessionId != remoteSessionId ||
-        !state.canSendRemoteControl) {
+        !isAvailable ||
+        _navigationGuard.isActive) {
       return null;
     }
     return session;
   }
 
-  /// A gesture becomes a command now or it never does: there is no queue of
-  /// gestures waiting for the connection.
+  /// An intent becomes a command now or it never does: there is no queue of
+  /// commands waiting for the connection, or for a Back to settle.
   Future<void> _sendRemoteCommand(
     WebRtcPeerSession session,
     RemoteControlCommand command,
@@ -358,6 +425,15 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         add(_WebRtcRemoteCommandTimedOut(commandId, generation));
       },
     );
+    if (command is RemoteNavigationCommand) {
+      _navigationGuard.begin(
+        command.id,
+        onElapsed: (commandId) {
+          if (isClosed) return;
+          add(_WebRtcRemoteNavigationSettled(commandId, generation));
+        },
+      );
+    }
     _lastRemoteCommand = RemoteCommandFeedback(
       commandId: command.id,
       kind: command.kind,
@@ -373,6 +449,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
       return;
     }
     if (_pendingCommands.settle(command.id) == null) return;
+    _navigationGuard.release(command.id);
     _reportCommand(command.id, RemoteCommandOutcome.notSent);
     emit(_withNegotiationFacts(state));
   }
@@ -387,6 +464,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
 
     // Nothing sent for the previous answer can be spoken about any more.
     _pendingCommands.clear();
+    _navigationGuard.clear();
     _lastRemoteCommand = null;
 
     final next = _withNegotiationFacts(state);
@@ -404,8 +482,19 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     // Reported and left there. The gesture may have run with its answer lost,
     // so sending it again could press something twice.
     logDebug('${command.kind.name} timed out ${event.commandId}');
+    _navigationGuard.release(event.commandId);
     _reportCommand(event.commandId, RemoteCommandOutcome.timedOut);
     emit(_withNegotiationFacts(state));
+  }
+
+  void _onRemoteNavigationSettled(
+    _WebRtcRemoteNavigationSettled event,
+    Emitter<WebRtcSessionState> emit,
+  ) {
+    if (event.generation != _generation) return;
+    _navigationGuard.elapse(event.commandId);
+    final next = _withNegotiationFacts(state);
+    if (next != state) emit(next);
   }
 
   void _applyRemoteControlAck(
@@ -423,8 +512,10 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     final error = ack.error;
     if (error == null) {
       logDebug('${command.kind.name} confirmed ${ack.commandId}');
+      _navigationGuard.accept(ack.commandId);
     } else {
       logDebug('remote control command rejected: ${error.code}');
+      _navigationGuard.release(ack.commandId);
     }
     _reportCommand(ack.commandId, _outcomeOf(error));
     emit(_withNegotiationFacts(state));
@@ -491,6 +582,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         _controlChannelState = channelState;
         if (channelState != WebRtcDataChannelState.open) {
           _abandonPendingCommands();
+          _navigationGuard.clear();
         }
         final next = _withNegotiationFacts(state);
         if (next != state) emit(next);
@@ -695,6 +787,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     // The track dies with its peer connection; only the reference is held.
     _remoteVideoTrack = null;
     _pendingCommands.clear();
+    _navigationGuard.clear();
     _lastRemoteCommand = null;
 
     await subscription?.cancel();
@@ -744,5 +837,6 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         isSessionActive: _activeRemoteSessionId == remoteSessionId,
         lastCommand: _lastRemoteCommand,
         pendingCommands: _pendingCommands.length,
+        isNavigationSettling: _navigationGuard.isActive,
       );
 }

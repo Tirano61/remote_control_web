@@ -46,6 +46,62 @@ void main() {
         const Duration(milliseconds: 350),
       );
     });
+
+    test('Back and Home are 50 ms of the queue', () {
+      expect(remoteNavigationEstimatedWork, const Duration(milliseconds: 50));
+      expect(
+        const RemoteBackCommand(id: 'back-1').estimatedWork,
+        remoteNavigationEstimatedWork,
+      );
+      expect(
+        const RemoteHomeCommand(id: 'home-1').estimatedWork,
+        remoteNavigationEstimatedWork,
+      );
+    });
+  });
+
+  group('Back and Home', () {
+    test('an id is all they need', () {
+      const back = RemoteBackCommand(id: 'back-1');
+      const home = RemoteHomeCommand(id: 'home-1');
+
+      expect(back.props, ['back-1']);
+      expect(home.props, ['home-1']);
+      expect(back.kind, RemoteCommandKind.back);
+      expect(home.kind, RemoteCommandKind.home);
+    });
+
+    test('they are not taps, nor each other', () {
+      const back = RemoteBackCommand(id: 'same');
+      const home = RemoteHomeCommand(id: 'same');
+
+      expect(back, isNot(isA<RemoteTapCommand>()));
+      expect(home, isNot(isA<RemoteTapCommand>()));
+      expect(back == const RemoteBackCommand(id: 'same'), isTrue);
+      expect(back == home, isFalse);
+    });
+
+    test('only they are navigation', () {
+      expect(
+        RemoteCommandKind.values.where((kind) => kind.isNavigation),
+        [RemoteCommandKind.back, RemoteCommandKind.home],
+      );
+    });
+
+    test('what gets printed is the id', () {
+      expect(
+        const RemoteBackCommand(id: 'back-1').toString(),
+        'RemoteBackCommand(back-1)',
+      );
+      expect(
+        const RemoteHomeCommand(id: 'home-1').toString(),
+        'RemoteHomeCommand(home-1)',
+      );
+    });
+
+    test('the settle time is 350 ms', () {
+      expect(remoteNavigationSettleDuration, const Duration(milliseconds: 350));
+    });
   });
 
   group('a swipe that breaks the contract is a bug', () {
@@ -94,9 +150,11 @@ void main() {
       [
         ids.next(RemoteCommandKind.tap),
         ids.next(RemoteCommandKind.swipe),
+        ids.next(RemoteCommandKind.back),
+        ids.next(RemoteCommandKind.home),
         ids.next(RemoteCommandKind.tap),
       ],
-      ['tap-1', 'swipe-2', 'tap-3'],
+      ['tap-1', 'swipe-2', 'back-3', 'home-4', 'tap-5'],
     );
   });
 }

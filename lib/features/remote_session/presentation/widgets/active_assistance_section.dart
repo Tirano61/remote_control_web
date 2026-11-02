@@ -156,6 +156,8 @@ class _LiveAssistance extends StatelessWidget {
               remoteSessionId: session.id,
               rendererFactory: remoteVideoRendererFactory,
             ),
+            _RemoteNavigationControls(remoteSessionId: session.id),
+            const SizedBox(height: 14),
             Row(
               children: [
                 if (session.isConnecting) ...[
@@ -270,17 +272,25 @@ class _RemoteScreen extends StatelessWidget {
           !identical(previous.remoteVideoTrack, current.remoteVideoTrack) ||
           previous.canSendRemoteControl != current.canSendRemoteControl ||
           previous.remoteControl.lastCommand !=
-              current.remoteControl.lastCommand,
+              current.remoteControl.lastCommand ||
+          previous.remoteControl.isNavigationSettling !=
+              current.remoteControl.isNavigationSettling,
       builder: (context, state) {
         if (!_isShown(state)) return const SizedBox.shrink();
         final canSend = state.canSendRemoteControl;
+        // Not listening while a Back or a Home settles: a press that starts on
+        // a picture on its way somewhere else is not picked up afterwards. The
+        // line below says nothing about it, because it lasts an instant.
+        final isListening =
+            canSend && !state.remoteControl.isNavigationSettling;
+        final lastCommand = state.remoteControl.lastCommand;
         return Padding(
           padding: const EdgeInsets.only(bottom: 16),
           child: RemoteScreenView(
             track: state.remoteVideoTrack,
             rendererFactory: rendererFactory,
             maxHeight: maxHeight,
-            onRemoteTap: canSend
+            onRemoteTap: isListening
                 ? (point) => context.read<WebRtcSessionBloc>().add(
                     WebRtcRemoteTapRequested(
                       remoteSessionId: remoteSessionId,
@@ -288,7 +298,7 @@ class _RemoteScreen extends StatelessWidget {
                     ),
                   )
                 : null,
-            onRemoteSwipe: canSend
+            onRemoteSwipe: isListening
                 ? ({required start, required end, required durationMs}) =>
                       context.read<WebRtcSessionBloc>().add(
                         WebRtcRemoteSwipeRequested(
@@ -301,7 +311,10 @@ class _RemoteScreen extends StatelessWidget {
                 : null,
             controlStatusBuilder: (context, hasPicture) => _RemoteControlLine(
               isAvailable: canSend && hasPicture,
-              lastCommand: state.remoteControl.lastCommand,
+              // Back and Home are spoken about next to their buttons.
+              lastCommand: lastCommand?.kind.isNavigation == true
+                  ? null
+                  : lastCommand,
             ),
           ),
         );
@@ -360,6 +373,7 @@ class _RemoteControlLine extends StatelessWidget {
   static String _label(RemoteCommandFeedback? last) {
     if (last == null) return 'Control remoto: listo';
     final isSwipe = last.kind == RemoteCommandKind.swipe;
+    // Only a tap or a swipe gets here: see _RemoteNavigationControls.
     return switch (last.outcome) {
       RemoteCommandOutcome.pending =>
         isSwipe ? 'Enviando desplazamiento...' : 'Enviando toque...',
@@ -377,6 +391,111 @@ class _RemoteControlLine extends StatelessWidget {
         isSwipe
             ? 'El dispositivo no confirmó el desplazamiento.'
             : 'El dispositivo no confirmó el toque.',
+      RemoteCommandOutcome.incompatible ||
+      RemoteCommandOutcome.channelClosed ||
+      RemoteCommandOutcome.notSent => 'Control remoto no disponible',
+    };
+  }
+}
+
+/// Android's Back and Home, and what became of the last one.
+///
+/// They sit outside the picture and outside its pointer layer, and they do not
+/// depend on the picture either: these are global actions, so they work while the
+/// tablet is not sharing its screen, which is exactly when the line under the
+/// picture says that gestures are not available.
+///
+/// Disabled until the session is `ACTIVE`, the peers are connected and `control`
+/// is open, and for as long as a previous one is settling, which is what makes a
+/// double click one action.
+class _RemoteNavigationControls extends StatelessWidget {
+  const _RemoteNavigationControls({required this.remoteSessionId});
+
+  final String remoteSessionId;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return BlocBuilder<WebRtcSessionBloc, WebRtcSessionState>(
+      builder: (context, state) {
+        final isAvailable =
+            state.remoteSessionId == remoteSessionId &&
+            state.canSendRemoteNavigation;
+        final isEnabled =
+            isAvailable && !state.remoteControl.isNavigationSettling;
+        final lastCommand = state.remoteControl.lastCommand;
+        final feedback = isAvailable && lastCommand != null
+            ? _label(lastCommand)
+            : null;
+        final bloc = context.read<WebRtcSessionBloc>();
+
+        return Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            OutlinedButton.icon(
+              key: const Key('remote_back_button'),
+              onPressed: isEnabled
+                  ? () => bloc.add(
+                      WebRtcRemoteBackRequested(
+                        remoteSessionId: remoteSessionId,
+                      ),
+                    )
+                  : null,
+              icon: const Icon(Icons.arrow_back, size: 18),
+              label: const Text('Atrás'),
+            ),
+            OutlinedButton.icon(
+              key: const Key('remote_home_button'),
+              onPressed: isEnabled
+                  ? () => bloc.add(
+                      WebRtcRemoteHomeRequested(
+                        remoteSessionId: remoteSessionId,
+                      ),
+                    )
+                  : null,
+              icon: const Icon(Icons.home_outlined, size: 18),
+              label: const Text('Inicio'),
+            ),
+            if (feedback != null)
+              Text(
+                key: const Key('remote_navigation_status'),
+                feedback,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: _isProblem(lastCommand!.outcome)
+                      ? theme.colorScheme.error
+                      : theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+
+  static bool _isProblem(RemoteCommandOutcome outcome) =>
+      outcome != RemoteCommandOutcome.pending &&
+      outcome != RemoteCommandOutcome.confirmed;
+
+  /// `null` for a tap or a swipe: the line under the picture speaks about those.
+  static String? _label(RemoteCommandFeedback last) {
+    final name = switch (last.kind) {
+      RemoteCommandKind.back => 'Atrás',
+      RemoteCommandKind.home => 'Inicio',
+      RemoteCommandKind.tap || RemoteCommandKind.swipe => null,
+    };
+    if (name == null) return null;
+    return switch (last.outcome) {
+      RemoteCommandOutcome.pending => 'Enviando $name...',
+      RemoteCommandOutcome.confirmed => '$name enviado',
+      RemoteCommandOutcome.accessibilityUnavailable =>
+        'El dispositivo no tiene habilitado el control remoto.',
+      RemoteCommandOutcome.sessionNotActive =>
+        'La asistencia no está activa en el dispositivo.',
+      RemoteCommandOutcome.gestureRejected => 'No se pudo ejecutar la acción.',
+      RemoteCommandOutcome.timedOut => 'El dispositivo no confirmó la acción.',
       RemoteCommandOutcome.incompatible ||
       RemoteCommandOutcome.channelClosed ||
       RemoteCommandOutcome.notSent => 'Control remoto no disponible',

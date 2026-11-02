@@ -1,7 +1,8 @@
 # WebRTC on the technician console — decisions
 
-Stage: Prompt 13 (the tablet's screen is displayed, a click sends a tap and a drag
-sends a swipe; see [CONTROL_CHANNEL.md](CONTROL_CHANNEL.md)).
+Stage: Prompt 14 (the tablet's screen is displayed, a click sends a tap, a drag
+sends a swipe, and two buttons send Back and Home; see
+[CONTROL_CHANNEL.md](CONTROL_CHANNEL.md)).
 
 This document records the choices that are **not** part of the backend
 contract. `docs/backend/REALTIME.md` only relays SDP and ICE and is
@@ -115,9 +116,9 @@ through `onDataChannel`.
 Its state (`connecting`, `open`, `closing`, `closed`) is tracked apart from the
 peer connection state: `connected` does not imply the channel is already open.
 
-It carries two commands, the tap and the swipe, and their acknowledgements. The
-protocol and what each side does with it are in
-[CONTROL_CHANNEL.md](CONTROL_CHANNEL.md). Back, home and text are not defined.
+It carries four commands, the tap, the swipe, Back and Home, and their
+acknowledgements. The protocol and what each side does with it are in
+[CONTROL_CHANNEL.md](CONTROL_CHANNEL.md). Text is not defined.
 
 ## The screen: one `recvonly` video section
 
@@ -153,6 +154,9 @@ Nothing is degraded by the absence of a screen. The assistance is established
 when the peer connection is `connected` **and** `control` is `open`, exactly as
 before. "Control connected" and "screen available" are two different facts:
 the second never gates the first, and never gates `POST /remote-sessions/:id/activate`.
+It does not gate Back and Home either: they work without a picture, and only a tap
+or a swipe needs one to aim at
+([CONTROL_CHANNEL.md](CONTROL_CHANNEL.md#they-need-no-picture)).
 
 ### Why a transceiver
 
@@ -302,6 +306,12 @@ Over a real picture, and only while remote control can be used, a layer on top
 of the view turns clicks into taps and drags into swipes. The view itself is not
 touched, and the keyboard is not listened to. The wheel sends nothing. See
 [CONTROL_CHANNEL.md](CONTROL_CHANNEL.md#tap-or-swipe).
+
+For the 350 ms after a Back or a Home is sent, or until it is answered if that takes
+longer, the layer is not there: the transition is still running, so a click would
+land somewhere the technician did not aim at. The picture itself keeps arriving and
+the renderer is left alone. See
+[CONTROL_CHANNEL.md](CONTROL_CHANNEL.md#the-settle-guard).
 
 ### What the console does not know
 
