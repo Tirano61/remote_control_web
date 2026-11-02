@@ -55,6 +55,21 @@ sealed class WebRtcSessionState extends Equatable {
   /// Whether the tablet's screen is arriving.
   bool get hasRemoteVideo => remoteVideoTrack != null;
 
+  /// The remote control side of this negotiation.
+  RemoteControlStatus get remoteControl => const RemoteControlStatus();
+
+  /// Whether a command may be sent right now.
+  ///
+  /// Every condition matters on its own: an open channel on a session that is
+  /// not `ACTIVE` would only get `session_not_active` back, and a click with no
+  /// track has no picture to have been aimed at. Whether the picture is really
+  /// being displayed is only known to the surface, which checks it too.
+  bool get canSendRemoteControl =>
+      isConnected &&
+      isControlChannelOpen &&
+      hasRemoteVideo &&
+      remoteControl.isSessionActive;
+
   /// Whether losing the signaling socket must leave the peer connection alone.
   ///
   /// WebRTC is peer to peer: once media/data flows, Socket.IO is not in the
@@ -78,6 +93,7 @@ sealed class WebRtcNegotiation extends WebRtcSessionState {
     required this.remoteSessionId,
     this.controlChannelState = WebRtcDataChannelState.closed,
     this.remoteVideoTrack,
+    this.remoteControl = const RemoteControlStatus(),
   });
 
   @override
@@ -90,6 +106,9 @@ sealed class WebRtcNegotiation extends WebRtcSessionState {
   final RemoteVideoTrack? remoteVideoTrack;
 
   @override
+  final RemoteControlStatus remoteControl;
+
+  @override
   bool get hasNegotiation => true;
 
   @override
@@ -97,6 +116,7 @@ sealed class WebRtcNegotiation extends WebRtcSessionState {
     remoteSessionId,
     controlChannelState,
     remoteVideoTrack,
+    remoteControl,
   ];
 }
 
@@ -106,6 +126,7 @@ final class WebRtcPreparing extends WebRtcNegotiation {
     required super.remoteSessionId,
     super.controlChannelState,
     super.remoteVideoTrack,
+    super.remoteControl,
   });
 }
 
@@ -115,6 +136,7 @@ final class WebRtcOffering extends WebRtcNegotiation {
     required super.remoteSessionId,
     super.controlChannelState,
     super.remoteVideoTrack,
+    super.remoteControl,
   });
 }
 
@@ -127,6 +149,7 @@ final class WebRtcConnecting extends WebRtcNegotiation {
     required super.remoteSessionId,
     super.controlChannelState,
     super.remoteVideoTrack,
+    super.remoteControl,
   });
 }
 
@@ -141,6 +164,7 @@ final class WebRtcConnected extends WebRtcNegotiation {
     required super.remoteSessionId,
     super.controlChannelState,
     super.remoteVideoTrack,
+    super.remoteControl,
   });
 
   @override
@@ -159,6 +183,7 @@ final class WebRtcInterrupted extends WebRtcNegotiation {
     required super.remoteSessionId,
     super.controlChannelState,
     super.remoteVideoTrack,
+    super.remoteControl,
   });
 
   @override

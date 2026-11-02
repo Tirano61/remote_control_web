@@ -7,6 +7,8 @@ import 'package:remote_control_web/features/auth/domain/usecases/log_out.dart';
 import 'package:remote_control_web/features/auth/domain/usecases/restore_session.dart';
 import 'package:remote_control_web/features/auth/data/repositories/auth_repository_impl.dart';
 import 'package:remote_control_web/features/auth/presentation/bloc/user_session/user_session_bloc.dart';
+import 'package:remote_control_web/features/remote_control/domain/entities/normalized_remote_point.dart';
+import 'package:remote_control_web/features/remote_control/domain/entities/remote_control_ack.dart';
 import 'package:remote_control_web/features/remote_session/data/repositories/remote_session_repository_impl.dart';
 import 'package:remote_control_web/features/remote_session/domain/entities/remote_session_status.dart';
 import 'package:remote_control_web/features/remote_session/domain/usecases/activate_remote_session.dart';
@@ -665,6 +667,195 @@ void main() {
       expect(peers.last.isClosed, isTrue);
       // Nothing was activated on the way out.
       expect(remoteSessions.activatedIds, hasLength(1));
+    });
+  });
+
+  group('remote control', () {
+    /// An `ACTIVE` session whose peers are connected and whose screen arrives.
+    Future<void> signInReady() async {
+      remoteSessions.current = buildRemoteSession();
+      supportRequests.requests = [buildSupportRequest()];
+      realtime.peerJoinedOnJoin = true;
+      await signIn();
+      realtime.emitConnected();
+      await settle();
+      realtime.answerRelayAck({
+        'delivered': true,
+        'remoteSessionId': remoteSessionId,
+      });
+      await settle();
+      peers.last
+        ..emitPeerState(WebRtcPeerConnectionState.connected)
+        ..emitControlChannelState(WebRtcDataChannelState.open)
+        ..emitRemoteVideoTrack();
+      await settle();
+    }
+
+    Future<void> tap() async {
+      webRtcSessionBloc.add(
+        const WebRtcRemoteTapRequested(
+          remoteSessionId: remoteSessionId,
+          point: NormalizedRemotePoint(0.5, 0.5),
+        ),
+      );
+      await settle();
+    }
+
+    test('CONNECTING is not enough: REST has to say ACTIVE', () async {
+      remoteSessions.activateFailure = const NetworkFailure();
+      await signInReady();
+
+      expect(remoteSessionBloc.state, isA<RemoteSessionConnecting>());
+      expect(webRtcSessionBloc.state.isConnected, isTrue);
+      expect(webRtcSessionBloc.state.isControlChannelOpen, isTrue);
+      expect(webRtcSessionBloc.state.canSendRemoteControl, isFalse);
+
+      await tap();
+
+      expect(peers.last.sentRemoteControlCommands, isEmpty);
+    });
+
+    test('ACTIVE opens it, whichever side got there first', () async {
+      await signInReady();
+
+      expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
+      expect(webRtcSessionBloc.state.canSendRemoteControl, isTrue);
+    });
+
+    test('asking to close stops it before the backend answers', () async {
+      await signInReady();
+      await tap();
+      expect(webRtcSessionBloc.state.remoteControl.pendingCommands, 1);
+      final gate = Completer<void>();
+      remoteSessions.closeGate = gate.future;
+
+      remoteSessionBloc.add(const RemoteSessionCloseRequested());
+      await settle();
+
+      expect(webRtcSessionBloc.state.canSendRemoteControl, isFalse);
+      expect(webRtcSessionBloc.state.remoteControl.pendingCommands, 0);
+      expect(webRtcSessionBloc.state.remoteControl.lastTap, isNull);
+
+      await tap();
+      expect(peers.last.sentRemoteControlCommands, hasLength(1));
+
+      gate.complete();
+      await settle();
+    });
+
+    test('closing ends the peer connection with nothing pending', () async {
+      await signInReady();
+      await tap();
+      final session = peers.last;
+
+      remoteSessionBloc.add(const RemoteSessionCloseRequested());
+      await settle();
+
+      expect(webRtcSessionBloc.state, isA<WebRtcIdle>());
+      expect(webRtcSessionBloc.state.remoteControl.pendingCommands, 0);
+      expect(session.isClosed, isTrue);
+      expect(session.sentRemoteControlCommands, hasLength(1));
+    });
+
+    test('a close that failed gives it back', () async {
+      await signInReady();
+      remoteSessions.closeFailure = const NetworkFailure();
+
+      remoteSessionBloc.add(const RemoteSessionCloseRequested());
+      await settle();
+
+      expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
+      expect(webRtcSessionBloc.state.canSendRemoteControl, isTrue);
+    });
+
+    test('session_not_active reads REST and resends nothing', () async {
+      await signInReady();
+      final readsBefore = remoteSessions.currentCount;
+      await tap();
+
+      peers.last.emitRemoteControlAck(
+        'tap-1',
+        error: RemoteControlError.sessionNotActive,
+      );
+      await settle();
+
+      expect(remoteSessions.currentCount, readsBefore + 1);
+      expect(peers.last.sentRemoteControlCommands, hasLength(1));
+      expect(peers.last.isClosed, isFalse);
+      expect(webRtcSessionBloc.state, isA<WebRtcConnected>());
+    });
+
+    test('each refused tap reads REST once, however many states follow', () async {
+      await signInReady();
+      final readsBefore = remoteSessions.currentCount;
+      await tap();
+      peers.last.emitRemoteControlAck(
+        'tap-1',
+        error: RemoteControlError.sessionNotActive,
+      );
+      await settle();
+
+      peers.last.emitPeerState(WebRtcPeerConnectionState.disconnected);
+      await settle();
+      peers.last.emitPeerState(WebRtcPeerConnectionState.connected);
+      await settle();
+      expect(remoteSessions.currentCount, readsBefore + 1);
+
+      await tap();
+      peers.last.emitRemoteControlAck(
+        'tap-2',
+        error: RemoteControlError.sessionNotActive,
+      );
+      await settle();
+
+      expect(remoteSessions.currentCount, readsBefore + 2);
+    });
+
+    test('session_not_active that REST confirms closes the assistance', () async {
+      await signInReady();
+      final session = peers.last;
+      await tap();
+      remoteSessions.current = null;
+
+      session.emitRemoteControlAck(
+        'tap-1',
+        error: RemoteControlError.sessionNotActive,
+      );
+      await settle();
+
+      expect(remoteSessionBloc.state.hasLiveSession, isFalse);
+      expect(session.isClosed, isTrue);
+      expect(webRtcSessionBloc.state, isA<WebRtcIdle>());
+    });
+
+    test('accessibility_unavailable closes nothing and reads nothing', () async {
+      await signInReady();
+      final readsBefore = remoteSessions.currentCount;
+      await tap();
+
+      peers.last.emitRemoteControlAck(
+        'tap-1',
+        error: RemoteControlError.accessibilityUnavailable,
+      );
+      await settle();
+
+      expect(remoteSessions.currentCount, readsBefore);
+      expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
+      expect(peers.last.isClosed, isFalse);
+      expect(webRtcSessionBloc.state.canSendRemoteControl, isTrue);
+    });
+
+    test('signing out stops it and leaves nothing pending', () async {
+      await signInReady();
+      await tap();
+      final session = peers.last;
+
+      userSessionBloc.add(const UserSessionSignOutRequested());
+      await settle();
+
+      expect(webRtcSessionBloc.state, isA<WebRtcIdle>());
+      expect(webRtcSessionBloc.state.remoteControl.pendingCommands, 0);
+      expect(session.isClosed, isTrue);
     });
   });
 

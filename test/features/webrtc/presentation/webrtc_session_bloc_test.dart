@@ -1,6 +1,11 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:remote_control_web/features/remote_control/domain/entities/normalized_remote_point.dart';
+import 'package:remote_control_web/features/remote_control/domain/entities/remote_control_ack.dart';
+import 'package:remote_control_web/features/remote_control/domain/entities/remote_control_command.dart';
+import 'package:remote_control_web/features/remote_control/domain/entities/remote_control_status.dart';
+import 'package:remote_control_web/features/remote_control/domain/services/remote_control_command_id_generator.dart';
 import 'package:remote_control_web/features/signaling/domain/entities/signaling_relay_result.dart';
 import 'package:remote_control_web/features/technician_realtime/domain/entities/signaling_error_code.dart';
 import 'package:remote_control_web/features/webrtc/domain/entities/webrtc_connection_state.dart';
@@ -14,6 +19,19 @@ import '../../../support/webrtc_test_doubles.dart';
 Future<void> settle() async {
   for (var i = 0; i < 12; i++) {
     await Future<void>.delayed(Duration.zero);
+  }
+}
+
+/// Hands out exactly the ids it was given.
+class _FixedCommandIds implements RemoteControlCommandIdGenerator {
+  _FixedCommandIds(List<String> ids) : _ids = ids.iterator;
+
+  final Iterator<String> _ids;
+
+  @override
+  String next() {
+    _ids.moveNext();
+    return _ids.current;
   }
 }
 
@@ -748,14 +766,627 @@ void main() {
       expect(bloc.state.isControlChannelOpen, isTrue);
     });
 
-    test('a message on the channel is not acted upon yet', () async {
+    test('an acknowledgement nobody asked for changes nothing', () async {
       await connect();
       final before = bloc.state;
 
-      peers.last.emitControlChannelMessage('anything');
+      peers.last.emitRemoteControlAck('anything');
       await settle();
 
       expect(bloc.state, before);
+    });
+  });
+
+  group('remote tap', () {
+    const point = NormalizedRemotePoint(0.5, 0.25);
+
+    RemoteControlStatus status() => bloc.state.remoteControl;
+    RemoteTapOutcome? outcome() => status().lastTap?.outcome;
+
+    void tap({String id = sessionId}) => bloc.add(
+      WebRtcRemoteTapRequested(remoteSessionId: id, point: point),
+    );
+
+    /// Everything a tap needs: connected, `control` open, a track, ACTIVE.
+    Future<void> ready() async {
+      await connect();
+      peers.last.emitRemoteVideoTrack();
+      bloc.add(const WebRtcRemoteSessionActivityChanged(sessionId));
+      await settle();
+    }
+
+    group('what it takes to send', () {
+      test('everything together: the command goes out', () async {
+        await ready();
+
+        expect(bloc.state.canSendRemoteControl, isTrue);
+        tap();
+        await settle();
+
+        expect(peers.last.sentRemoteControlCommands, [
+          const RemoteTapCommand(id: 'tap-1', point: point),
+        ]);
+      });
+
+      test('a session that is not ACTIVE', () async {
+        await connect();
+        peers.last.emitRemoteVideoTrack();
+        await settle();
+
+        tap();
+        await settle();
+
+        expect(bloc.state.canSendRemoteControl, isFalse);
+        expect(peers.last.sentRemoteControlCommands, isEmpty);
+      });
+
+      test('another session being ACTIVE', () async {
+        await connect();
+        peers.last.emitRemoteVideoTrack();
+        bloc.add(const WebRtcRemoteSessionActivityChanged(otherSessionId));
+        await settle();
+
+        tap();
+        await settle();
+
+        expect(bloc.state.canSendRemoteControl, isFalse);
+        expect(peers.last.sentRemoteControlCommands, isEmpty);
+      });
+
+      test('a peer connection not connected', () async {
+        await negotiate();
+        peers.last
+          ..emitControlChannelState(WebRtcDataChannelState.open)
+          ..emitRemoteVideoTrack();
+        bloc.add(const WebRtcRemoteSessionActivityChanged(sessionId));
+        await settle();
+
+        tap();
+        await settle();
+
+        expect(bloc.state.canSendRemoteControl, isFalse);
+        expect(peers.last.sentRemoteControlCommands, isEmpty);
+      });
+
+      test('a channel not open', () async {
+        await negotiate();
+        peers.last
+          ..emitControlChannelState(WebRtcDataChannelState.connecting)
+          ..emitPeerState(WebRtcPeerConnectionState.connected)
+          ..emitRemoteVideoTrack();
+        bloc.add(const WebRtcRemoteSessionActivityChanged(sessionId));
+        await settle();
+
+        tap();
+        await settle();
+
+        expect(bloc.state.canSendRemoteControl, isFalse);
+        expect(peers.last.sentRemoteControlCommands, isEmpty);
+      });
+
+      test('no video track', () async {
+        await connect();
+        bloc.add(const WebRtcRemoteSessionActivityChanged(sessionId));
+        await settle();
+
+        tap();
+        await settle();
+
+        expect(bloc.state.canSendRemoteControl, isFalse);
+        expect(peers.last.sentRemoteControlCommands, isEmpty);
+      });
+
+      test('a connection interrupted', () async {
+        await ready();
+        peers.last.emitPeerState(WebRtcPeerConnectionState.disconnected);
+        await settle();
+
+        tap();
+        await settle();
+
+        expect(bloc.state, isA<WebRtcInterrupted>());
+        expect(peers.last.sentRemoteControlCommands, isEmpty);
+      });
+
+      test('a click aimed at another session', () async {
+        await ready();
+
+        tap(id: otherSessionId);
+        await settle();
+
+        expect(peers.last.sentRemoteControlCommands, isEmpty);
+      });
+
+      test('no negotiation at all', () async {
+        tap();
+        await settle();
+
+        expect(peers.sessions, isEmpty);
+        expect(bloc.state, isA<WebRtcIdle>());
+      });
+
+      test('a click while connecting is dropped, not kept for later', () async {
+        await negotiate();
+        tap();
+        await settle();
+
+        peers.last
+          ..emitControlChannelState(WebRtcDataChannelState.open)
+          ..emitPeerState(WebRtcPeerConnectionState.connected)
+          ..emitRemoteVideoTrack();
+        bloc.add(const WebRtcRemoteSessionActivityChanged(sessionId));
+        await settle();
+
+        expect(bloc.state.canSendRemoteControl, isTrue);
+        expect(peers.last.sentRemoteControlCommands, isEmpty);
+      });
+    });
+
+    group('command lifecycle', () {
+      test('tap -> sent -> pending -> ack ok -> confirmed', () async {
+        await ready();
+
+        tap();
+        await settle();
+
+        expect(peers.last.sentRemoteControlCommands, hasLength(1));
+        expect(status().pendingCommands, 1);
+        expect(outcome(), RemoteTapOutcome.pending);
+
+        peers.last.emitRemoteControlAck('tap-1');
+        await settle();
+
+        expect(status().pendingCommands, 0);
+        expect(outcome(), RemoteTapOutcome.confirmed);
+      });
+
+      const refusals = {
+        RemoteControlError.accessibilityUnavailable:
+            RemoteTapOutcome.accessibilityUnavailable,
+        RemoteControlError.sessionNotActive: RemoteTapOutcome.sessionNotActive,
+        RemoteControlError.gestureRejected: RemoteTapOutcome.gestureRejected,
+        RemoteControlError.invalidCommand: RemoteTapOutcome.incompatible,
+        RemoteControlError.unsupportedCommand: RemoteTapOutcome.incompatible,
+        RemoteControlError.unknown: RemoteTapOutcome.incompatible,
+      };
+
+      refusals.forEach((error, expected) {
+        test('tap -> ${error.code} -> $expected', () async {
+          await ready();
+          final session = peers.last;
+
+          tap();
+          await settle();
+          session.emitRemoteControlAck('tap-1', error: error);
+          await settle();
+
+          expect(status().pendingCommands, 0);
+          expect(outcome(), expected);
+          // A refused gesture costs nothing but the gesture.
+          expect(bloc.state, isA<WebRtcConnected>());
+          expect(session.isClosed, isFalse);
+          expect(bloc.state.canSendRemoteControl, isTrue);
+          expect(session.sentRemoteControlCommands, hasLength(1));
+        });
+      });
+
+      test('each tap has its own id', () async {
+        await ready();
+
+        tap();
+        tap();
+        await settle();
+
+        final ids = peers.last.sentRemoteControlCommands.map((c) => c.id);
+        expect(ids, ['tap-1', 'tap-2']);
+      });
+
+      test('the id comes from the injected generator', () async {
+        await bloc.close();
+        bloc = WebRtcSessionBloc(
+          peerClient: peers,
+          signalingClient: signaling,
+          iceConfiguration: const WebRtcIceConfiguration(),
+          commandIdGenerator: _FixedCommandIds(['custom-id']),
+        );
+        await ready();
+
+        tap();
+        await settle();
+
+        expect(peers.last.sentRemoteControlCommands.single.id, 'custom-id');
+      });
+
+      test('an ack resolves only the command it names', () async {
+        await ready();
+        tap();
+        tap();
+        await settle();
+        expect(status().pendingCommands, 2);
+
+        peers.last.emitRemoteControlAck('tap-2');
+        await settle();
+
+        expect(status().pendingCommands, 1);
+        expect(outcome(), RemoteTapOutcome.confirmed);
+        expect(status().lastTap!.commandId, 'tap-2');
+      });
+
+      test('the answer to an older tap says nothing about the last', () async {
+        await ready();
+        tap();
+        tap();
+        await settle();
+
+        peers.last.emitRemoteControlAck(
+          'tap-1',
+          error: RemoteControlError.gestureRejected,
+        );
+        await settle();
+
+        expect(status().pendingCommands, 1);
+        expect(status().lastTap!.commandId, 'tap-2');
+        expect(outcome(), RemoteTapOutcome.pending);
+      });
+
+      test('an unknown ack is ignored', () async {
+        await ready();
+        tap();
+        await settle();
+
+        peers.last.emitRemoteControlAck('tap-99');
+        await settle();
+
+        expect(status().pendingCommands, 1);
+        expect(outcome(), RemoteTapOutcome.pending);
+      });
+
+      test('a duplicate ack is ignored after the first', () async {
+        await ready();
+        tap();
+        await settle();
+
+        peers.last
+          ..emitRemoteControlAck('tap-1')
+          ..emitRemoteControlAck(
+            'tap-1',
+            error: RemoteControlError.gestureRejected,
+          );
+        await settle();
+
+        expect(outcome(), RemoteTapOutcome.confirmed);
+        expect(status().pendingCommands, 0);
+      });
+
+      test('a channel that refuses the message is reported at once', () async {
+        await ready();
+        peers.last.acceptsRemoteControlCommands = false;
+
+        tap();
+        await settle();
+
+        expect(status().pendingCommands, 0);
+        expect(outcome(), RemoteTapOutcome.notSent);
+      });
+    });
+
+    group('timeout', () {
+      const timeout = Duration(milliseconds: 30);
+
+      Future<void> withShortTimeout() async {
+        await bloc.close();
+        bloc = WebRtcSessionBloc(
+          peerClient: peers,
+          signalingClient: signaling,
+          iceConfiguration: const WebRtcIceConfiguration(),
+          remoteCommandTimeout: timeout,
+        );
+        await ready();
+      }
+
+      Future<void> outlive() async {
+        await Future<void>.delayed(timeout * 2);
+        await settle();
+      }
+
+      test('three seconds, unless told otherwise', () {
+        expect(
+          WebRtcSessionBloc.defaultRemoteCommandTimeout,
+          const Duration(seconds: 3),
+        );
+      });
+
+      test('no answer in time is reported as such', () async {
+        await withShortTimeout();
+
+        tap();
+        await settle();
+        await outlive();
+
+        expect(status().pendingCommands, 0);
+        expect(outcome(), RemoteTapOutcome.timedOut);
+      });
+
+      test('the tap is not sent again', () async {
+        await withShortTimeout();
+
+        tap();
+        await settle();
+        await outlive();
+        await outlive();
+
+        // The gesture may have run with its acknowledgement lost.
+        expect(peers.last.sentRemoteControlCommands, hasLength(1));
+      });
+
+      test('an answer in time cancels the deadline', () async {
+        await withShortTimeout();
+
+        tap();
+        await settle();
+        peers.last.emitRemoteControlAck('tap-1');
+        await settle();
+        await outlive();
+
+        expect(outcome(), RemoteTapOutcome.confirmed);
+      });
+
+      test('an answer after the deadline changes nothing', () async {
+        await withShortTimeout();
+
+        tap();
+        await settle();
+        await outlive();
+        peers.last.emitRemoteControlAck('tap-1');
+        await settle();
+
+        expect(outcome(), RemoteTapOutcome.timedOut);
+      });
+
+      test('the deadline of a closed negotiation reports nothing', () async {
+        await withShortTimeout();
+        tap();
+        await settle();
+
+        bloc.add(const WebRtcSessionTerminated());
+        await settle();
+        await outlive();
+
+        expect(bloc.state, isA<WebRtcIdle>());
+      });
+    });
+
+    group('channel closed', () {
+      for (final channelState in const [
+        WebRtcDataChannelState.closing,
+        WebRtcDataChannelState.closed,
+      ]) {
+        test('${channelState.name}: pending is cleared at once', () async {
+          await ready();
+          tap();
+          await settle();
+
+          peers.last.emitControlChannelState(channelState);
+          await settle();
+
+          // Without waiting for any deadline, and never as a success.
+          expect(status().pendingCommands, 0);
+          expect(outcome(), RemoteTapOutcome.channelClosed);
+          expect(bloc.state.canSendRemoteControl, isFalse);
+        });
+      }
+
+      test('an answer already given is not rewritten', () async {
+        await ready();
+        tap();
+        await settle();
+        peers.last.emitRemoteControlAck('tap-1');
+        await settle();
+
+        peers.last.emitControlChannelState(WebRtcDataChannelState.closed);
+        await settle();
+
+        expect(outcome(), RemoteTapOutcome.confirmed);
+      });
+
+      test('nothing can be sent until it reopens', () async {
+        await ready();
+        peers.last.emitControlChannelState(WebRtcDataChannelState.closed);
+        await settle();
+
+        tap();
+        await settle();
+
+        expect(peers.last.sentRemoteControlCommands, isEmpty);
+      });
+    });
+
+    group('the session stops being ACTIVE', () {
+      test('pending and feedback are cleared, and clicks stop', () async {
+        await ready();
+        tap();
+        await settle();
+        final session = peers.last;
+
+        bloc.add(const WebRtcRemoteSessionActivityChanged(null));
+        await settle();
+
+        expect(status(), const RemoteControlStatus());
+        expect(bloc.state.canSendRemoteControl, isFalse);
+        // WebRTC is not what ended: only remote control stopped.
+        expect(bloc.state, isA<WebRtcConnected>());
+        expect(session.isClosed, isFalse);
+
+        tap();
+        await settle();
+
+        expect(session.sentRemoteControlCommands, hasLength(1));
+      });
+
+      test('an answer arriving afterwards resolves nothing', () async {
+        await ready();
+        tap();
+        await settle();
+        bloc.add(const WebRtcRemoteSessionActivityChanged(null));
+        await settle();
+
+        peers.last.emitRemoteControlAck('tap-1');
+        await settle();
+
+        expect(status().lastTap, isNull);
+      });
+
+      test('another session becoming ACTIVE clears it too', () async {
+        await ready();
+        tap();
+        await settle();
+
+        bloc.add(const WebRtcRemoteSessionActivityChanged(otherSessionId));
+        await settle();
+
+        expect(status().pendingCommands, 0);
+        expect(status().lastTap, isNull);
+        expect(bloc.state.canSendRemoteControl, isFalse);
+      });
+
+      test('being told the same thing again changes nothing', () async {
+        await ready();
+        tap();
+        await settle();
+
+        bloc.add(const WebRtcRemoteSessionActivityChanged(sessionId));
+        await settle();
+
+        expect(status().pendingCommands, 1);
+        expect(outcome(), RemoteTapOutcome.pending);
+      });
+
+      test('the assistance ending clears it all', () async {
+        await ready();
+        tap();
+        await settle();
+
+        bloc.add(const WebRtcSessionTerminated());
+        await settle();
+
+        expect(bloc.state, isA<WebRtcIdle>());
+        expect(bloc.state.remoteControl, const RemoteControlStatus());
+      });
+
+      test('nothing survives into the next assistance', () async {
+        await ready();
+        tap();
+        await settle();
+        bloc.add(const WebRtcSessionTerminated());
+        await settle();
+
+        await negotiate(otherSessionId);
+        peers.last
+          ..emitControlChannelState(WebRtcDataChannelState.open)
+          ..emitPeerState(WebRtcPeerConnectionState.connected)
+          ..emitRemoteVideoTrack();
+        await settle();
+
+        // REST has not said this one is ACTIVE yet.
+        expect(bloc.state.canSendRemoteControl, isFalse);
+        expect(status(), const RemoteControlStatus());
+      });
+
+      test('being ACTIVE is known before the negotiation exists', () async {
+        // An F5: REST answers before there is any peer connection.
+        bloc.add(const WebRtcRemoteSessionActivityChanged(sessionId));
+        await settle();
+
+        await connect();
+        peers.last.emitRemoteVideoTrack();
+        await settle();
+
+        expect(status().isSessionActive, isTrue);
+        expect(bloc.state.canSendRemoteControl, isTrue);
+      });
+    });
+
+    group('generations', () {
+      /// A generator that repeats ids, so that an old acknowledgement could
+      /// resolve a new command if anything but the generation stopped it.
+      Future<void> withRepeatedIds() async {
+        await bloc.close();
+        bloc = WebRtcSessionBloc(
+          peerClient: peers,
+          signalingClient: signaling,
+          iceConfiguration: const WebRtcIceConfiguration(),
+          commandIdGenerator: _FixedCommandIds(['tap-1', 'tap-1']),
+        );
+      }
+
+      test('a new peer connection starts with nothing pending', () async {
+        await ready();
+        tap();
+        await settle();
+        expect(status().pendingCommands, 1);
+
+        await negotiate(otherSessionId);
+
+        expect(status().pendingCommands, 0);
+        expect(status().lastTap, isNull);
+      });
+
+      test('an ack of the replaced channel resolves nothing new', () async {
+        await withRepeatedIds();
+        await ready();
+        final replaced = peers.last;
+        tap();
+        await settle();
+
+        // The same session gets a new peer connection.
+        peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+        await settle();
+        await negotiate();
+        final current = peers.last;
+        expect(current, isNot(same(replaced)));
+        current
+          ..emitControlChannelState(WebRtcDataChannelState.open)
+          ..emitPeerState(WebRtcPeerConnectionState.connected)
+          ..emitRemoteVideoTrack();
+        await settle();
+        tap();
+        await settle();
+        expect(current.sentRemoteControlCommands.single.id, 'tap-1');
+
+        replaced.emitRemoteControlAck('tap-1');
+        await settle();
+
+        expect(status().pendingCommands, 1);
+        expect(outcome(), RemoteTapOutcome.pending);
+
+        current.emitRemoteControlAck('tap-1');
+        await settle();
+
+        expect(status().pendingCommands, 0);
+        expect(outcome(), RemoteTapOutcome.confirmed);
+      });
+
+      test('a peer connection that failed takes its pending with it', () async {
+        await ready();
+        tap();
+        await settle();
+
+        peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+        await settle();
+
+        expect(bloc.state, isA<WebRtcFailed>());
+        expect(bloc.state.remoteControl, const RemoteControlStatus());
+      });
+    });
+
+    test('closing the BLoC cancels every deadline', () async {
+      await ready();
+      tap();
+      await settle();
+
+      await bloc.close();
+      // Nothing left to fire: a timer would have added to a closed BLoC.
+      await Future<void>.delayed(Duration.zero);
     });
   });
 
