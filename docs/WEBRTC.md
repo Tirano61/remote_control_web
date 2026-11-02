@@ -1,7 +1,7 @@
 # WebRTC on the technician console — decisions
 
-Stage: Prompt 11 (the tablet's screen is displayed; remote control is not
-implemented yet).
+Stage: Prompt 12 (the tablet's screen is displayed and a click sends a tap; see
+[CONTROL_CHANNEL.md](CONTROL_CHANNEL.md)).
 
 This document records the choices that are **not** part of the backend
 contract. `docs/backend/REALTIME.md` only relays SDP and ICE and is
@@ -115,9 +115,9 @@ through `onDataChannel`.
 Its state (`connecting`, `open`, `closing`, `closed`) is tracked apart from the
 peer connection state: `connected` does not imply the channel is already open.
 
-**No protocol exists yet.** Nothing is sent over the channel, incoming messages
-are not parsed, and no command — tap, swipe, back, home, text — is defined.
-This stage only proves that SCTP works.
+It carries one command, the tap, and its acknowledgement. The protocol and what
+each side does with it are in [CONTROL_CHANNEL.md](CONTROL_CHANNEL.md). Swipe,
+back, home and text are not defined.
 
 ## The screen: one `recvonly` video section
 
@@ -298,8 +298,10 @@ Until the first frames have told their size, and whenever no track is
 attached, the surface shows **"Esperando pantalla del dispositivo..."**. That
 is decided by the renderer reporting a size, never by a timer.
 
-The surface is visual only: it does not listen to pointer, mouse or keyboard
-events. Remote control is a later stage.
+Over a real picture, and only while remote control can be used, a layer on top
+of the view turns clicks into taps. The view itself is not touched, and neither
+the keyboard nor the wheel is listened to. See
+[CONTROL_CHANNEL.md](CONTROL_CHANNEL.md#from-a-pointer-to-a-coordinate).
 
 ### What the console does not know
 

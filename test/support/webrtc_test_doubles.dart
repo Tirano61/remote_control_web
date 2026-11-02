@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import 'package:flutter/widgets.dart';
+import 'package:remote_control_web/features/remote_control/domain/entities/remote_control_ack.dart';
+import 'package:remote_control_web/features/remote_control/domain/entities/remote_control_command.dart';
 import 'package:remote_control_web/features/signaling/domain/client/technician_signaling_client.dart';
 import 'package:remote_control_web/features/signaling/domain/entities/remote_signaling_message.dart';
 import 'package:remote_control_web/features/signaling/domain/entities/signaling_relay_result.dart';
@@ -77,6 +79,12 @@ class FakeWebRtcPeerSession implements WebRtcPeerSession {
   Object? applyAnswerError;
   Object? addIceCandidateError;
 
+  /// Every command handed to the `control` channel, in order.
+  final List<RemoteControlCommand> sentRemoteControlCommands = [];
+
+  /// What the channel answers when asked to send.
+  bool acceptsRemoteControlCommands = true;
+
   bool get isClosed => closeCount > 0;
 
   @override
@@ -120,6 +128,13 @@ class FakeWebRtcPeerSession implements WebRtcPeerSession {
   }
 
   @override
+  Future<bool> sendRemoteControlCommand(RemoteControlCommand command) async {
+    if (!acceptsRemoteControlCommands) return false;
+    sentRemoteControlCommands.add(command);
+    return true;
+  }
+
+  @override
   Future<void> close() async {
     closeCount++;
     calls.add('close');
@@ -145,8 +160,12 @@ class FakeWebRtcPeerSession implements WebRtcPeerSession {
   void emitControlChannelState(WebRtcDataChannelState state) =>
       _emit(ControlChannelStateChanged(state));
 
-  void emitControlChannelMessage(String text) =>
-      _emit(ControlChannelMessageReceived(text));
+  void emitRemoteControlAck(String commandId, {RemoteControlError? error}) =>
+      _emit(
+        RemoteControlAckReceived(
+          RemoteControlAck(commandId: commandId, error: error),
+        ),
+      );
 
   /// Returns the handle, so identity can be asserted further up.
   FakeRemoteVideoTrack emitRemoteVideoTrack([String id = 'remote-screen-0']) {
@@ -250,6 +269,12 @@ class FakeRemoteVideoRenderer extends ChangeNotifier
   void reportVideoAspectRatio(double aspectRatio) {
     _videoAspectRatio = aspectRatio;
     if (!_isDisposed) notifyListeners();
+  }
+
+  /// A new geometry the surface has not been rebuilt for yet, which is the only
+  /// way bands exist inside a surface shaped after the video.
+  void changeVideoAspectRatioWithoutNotifying(double aspectRatio) {
+    _videoAspectRatio = aspectRatio;
   }
 }
 

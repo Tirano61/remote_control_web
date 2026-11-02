@@ -7,6 +7,9 @@ import 'package:remote_control_web/app/remote_control_app.dart';
 import 'package:remote_control_web/core/config/app_config.dart';
 import 'package:remote_control_web/core/error/failure.dart';
 import 'package:remote_control_web/features/auth/data/repositories/auth_repository_impl.dart';
+import 'package:remote_control_web/features/remote_control/domain/entities/normalized_remote_point.dart';
+import 'package:remote_control_web/features/remote_control/domain/entities/remote_control_ack.dart';
+import 'package:remote_control_web/features/remote_control/domain/entities/remote_control_command.dart';
 import 'package:remote_control_web/features/remote_session/data/repositories/remote_session_repository_impl.dart';
 import 'package:remote_control_web/features/remote_session/domain/entities/remote_session_status.dart';
 import 'package:remote_control_web/features/signaling/data/technician_signaling_client_impl.dart';
@@ -703,6 +706,263 @@ void main() {
     }
   });
 
+
+  group('remote control', () {
+    final surface = find.byKey(const Key('remote_screen_surface'));
+    final tapLayer = find.byKey(const Key('remote_screen_tap_layer'));
+
+    String statusLine(WidgetTester tester) => tester
+        .widget<Text>(find.byKey(const Key('remote_control_status')))
+        .data!;
+
+    /// An ACTIVE assistance with the picture of the tablet on screen.
+    Future<void> pumpAssistance(WidgetTester tester) async {
+      remoteSessions.current = buildRemoteSession();
+      realtime.peerJoinedOnJoin = true;
+      await pumpConsole(tester);
+      await connectSocket(tester);
+      realtime.answerRelayAck({
+        'delivered': true,
+        'remoteSessionId': remoteSessionId,
+      });
+      await settleUi(tester);
+      peers.last
+        ..emitControlChannelState(WebRtcDataChannelState.open)
+        ..emitPeerState(WebRtcPeerConnectionState.connected)
+        ..emitRemoteVideoTrack('screen-0');
+      await settleUi(tester);
+      renderers.last.reportVideoAspectRatio(1280 / 800);
+      await settleUi(tester);
+    }
+
+    Future<void> clickCentre(WidgetTester tester) async {
+      await tester.tapAt(tester.getCenter(surface));
+      await settleUi(tester);
+    }
+
+    testWidgets('a click reaches the tablet, and its answer comes back', (
+      tester,
+    ) async {
+      await pumpAssistance(tester);
+      expect(statusLine(tester), 'Control remoto: listo');
+
+      await clickCentre(tester);
+
+      final command =
+          peers.last.sentRemoteControlCommands.single as RemoteTapCommand;
+      expect(command.point, const NormalizedRemotePoint(0.5, 0.5));
+      expect(statusLine(tester), 'Enviando toque...');
+
+      peers.last.emitRemoteControlAck(command.id);
+      await settleUi(tester);
+
+      expect(statusLine(tester), 'Toque enviado');
+    });
+
+    const refusals = {
+      RemoteControlError.accessibilityUnavailable:
+          'El dispositivo no tiene habilitado el control remoto.',
+      RemoteControlError.gestureRejected: 'No se pudo ejecutar el toque.',
+      RemoteControlError.invalidCommand: 'Control remoto no disponible',
+      RemoteControlError.unsupportedCommand: 'Control remoto no disponible',
+    };
+
+    refusals.forEach((error, message) {
+      testWidgets('${error.code} is explained and ends nothing', (tester) async {
+        await pumpAssistance(tester);
+
+        await clickCentre(tester);
+        peers.last.emitRemoteControlAck('tap-1', error: error);
+        await settleUi(tester);
+
+        expect(statusLine(tester), message);
+        expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
+        expect(find.byKey(const Key('fake_remote_video_screen-0')), findsOneWidget);
+        expect(peers.last.isClosed, isFalse);
+        expect(remoteSessions.closedIds, isEmpty);
+        expect(tapLayer, findsOneWidget);
+      });
+    });
+
+    testWidgets('session_not_active asks REST, once, and sends nothing', (
+      tester,
+    ) async {
+      await pumpAssistance(tester);
+      final readsBefore = remoteSessions.currentCount;
+
+      await clickCentre(tester);
+      peers.last.emitRemoteControlAck(
+        'tap-1',
+        error: RemoteControlError.sessionNotActive,
+      );
+      await settleUi(tester);
+
+      expect(remoteSessions.currentCount, readsBefore + 1);
+      expect(peers.last.sentRemoteControlCommands, hasLength(1));
+      expect(peers.last.isClosed, isFalse);
+      expect(
+        statusLine(tester),
+        'La asistencia no está activa en el dispositivo.',
+      );
+
+      // Later states still carry that tap: they do not read REST again.
+      peers.last.emitPeerState(WebRtcPeerConnectionState.disconnected);
+      await settleUi(tester);
+      expect(remoteSessions.currentCount, readsBefore + 1);
+    });
+
+    testWidgets('session_not_active that REST confirms ends the assistance', (
+      tester,
+    ) async {
+      await pumpAssistance(tester);
+
+      await clickCentre(tester);
+      remoteSessions.current = null;
+      peers.last.emitRemoteControlAck(
+        'tap-1',
+        error: RemoteControlError.sessionNotActive,
+      );
+      await settleUi(tester);
+
+      expect(find.byKey(const Key('active_assistance_section')), findsNothing);
+      expect(surface, findsNothing);
+      expect(renderers.last.disposeCount, 1);
+    });
+
+    testWidgets('nothing can be clicked while the session is CONNECTING', (
+      tester,
+    ) async {
+      remoteSessions.activateFailure = const NetworkFailure();
+      await pumpAssistance(tester);
+      expect(
+        find.text('Estado: Conectando con el dispositivo...'),
+        findsOneWidget,
+      );
+      expect(statusLine(tester), 'Control remoto: no disponible');
+      expect(tapLayer, findsNothing);
+
+      await clickCentre(tester);
+
+      expect(peers.last.sentRemoteControlCommands, isEmpty);
+    });
+
+    testWidgets('nothing can be clicked before the first frame', (tester) async {
+      remoteSessions.current = buildRemoteSession();
+      realtime.peerJoinedOnJoin = true;
+      await pumpConsole(tester);
+      await connectSocket(tester);
+      realtime.answerRelayAck({
+        'delivered': true,
+        'remoteSessionId': remoteSessionId,
+      });
+      await settleUi(tester);
+      peers.last
+        ..emitControlChannelState(WebRtcDataChannelState.open)
+        ..emitPeerState(WebRtcPeerConnectionState.connected)
+        ..emitRemoteVideoTrack('screen-0');
+      await settleUi(tester);
+
+      // ACTIVE, with a track and a channel: the tablet is still asking the user
+      // for MediaProjection consent, so there is nothing to aim at.
+      expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
+      expect(find.text(kWaitingForRemoteScreenNotice), findsOneWidget);
+      expect(statusLine(tester), 'Control remoto: no disponible');
+
+      await clickCentre(tester);
+
+      expect(peers.last.sentRemoteControlCommands, isEmpty);
+    });
+
+    testWidgets('the controls of the console are not part of the picture', (
+      tester,
+    ) async {
+      await pumpAssistance(tester);
+
+      await tester.tapAt(
+        tester.getCenter(find.byKey(const Key('remote_control_status'))),
+      );
+      await tester.tapAt(tester.getCenter(find.byKey(const Key('webrtc_status'))));
+      await settleUi(tester);
+
+      expect(peers.last.sentRemoteControlCommands, isEmpty);
+    });
+
+    testWidgets('pressing FINALIZAR stops the clicks at once', (tester) async {
+      await pumpAssistance(tester);
+      final gate = Completer<void>();
+      remoteSessions.closeGate = gate.future;
+      await clickCentre(tester);
+      expect(peers.last.sentRemoteControlCommands, hasLength(1));
+
+      await tester.tap(find.byKey(const Key('close_remote_session_button')));
+      await settleUi(tester);
+
+      // The backend has not answered and the picture is still there, but the
+      // technician asked to stop.
+      expect(surface, findsOneWidget);
+      expect(tapLayer, findsNothing);
+      expect(statusLine(tester), 'Control remoto: no disponible');
+      await clickCentre(tester);
+      expect(peers.last.sentRemoteControlCommands, hasLength(1));
+
+      gate.complete();
+      await settleUi(tester);
+
+      expect(surface, findsNothing);
+      expect(peers.last.sentRemoteControlCommands, hasLength(1));
+    });
+
+    testWidgets('a close that failed gives the control back', (tester) async {
+      await pumpAssistance(tester);
+      remoteSessions.closeFailure = const NetworkFailure();
+
+      await tester.tap(find.byKey(const Key('close_remote_session_button')));
+      await settleUi(tester);
+
+      // The assistance goes on, so does the control.
+      expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
+      expect(statusLine(tester), 'Control remoto: listo');
+
+      await clickCentre(tester);
+
+      expect(peers.last.sentRemoteControlCommands, hasLength(1));
+    });
+
+    testWidgets('signing out with a tap in flight leaves nothing behind', (
+      tester,
+    ) async {
+      await pumpAssistance(tester);
+      final session = peers.last;
+      await clickCentre(tester);
+
+      await tester.tap(find.byKey(const Key('logout_button')));
+      await settleUi(tester);
+
+      expect(surface, findsNothing);
+      expect(renderers.last.disposeCount, 1);
+      expect(session.sentRemoteControlCommands, hasLength(1));
+    });
+
+    testWidgets('a rotation keeps the control working', (tester) async {
+      await pumpAssistance(tester);
+
+      await clickCentre(tester);
+      renderers.last.reportVideoAspectRatio(800 / 1280);
+      await settleUi(tester);
+      await clickCentre(tester);
+      renderers.last.reportVideoAspectRatio(1280 / 800);
+      await settleUi(tester);
+      await clickCentre(tester);
+
+      final commands = peers.last.sentRemoteControlCommands;
+      expect(commands.map((c) => c.id), ['tap-1', 'tap-2', 'tap-3']);
+      for (final command in commands) {
+        expect((command as RemoteTapCommand).point.x, closeTo(0.5, 1e-9));
+        expect(command.point.y, closeTo(0.5, 1e-9));
+      }
+      expect(renderers.created, hasLength(1));
+    });
+  });
 
   group('closed from the tablet', () {
     testWidgets('the assistance disappears after re-reading the backend', (

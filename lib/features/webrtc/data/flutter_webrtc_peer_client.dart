@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 
 import '../../../core/logging/debug_log.dart';
+import '../../remote_control/data/remote_control_channel_codec.dart';
+import '../../remote_control/domain/entities/remote_control_command.dart';
 import '../../signaling/domain/entities/webrtc_ice_candidate.dart';
 import '../../signaling/domain/entities/webrtc_session_description.dart';
 import '../domain/client/webrtc_peer_client.dart';
@@ -201,6 +203,26 @@ class FlutterWebRtcPeerSession implements WebRtcPeerSession {
   }
 
   @override
+  Future<bool> sendRemoteControlCommand(RemoteControlCommand command) async {
+    final channel = _controlChannel;
+    if (_isClosed ||
+        channel == null ||
+        channel.state != rtc.RTCDataChannelState.RTCDataChannelOpen) {
+      return false;
+    }
+    try {
+      await channel.send(
+        rtc.RTCDataChannelMessage(RemoteControlChannelCodec.encode(command)),
+      );
+      return true;
+    } catch (_) {
+      // The channel closed under this call. Nothing is sent again.
+      logDebug('control command not sent ${command.id}');
+      return false;
+    }
+  }
+
+  @override
   Future<void> close() async {
     if (_isClosed) return;
     _isClosed = true;
@@ -273,9 +295,15 @@ class FlutterWebRtcPeerSession implements WebRtcPeerSession {
   }
 
   void _onDataChannelMessage(rtc.RTCDataChannelMessage message) {
-    // No protocol exists yet, so nothing is parsed and nothing is logged.
+    // Frames are text by contract. Whatever else arrives is dropped, and the
+    // payload is not logged.
     if (message.isBinary) return;
-    _emit(ControlChannelMessageReceived(message.text));
+    final ack = RemoteControlChannelCodec.decodeAck(message.text);
+    if (ack == null) {
+      logDebug('control message ignored $remoteSessionId');
+      return;
+    }
+    _emit(RemoteControlAckReceived(ack));
   }
 
   void _emit(WebRtcPeerEvent event) {

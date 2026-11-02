@@ -1,5 +1,6 @@
 import 'package:equatable/equatable.dart';
 
+import '../../../remote_control/domain/entities/remote_control_ack.dart';
 import '../../../signaling/domain/entities/webrtc_ice_candidate.dart';
 import 'remote_video_track.dart';
 import 'webrtc_connection_state.dart';
@@ -60,23 +61,20 @@ final class ControlChannelStateChanged extends WebRtcPeerEvent {
   String toString() => 'ControlChannelStateChanged(${state.name})';
 }
 
-/// A message arrived on the `control` channel.
+/// The tablet answered a command on the `control` channel.
 ///
-/// The channel exists but carries no protocol yet: this stage only proves that
-/// SCTP works. Nothing consumes this event, and no command is ever sent.
-final class ControlChannelMessageReceived extends WebRtcPeerEvent {
-  const ControlChannelMessageReceived(this.text);
+/// Already decoded: a frame that is not a valid acknowledgement never gets this
+/// far, so no JSON and no channel message crosses this boundary.
+final class RemoteControlAckReceived extends WebRtcPeerEvent {
+  const RemoteControlAckReceived(this.ack);
 
-  final String text;
+  final RemoteControlAck ack;
 
   @override
-  List<Object?> get props => [text];
+  List<Object?> get props => [ack];
 
-  /// The payload is never logged: no protocol is defined yet, so anything
-  /// could be inside.
   @override
-  String toString() =>
-      'ControlChannelMessageReceived(length: ${text.length})';
+  String toString() => 'RemoteControlAckReceived(${ack.commandId})';
 }
 
 /// `onTrack` delivered a **video** track: the tablet is sending its screen.

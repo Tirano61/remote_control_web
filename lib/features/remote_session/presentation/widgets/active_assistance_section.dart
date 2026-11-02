@@ -6,6 +6,7 @@ import '../../../../core/presentation/format/elapsed_label.dart';
 import '../../../../core/presentation/widgets/console_feedback.dart';
 import '../../../../core/presentation/widgets/console_section.dart';
 import '../../../../core/presentation/widgets/presence_indicator.dart';
+import '../../../remote_control/domain/entities/remote_control_status.dart';
 import '../../../technician_realtime/presentation/bloc/signaling_join/signaling_join_bloc.dart';
 import '../../../technician_realtime/presentation/bloc/technician_realtime/technician_realtime_bloc.dart';
 import '../../../webrtc/domain/entities/webrtc_connection_state.dart';
@@ -266,15 +267,30 @@ class _RemoteScreen extends StatelessWidget {
     return BlocBuilder<WebRtcSessionBloc, WebRtcSessionState>(
       buildWhen: (previous, current) =>
           _isShown(previous) != _isShown(current) ||
-          !identical(previous.remoteVideoTrack, current.remoteVideoTrack),
+          !identical(previous.remoteVideoTrack, current.remoteVideoTrack) ||
+          previous.canSendRemoteControl != current.canSendRemoteControl ||
+          previous.remoteControl.lastTap != current.remoteControl.lastTap,
       builder: (context, state) {
         if (!_isShown(state)) return const SizedBox.shrink();
+        final canSend = state.canSendRemoteControl;
         return Padding(
           padding: const EdgeInsets.only(bottom: 16),
           child: RemoteScreenView(
             track: state.remoteVideoTrack,
             rendererFactory: rendererFactory,
             maxHeight: maxHeight,
+            onRemoteTap: canSend
+                ? (point) => context.read<WebRtcSessionBloc>().add(
+                    WebRtcRemoteTapRequested(
+                      remoteSessionId: remoteSessionId,
+                      point: point,
+                    ),
+                  )
+                : null,
+            controlStatusBuilder: (context, hasPicture) => _RemoteControlLine(
+              isAvailable: canSend && hasPicture,
+              lastTap: state.remoteControl.lastTap,
+            ),
           ),
         );
       },
@@ -285,6 +301,61 @@ class _RemoteScreen extends StatelessWidget {
   /// other session is never displayed under this one.
   bool _isShown(WebRtcSessionState state) =>
       state.hasNegotiation && state.remoteSessionId == remoteSessionId;
+}
+
+/// One discreet line under the picture: whether clicks reach the tablet, and
+/// what became of the last one.
+///
+/// A refusal is not an emergency. The picture keeps arriving and the assistance
+/// goes on, so nothing here takes over the screen.
+class _RemoteControlLine extends StatelessWidget {
+  const _RemoteControlLine({required this.isAvailable, required this.lastTap});
+
+  final bool isAvailable;
+  final RemoteTapFeedback? lastTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final outcome = lastTap?.outcome;
+    final isProblem =
+        isAvailable &&
+        outcome != null &&
+        outcome != RemoteTapOutcome.pending &&
+        outcome != RemoteTapOutcome.confirmed;
+    final color = isProblem
+        ? theme.colorScheme.error
+        : theme.colorScheme.onSurfaceVariant;
+
+    return Row(
+      children: [
+        Icon(Icons.touch_app_outlined, size: 18, color: color),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            key: const Key('remote_control_status'),
+            isAvailable ? _label(outcome) : 'Control remoto: no disponible',
+            style: theme.textTheme.bodySmall?.copyWith(color: color),
+          ),
+        ),
+      ],
+    );
+  }
+
+  static String _label(RemoteTapOutcome? outcome) => switch (outcome) {
+    null => 'Control remoto: listo',
+    RemoteTapOutcome.pending => 'Enviando toque...',
+    RemoteTapOutcome.confirmed => 'Toque enviado',
+    RemoteTapOutcome.accessibilityUnavailable =>
+      'El dispositivo no tiene habilitado el control remoto.',
+    RemoteTapOutcome.sessionNotActive =>
+      'La asistencia no está activa en el dispositivo.',
+    RemoteTapOutcome.gestureRejected => 'No se pudo ejecutar el toque.',
+    RemoteTapOutcome.timedOut => 'El dispositivo no confirmó el toque.',
+    RemoteTapOutcome.incompatible ||
+    RemoteTapOutcome.channelClosed ||
+    RemoteTapOutcome.notSent => 'Control remoto no disponible',
+  };
 }
 
 /// One line telling the technician whether the assistance channel is ready.

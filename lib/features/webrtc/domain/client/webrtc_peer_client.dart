@@ -1,3 +1,4 @@
+import '../../../remote_control/domain/entities/remote_control_command.dart';
 import '../../../signaling/domain/entities/webrtc_ice_candidate.dart';
 import '../../../signaling/domain/entities/webrtc_session_description.dart';
 import '../entities/webrtc_ice_configuration.dart';
@@ -94,6 +95,13 @@ abstract interface class WebRtcPeerSession {
   /// It is only valid after [applyRemoteAnswer] succeeded; candidates that
   /// arrive earlier are queued by the caller.
   Future<void> addRemoteIceCandidate(WebRtcIceCandidate candidate);
+
+  /// Sends [command] on the `control` channel, the only one there is.
+  ///
+  /// Returns whether it was handed to the channel. It is `false`, and nothing
+  /// is queued, unless the channel is open right now. What the tablet did with
+  /// it arrives later as [RemoteControlAckReceived] on [events].
+  Future<bool> sendRemoteControlCommand(RemoteControlCommand command);
 
   /// Closes the data channel, the peer connection and [events].
   ///

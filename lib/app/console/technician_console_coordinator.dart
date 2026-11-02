@@ -2,6 +2,7 @@ import 'dart:async';
 
 import '../../core/error/failure.dart';
 import '../../features/auth/presentation/bloc/user_session/user_session_bloc.dart';
+import '../../features/remote_control/domain/entities/remote_control_status.dart';
 import '../../features/remote_session/presentation/bloc/remote_session/remote_session_bloc.dart';
 import '../../features/signaling/domain/client/technician_signaling_client.dart';
 import '../../features/signaling/domain/entities/signaling_relay_result.dart';
@@ -38,6 +39,8 @@ const String kRealtimeSessionRejectedNotice =
 /// signaling room lost                -> incomplete negotiations are dropped
 /// live session gone                  -> the peer connection is released
 /// CONNECTING + connected + control   -> POST /remote-sessions/:id/activate
+/// ACTIVE and not closing             -> remote control may be used
+/// tap refused session_not_active     -> GET current (the tap is not resent)
 /// remote-session:active              -> GET current (never the event as state)
 /// remote-session:closed              -> GET current (never the event as state)
 /// support-request:updated            -> GET /support-requests (idem)
@@ -146,6 +149,9 @@ class TechnicianConsoleCoordinator {
   /// different episode, and deserves its own activation budget.
   int _webRtcReadinessEpisode = 0;
   bool _isWebRtcEstablished = false;
+
+  /// The last tap whose `session_not_active` already asked REST for the truth.
+  String? _reconciledTapId;
 
   /// The (connection, session) a negotiation was already asked for.
   ///
@@ -264,6 +270,16 @@ class TechnicianConsoleCoordinator {
       _userSessionBloc.add(const UserSessionInvalidated());
     }
 
+    // Remote control stops the moment the close is asked for, not when the
+    // backend confirms it, and comes back only if that close fails.
+    _webRtcSessionBloc.add(
+      WebRtcRemoteSessionActivityChanged(
+        state is RemoteSessionActive && !state.isClosing
+            ? state.session.id
+            : null,
+      ),
+    );
+
     if (state.hasLiveSession) {
       _hadLiveSession = true;
       _resetRelayGuards(remoteSessionId: state.session?.id);
@@ -323,6 +339,18 @@ class TechnicianConsoleCoordinator {
     _isWebRtcEstablished = isEstablished;
 
     _activateIfEstablished();
+    _reconcileAfterTapRefusal(state.remoteControl.lastTap);
+  }
+
+  /// The tablet says this session is not `ACTIVE`, while the console believed it
+  /// was. One of the two is behind and REST decides which: the tap is not sent
+  /// again, and the peer connection is left as it is.
+  void _reconcileAfterTapRefusal(RemoteTapFeedback? tap) {
+    if (tap == null || tap.outcome != RemoteTapOutcome.sessionNotActive) return;
+    // One command, one read: every other state change still carries this tap.
+    if (tap.commandId == _reconciledTapId) return;
+    _reconciledTapId = tap.commandId;
+    _remoteSessionBloc.add(const RemoteSessionRefreshRequested());
   }
 
   /// `remote-session:active` arrived over `/technicians`.
