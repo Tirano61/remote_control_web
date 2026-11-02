@@ -225,6 +225,30 @@ tests**: it suppresses the accessibility service, and a command would never reac
 `dispatchGesture`. Use `adb logcat`, `dumpsys` and `adb exec-out screencap -p`.
 The toggle and the *full control* dialog are the user's, by hand, always.
 
+### What has been observed on the physical tablet
+
+Chrome and a tablet running Android 14, with the Calculator as the target, because
+a wrong key shows up in the result.
+
+```text
+keys across the whole screen, landscape      correct
+keys across the whole screen, portrait       correct
+portrait -> landscape -> portrait, same
+  session and peer connection                correct, without an F5
+a click with the page scrolled               correct
+clicks beside the picture, both orientations no command, no gesture
+a drag over the picture, the wheel           no command
+service disabled by hand                     ack accessibility_unavailable,
+                                             message, session and picture go on
+service enabled again                        taps work, same session
+FINALIZAR, then clicks where the picture was no command
+```
+
+Covered by automated tests only, and never seen on the device: bands inside the
+pointer layer, `session_not_active`, `gesture_rejected`, the timeout, the channel
+closing with a tap pending, a replaced peer connection, and FINALIZAR with an ack
+really in flight.
+
 ## Logging
 
 ```text
