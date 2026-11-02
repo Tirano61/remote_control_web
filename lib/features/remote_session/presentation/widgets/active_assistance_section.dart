@@ -6,6 +6,7 @@ import '../../../../core/presentation/format/elapsed_label.dart';
 import '../../../../core/presentation/widgets/console_feedback.dart';
 import '../../../../core/presentation/widgets/console_section.dart';
 import '../../../../core/presentation/widgets/presence_indicator.dart';
+import '../../../remote_control/domain/entities/remote_control_command.dart';
 import '../../../remote_control/domain/entities/remote_control_status.dart';
 import '../../../technician_realtime/presentation/bloc/signaling_join/signaling_join_bloc.dart';
 import '../../../technician_realtime/presentation/bloc/technician_realtime/technician_realtime_bloc.dart';
@@ -269,7 +270,8 @@ class _RemoteScreen extends StatelessWidget {
           _isShown(previous) != _isShown(current) ||
           !identical(previous.remoteVideoTrack, current.remoteVideoTrack) ||
           previous.canSendRemoteControl != current.canSendRemoteControl ||
-          previous.remoteControl.lastTap != current.remoteControl.lastTap,
+          previous.remoteControl.lastCommand !=
+              current.remoteControl.lastCommand,
       builder: (context, state) {
         if (!_isShown(state)) return const SizedBox.shrink();
         final canSend = state.canSendRemoteControl;
@@ -289,7 +291,7 @@ class _RemoteScreen extends StatelessWidget {
                 : null,
             controlStatusBuilder: (context, hasPicture) => _RemoteControlLine(
               isAvailable: canSend && hasPicture,
-              lastTap: state.remoteControl.lastTap,
+              lastCommand: state.remoteControl.lastCommand,
             ),
           ),
         );
@@ -303,26 +305,29 @@ class _RemoteScreen extends StatelessWidget {
       state.hasNegotiation && state.remoteSessionId == remoteSessionId;
 }
 
-/// One discreet line under the picture: whether clicks reach the tablet, and
+/// One discreet line under the picture: whether gestures reach the tablet, and
 /// what became of the last one.
 ///
 /// A refusal is not an emergency. The picture keeps arriving and the assistance
 /// goes on, so nothing here takes over the screen.
 class _RemoteControlLine extends StatelessWidget {
-  const _RemoteControlLine({required this.isAvailable, required this.lastTap});
+  const _RemoteControlLine({
+    required this.isAvailable,
+    required this.lastCommand,
+  });
 
   final bool isAvailable;
-  final RemoteTapFeedback? lastTap;
+  final RemoteCommandFeedback? lastCommand;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final outcome = lastTap?.outcome;
+    final outcome = lastCommand?.outcome;
     final isProblem =
         isAvailable &&
         outcome != null &&
-        outcome != RemoteTapOutcome.pending &&
-        outcome != RemoteTapOutcome.confirmed;
+        outcome != RemoteCommandOutcome.pending &&
+        outcome != RemoteCommandOutcome.confirmed;
     final color = isProblem
         ? theme.colorScheme.error
         : theme.colorScheme.onSurfaceVariant;
@@ -334,7 +339,7 @@ class _RemoteControlLine extends StatelessWidget {
         Expanded(
           child: Text(
             key: const Key('remote_control_status'),
-            isAvailable ? _label(outcome) : 'Control remoto: no disponible',
+            isAvailable ? _label(lastCommand) : 'Control remoto: no disponible',
             style: theme.textTheme.bodySmall?.copyWith(color: color),
           ),
         ),
@@ -342,20 +347,31 @@ class _RemoteControlLine extends StatelessWidget {
     );
   }
 
-  static String _label(RemoteTapOutcome? outcome) => switch (outcome) {
-    null => 'Control remoto: listo',
-    RemoteTapOutcome.pending => 'Enviando toque...',
-    RemoteTapOutcome.confirmed => 'Toque enviado',
-    RemoteTapOutcome.accessibilityUnavailable =>
-      'El dispositivo no tiene habilitado el control remoto.',
-    RemoteTapOutcome.sessionNotActive =>
-      'La asistencia no está activa en el dispositivo.',
-    RemoteTapOutcome.gestureRejected => 'No se pudo ejecutar el toque.',
-    RemoteTapOutcome.timedOut => 'El dispositivo no confirmó el toque.',
-    RemoteTapOutcome.incompatible ||
-    RemoteTapOutcome.channelClosed ||
-    RemoteTapOutcome.notSent => 'Control remoto no disponible',
-  };
+  static String _label(RemoteCommandFeedback? last) {
+    if (last == null) return 'Control remoto: listo';
+    final isSwipe = last.kind == RemoteCommandKind.swipe;
+    return switch (last.outcome) {
+      RemoteCommandOutcome.pending =>
+        isSwipe ? 'Enviando desplazamiento...' : 'Enviando toque...',
+      RemoteCommandOutcome.confirmed =>
+        isSwipe ? 'Desplazamiento enviado' : 'Toque enviado',
+      RemoteCommandOutcome.accessibilityUnavailable =>
+        'El dispositivo no tiene habilitado el control remoto.',
+      RemoteCommandOutcome.sessionNotActive =>
+        'La asistencia no está activa en el dispositivo.',
+      RemoteCommandOutcome.gestureRejected =>
+        isSwipe
+            ? 'No se pudo ejecutar el desplazamiento.'
+            : 'No se pudo ejecutar el toque.',
+      RemoteCommandOutcome.timedOut =>
+        isSwipe
+            ? 'El dispositivo no confirmó el desplazamiento.'
+            : 'El dispositivo no confirmó el toque.',
+      RemoteCommandOutcome.incompatible ||
+      RemoteCommandOutcome.channelClosed ||
+      RemoteCommandOutcome.notSent => 'Control remoto no disponible',
+    };
+  }
 }
 
 /// One line telling the technician whether the assistance channel is ready.

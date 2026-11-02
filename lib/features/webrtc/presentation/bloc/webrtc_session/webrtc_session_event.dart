@@ -54,6 +54,26 @@ final class WebRtcRemoteTapRequested extends WebRtcSessionEvent {
   List<Object?> get props => [remoteSessionId, point];
 }
 
+/// The technician dragged across the picture of the tablet and let go.
+///
+/// Like a click, it carries the session the picture belonged to.
+final class WebRtcRemoteSwipeRequested extends WebRtcSessionEvent {
+  const WebRtcRemoteSwipeRequested({
+    required this.remoteSessionId,
+    required this.start,
+    required this.end,
+    required this.durationMs,
+  });
+
+  final String remoteSessionId;
+  final NormalizedRemotePoint start;
+  final NormalizedRemotePoint end;
+  final int durationMs;
+
+  @override
+  List<Object?> get props => [remoteSessionId, start, end, durationMs];
+}
+
 /// Which session REST currently says is `ACTIVE` and not being closed, if any.
 ///
 /// The BLoC only learns this from outside: `RemoteSession` is not its state, and

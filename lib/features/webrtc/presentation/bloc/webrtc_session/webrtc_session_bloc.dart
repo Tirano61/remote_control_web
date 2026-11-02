@@ -55,12 +55,12 @@ part 'webrtc_session_state.dart';
 /// Remote control commands travel over the channel of this same negotiation, so
 /// they share its lifetime and its generation: whatever is pending ends with it,
 /// and an acknowledgement from a replaced peer connection is dropped like any
-/// other late callback. A command is sent at most once. Nothing queues a click
-/// and nothing repeats one, because a gesture may have run even when its
-/// acknowledgement was lost.
+/// other late callback. A command is sent at most once. Nothing queues a gesture
+/// and nothing repeats one, because it may have run even when its acknowledgement
+/// was lost.
 ///
 /// Security: SDP and ICE candidate contents never reach the log, and neither do
-/// the coordinates of a tap. What is logged is the lifecycle — created, relayed,
+/// the coordinates of a gesture. What is logged is the lifecycle — created, relayed,
 /// applied, connected, failed — and the opaque id of a command.
 class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   WebRtcSessionBloc({
@@ -68,18 +68,19 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     required TechnicianSignalingClient signalingClient,
     required WebRtcIceConfiguration iceConfiguration,
     RemoteControlCommandIdGenerator? commandIdGenerator,
-    Duration remoteCommandTimeout = defaultRemoteCommandTimeout,
+    Duration remoteCommandMargin = defaultRemoteCommandMargin,
   }) : _peerClient = peerClient,
        _signalingClient = signalingClient,
        _iceConfiguration = iceConfiguration,
        _commandIdGenerator =
            commandIdGenerator ?? SequentialRemoteControlCommandIdGenerator(),
-       _pendingCommands = PendingRemoteCommands(timeout: remoteCommandTimeout),
+       _pendingCommands = PendingRemoteCommands(margin: remoteCommandMargin),
        super(const WebRtcIdle()) {
     on<WebRtcNegotiationRequested>(_onNegotiationRequested);
     on<WebRtcSignalingLost>(_onSignalingLost);
     on<WebRtcSessionTerminated>(_onTerminated);
     on<WebRtcRemoteTapRequested>(_onRemoteTapRequested);
+    on<WebRtcRemoteSwipeRequested>(_onRemoteSwipeRequested);
     on<WebRtcRemoteSessionActivityChanged>(_onRemoteSessionActivityChanged);
     on<_WebRtcRemoteCommandTimedOut>(_onRemoteCommandTimedOut);
     on<_WebRtcPeerReported>(_onPeerReported);
@@ -95,10 +96,10 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   final WebRtcIceConfiguration _iceConfiguration;
   final RemoteControlCommandIdGenerator _commandIdGenerator;
 
-  /// How long a command waits for its acknowledgement. The tablet sends none on
-  /// a channel that closed or was replaced, and Android gives up on a gesture
-  /// after a moment, so an answer that takes longer is not coming.
-  static const Duration defaultRemoteCommandTimeout = Duration(seconds: 3);
+  /// How long a command waits for its acknowledgement beyond the work the tablet
+  /// has to do first ([PendingRemoteCommands.deadlineFor]). The tablet sends none
+  /// on a channel that closed or was replaced, so an answer may never come.
+  static const Duration defaultRemoteCommandMargin = Duration(seconds: 3);
 
   late final StreamSubscription<RemoteSignalingMessage> _incomingSubscription;
 
@@ -144,8 +145,8 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   /// Commands of the current negotiation still waiting for an answer.
   final PendingRemoteCommands _pendingCommands;
 
-  /// The most recent tap of the current negotiation.
-  RemoteTapFeedback? _lastRemoteTap;
+  /// The most recent command of the current negotiation.
+  RemoteCommandFeedback? _lastRemoteCommand;
 
   @override
   Future<void> close() async {
@@ -285,25 +286,67 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     emit(const WebRtcIdle());
   }
 
-  /// A click on the picture. It becomes a command now or it never does: there is
-  /// no queue of clicks waiting for the connection.
+  /// A click on the picture.
   Future<void> _onRemoteTapRequested(
     WebRtcRemoteTapRequested event,
     Emitter<WebRtcSessionState> emit,
   ) async {
-    final session = _session;
-    if (session == null ||
-        session.remoteSessionId != event.remoteSessionId ||
-        !state.canSendRemoteControl) {
+    final session = _sessionAcceptingCommands(event.remoteSessionId);
+    if (session == null) {
       logDebug('remote tap ignored ${event.remoteSessionId}');
       return;
     }
-
-    final generation = _generation;
-    final command = RemoteTapCommand(
-      id: _commandIdGenerator.next(RemoteCommandKind.tap),
-      point: event.point,
+    await _sendRemoteCommand(
+      session,
+      RemoteTapCommand(
+        id: _commandIdGenerator.next(RemoteCommandKind.tap),
+        point: event.point,
+      ),
+      emit,
     );
+  }
+
+  /// A drag across the picture, over and done with.
+  Future<void> _onRemoteSwipeRequested(
+    WebRtcRemoteSwipeRequested event,
+    Emitter<WebRtcSessionState> emit,
+  ) async {
+    final session = _sessionAcceptingCommands(event.remoteSessionId);
+    if (session == null) {
+      logDebug('remote swipe ignored ${event.remoteSessionId}');
+      return;
+    }
+    await _sendRemoteCommand(
+      session,
+      RemoteSwipeCommand(
+        id: _commandIdGenerator.next(RemoteCommandKind.swipe),
+        start: event.start,
+        end: event.end,
+        durationMs: event.durationMs,
+      ),
+      emit,
+    );
+  }
+
+  /// The session a gesture aimed at [remoteSessionId] may be sent on, if any.
+  WebRtcPeerSession? _sessionAcceptingCommands(String remoteSessionId) {
+    final session = _session;
+    if (session == null ||
+        session.remoteSessionId != remoteSessionId ||
+        !state.canSendRemoteControl) {
+      return null;
+    }
+    return session;
+  }
+
+  /// A gesture becomes a command now or it never does: there is no queue of
+  /// gestures waiting for the connection.
+  Future<void> _sendRemoteCommand(
+    WebRtcPeerSession session,
+    RemoteControlCommand command,
+    Emitter<WebRtcSessionState> emit,
+  ) async {
+    final generation = _generation;
     // Tracked before it is sent: the acknowledgement must find it, however
     // quickly it comes back.
     _pendingCommands.track(
@@ -313,9 +356,10 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         add(_WebRtcRemoteCommandTimedOut(commandId, generation));
       },
     );
-    _lastRemoteTap = RemoteTapFeedback(
+    _lastRemoteCommand = RemoteCommandFeedback(
       commandId: command.id,
-      outcome: RemoteTapOutcome.pending,
+      kind: command.kind,
+      outcome: RemoteCommandOutcome.pending,
     );
     emit(_withNegotiationFacts(state));
 
@@ -323,11 +367,11 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     if (generation != _generation) return;
 
     if (isSent) {
-      logDebug('tap command sent ${command.id}');
+      logDebug('${command.kind.name} command sent ${command.id}');
       return;
     }
     if (_pendingCommands.settle(command.id) == null) return;
-    _reportTap(command.id, RemoteTapOutcome.notSent);
+    _reportCommand(command.id, RemoteCommandOutcome.notSent);
     emit(_withNegotiationFacts(state));
   }
 
@@ -341,7 +385,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
 
     // Nothing sent for the previous answer can be spoken about any more.
     _pendingCommands.clear();
-    _lastRemoteTap = null;
+    _lastRemoteCommand = null;
 
     final next = _withNegotiationFacts(state);
     if (next != state) emit(next);
@@ -352,12 +396,13 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     Emitter<WebRtcSessionState> emit,
   ) {
     if (event.generation != _generation) return;
-    if (_pendingCommands.settle(event.commandId) == null) return;
+    final command = _pendingCommands.settle(event.commandId);
+    if (command == null) return;
 
     // Reported and left there. The gesture may have run with its answer lost,
     // so sending it again could press something twice.
-    logDebug('tap timed out ${event.commandId}');
-    _reportTap(event.commandId, RemoteTapOutcome.timedOut);
+    logDebug('${command.kind.name} timed out ${event.commandId}');
+    _reportCommand(event.commandId, RemoteCommandOutcome.timedOut);
     emit(_withNegotiationFacts(state));
   }
 
@@ -367,39 +412,45 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   ) {
     // Unknown, or answered already: only the first answer to a command counts,
     // and an answer that arrives after the timeout changes nothing.
-    if (_pendingCommands.settle(ack.commandId) == null) {
+    final command = _pendingCommands.settle(ack.commandId);
+    if (command == null) {
       logDebug('control ack ignored ${ack.commandId}');
       return;
     }
 
     final error = ack.error;
     if (error == null) {
-      logDebug('tap confirmed ${ack.commandId}');
+      logDebug('${command.kind.name} confirmed ${ack.commandId}');
     } else {
       logDebug('remote control command rejected: ${error.code}');
     }
-    _reportTap(ack.commandId, _outcomeOf(error));
+    _reportCommand(ack.commandId, _outcomeOf(error));
     emit(_withNegotiationFacts(state));
   }
 
-  static RemoteTapOutcome _outcomeOf(RemoteControlError? error) =>
+  static RemoteCommandOutcome _outcomeOf(RemoteControlError? error) =>
       switch (error) {
-        null => RemoteTapOutcome.confirmed,
+        null => RemoteCommandOutcome.confirmed,
         RemoteControlError.accessibilityUnavailable =>
-          RemoteTapOutcome.accessibilityUnavailable,
+          RemoteCommandOutcome.accessibilityUnavailable,
         RemoteControlError.sessionNotActive =>
-          RemoteTapOutcome.sessionNotActive,
-        RemoteControlError.gestureRejected => RemoteTapOutcome.gestureRejected,
+          RemoteCommandOutcome.sessionNotActive,
+        RemoteControlError.gestureRejected => RemoteCommandOutcome.gestureRejected,
         RemoteControlError.invalidCommand ||
         RemoteControlError.unsupportedCommand ||
-        RemoteControlError.unknown => RemoteTapOutcome.incompatible,
+        RemoteControlError.unknown => RemoteCommandOutcome.incompatible,
       };
 
-  /// Only the most recent tap is reported. The answer to an older one settles
+  /// Only the most recent command is reported. The answer to an older one settles
   /// that command and says nothing about what the technician did last.
-  void _reportTap(String commandId, RemoteTapOutcome outcome) {
-    if (_lastRemoteTap?.commandId != commandId) return;
-    _lastRemoteTap = RemoteTapFeedback(commandId: commandId, outcome: outcome);
+  void _reportCommand(String commandId, RemoteCommandOutcome outcome) {
+    final last = _lastRemoteCommand;
+    if (last == null || last.commandId != commandId) return;
+    _lastRemoteCommand = RemoteCommandFeedback(
+      commandId: commandId,
+      kind: last.kind,
+      outcome: outcome,
+    );
   }
 
   /// The channel stopped being open, so no acknowledgement can arrive: nothing
@@ -407,9 +458,9 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   void _abandonPendingCommands() {
     if (_pendingCommands.length == 0) return;
     _pendingCommands.clear();
-    final last = _lastRemoteTap;
-    if (last?.outcome == RemoteTapOutcome.pending) {
-      _reportTap(last!.commandId, RemoteTapOutcome.channelClosed);
+    final last = _lastRemoteCommand;
+    if (last?.outcome == RemoteCommandOutcome.pending) {
+      _reportCommand(last!.commandId, RemoteCommandOutcome.channelClosed);
     }
   }
 
@@ -641,7 +692,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     // The track dies with its peer connection; only the reference is held.
     _remoteVideoTrack = null;
     _pendingCommands.clear();
-    _lastRemoteTap = null;
+    _lastRemoteCommand = null;
 
     await subscription?.cancel();
     await session?.close();
@@ -688,7 +739,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   RemoteControlStatus _remoteControlOf(String remoteSessionId) =>
       RemoteControlStatus(
         isSessionActive: _activeRemoteSessionId == remoteSessionId,
-        lastTap: _lastRemoteTap,
+        lastCommand: _lastRemoteCommand,
         pendingCommands: _pendingCommands.length,
       );
 }
