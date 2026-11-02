@@ -3,6 +3,9 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
+import 'package:remote_control_web/features/remote_control/domain/entities/normalized_remote_point.dart';
+import 'package:remote_control_web/features/remote_control/domain/entities/remote_control_ack.dart';
+import 'package:remote_control_web/features/remote_control/domain/entities/remote_control_command.dart';
 import 'package:remote_control_web/features/signaling/domain/entities/webrtc_ice_candidate.dart';
 import 'package:remote_control_web/features/signaling/domain/entities/webrtc_session_description.dart';
 import 'package:remote_control_web/features/webrtc/data/flutter_webrtc_peer_client.dart';
@@ -356,7 +359,7 @@ void main() {
       );
     });
 
-    test('channel states and text messages are published', () async {
+    test('channel states and acknowledgements are published, decoded', () async {
       final session = await createSession();
       await session.openControlChannel();
       final events = <WebRtcPeerEvent>[];
@@ -366,17 +369,106 @@ void main() {
       channel.onDataChannelState!(
         rtc.RTCDataChannelState.RTCDataChannelOpen,
       );
-      channel.onMessage!(rtc.RTCDataChannelMessage('ping'));
       channel.onMessage!(
-        rtc.RTCDataChannelMessage.fromBinary(Uint8List.fromList([1, 2])),
+        rtc.RTCDataChannelMessage('{"v":1,"type":"ack","id":"tap-1","ok":true}'),
+      );
+      channel.onMessage!(
+        rtc.RTCDataChannelMessage(
+          '{"v":1,"type":"ack","id":"tap-2","ok":false,'
+          '"error":"accessibility_unavailable"}',
+        ),
       );
       await Future<void>.delayed(Duration.zero);
 
       expect(events, [
         const ControlChannelStateChanged(WebRtcDataChannelState.open),
-        // Binary is not published: no protocol is defined yet.
-        const ControlChannelMessageReceived('ping'),
+        const RemoteControlAckReceived(RemoteControlAck(commandId: 'tap-1')),
+        const RemoteControlAckReceived(
+          RemoteControlAck(
+            commandId: 'tap-2',
+            error: RemoteControlError.accessibilityUnavailable,
+          ),
+        ),
       ]);
+    });
+
+    test('anything that is not a valid acknowledgement is dropped', () async {
+      final session = await createSession();
+      await session.openControlChannel();
+      final events = <WebRtcPeerEvent>[];
+      session.events.listen(events.add);
+      final channel = connection.dataChannel!;
+
+      channel.onMessage!(rtc.RTCDataChannelMessage('ping'));
+      channel.onMessage!(rtc.RTCDataChannelMessage('{"v":1,"type":"ack"}'));
+      channel.onMessage!(
+        rtc.RTCDataChannelMessage.fromBinary(Uint8List.fromList([1, 2])),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(events, isEmpty);
+    });
+
+    group('sending a command', () {
+      const command = RemoteTapCommand(
+        id: 'tap-1',
+        point: NormalizedRemotePoint(0.5, 0.25),
+      );
+
+      test('it goes as one text frame on the control channel', () async {
+        final session = await createSession();
+        await session.openControlChannel();
+        connection.dataChannel!.channelState =
+            rtc.RTCDataChannelState.RTCDataChannelOpen;
+
+        final isSent = await session.sendRemoteControlCommand(command);
+
+        expect(isSent, isTrue);
+        final message = connection.dataChannel!.sentMessages.single;
+        expect(message.isBinary, isFalse);
+        expect(
+          message.text,
+          '{"v":1,"type":"tap","id":"tap-1","x":0.5,"y":0.25}',
+        );
+        // The same channel: no second one exists for commands.
+        expect(connection.dataChannelLabels, ['control']);
+      });
+
+      test('nothing is sent without a channel', () async {
+        final session = await createSession();
+
+        expect(await session.sendRemoteControlCommand(command), isFalse);
+      });
+
+      test('nothing is sent while the channel is not open', () async {
+        final session = await createSession();
+        await session.openControlChannel();
+
+        expect(await session.sendRemoteControlCommand(command), isFalse);
+        expect(connection.dataChannel!.sentMessages, isEmpty);
+      });
+
+      test('nothing is sent after closing', () async {
+        final session = await createSession();
+        await session.openControlChannel();
+        final channel = connection.dataChannel!
+          ..channelState = rtc.RTCDataChannelState.RTCDataChannelOpen;
+
+        await session.close();
+
+        expect(await session.sendRemoteControlCommand(command), isFalse);
+        expect(channel.sentMessages, isEmpty);
+      });
+
+      test('a channel that throws is reported, not propagated', () async {
+        final session = await createSession();
+        await session.openControlChannel();
+        connection.dataChannel!
+          ..channelState = rtc.RTCDataChannelState.RTCDataChannelOpen
+          ..sendError = StateError('InvalidStateError');
+
+        expect(await session.sendRemoteControlCommand(command), isFalse);
+      });
     });
 
     test('the offer declares one video section, receive only', () async {
@@ -701,6 +793,10 @@ class FakeMediaStream extends _UnusedRtcApi implements rtc.MediaStream {
 
 class FakeRtcDataChannel extends _UnusedRtcApi implements rtc.RTCDataChannel {
   int closeCount = 0;
+  rtc.RTCDataChannelState channelState =
+      rtc.RTCDataChannelState.RTCDataChannelConnecting;
+  final List<rtc.RTCDataChannelMessage> sentMessages = [];
+  Object? sendError;
 
   @override
   Function(rtc.RTCDataChannelState state)? onDataChannelState;
@@ -709,11 +805,17 @@ class FakeRtcDataChannel extends _UnusedRtcApi implements rtc.RTCDataChannel {
   Function(rtc.RTCDataChannelMessage data)? onMessage;
 
   @override
-  rtc.RTCDataChannelState? get state =>
-      rtc.RTCDataChannelState.RTCDataChannelConnecting;
+  rtc.RTCDataChannelState? get state => channelState;
 
   @override
   String? get label => 'control';
+
+  @override
+  Future<void> send(rtc.RTCDataChannelMessage message) async {
+    final error = sendError;
+    if (error != null) throw error;
+    sentMessages.add(message);
+  }
 
   @override
   Future<void> close() async => closeCount++;

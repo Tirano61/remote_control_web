@@ -37,6 +37,47 @@ final class WebRtcSessionTerminated extends WebRtcSessionEvent {
   const WebRtcSessionTerminated();
 }
 
+/// The technician clicked on the picture of the tablet.
+///
+/// Carries the session the picture belonged to, so that a click can never land
+/// on a session other than the one it was aimed at.
+final class WebRtcRemoteTapRequested extends WebRtcSessionEvent {
+  const WebRtcRemoteTapRequested({
+    required this.remoteSessionId,
+    required this.point,
+  });
+
+  final String remoteSessionId;
+  final NormalizedRemotePoint point;
+
+  @override
+  List<Object?> get props => [remoteSessionId, point];
+}
+
+/// Which session REST currently says is `ACTIVE` and not being closed, if any.
+///
+/// The BLoC only learns this from outside: `RemoteSession` is not its state, and
+/// WebRTC being connected says nothing about it.
+final class WebRtcRemoteSessionActivityChanged extends WebRtcSessionEvent {
+  const WebRtcRemoteSessionActivityChanged(this.activeRemoteSessionId);
+
+  final String? activeRemoteSessionId;
+
+  @override
+  List<Object?> get props => [activeRemoteSessionId];
+}
+
+/// A command ran out of time. Internal.
+final class _WebRtcRemoteCommandTimedOut extends WebRtcSessionEvent {
+  const _WebRtcRemoteCommandTimedOut(this.commandId, this.generation);
+
+  final String commandId;
+  final int generation;
+
+  @override
+  List<Object?> get props => [commandId, generation];
+}
+
 /// The peer connection reported something. Internal: only the BLoC raises it.
 final class _WebRtcPeerReported extends WebRtcSessionEvent {
   const _WebRtcPeerReported(this.event, this.generation);
