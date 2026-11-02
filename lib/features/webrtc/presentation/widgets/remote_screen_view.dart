@@ -4,7 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../../../remote_control/domain/entities/normalized_remote_point.dart';
-import '../../../remote_control/presentation/widgets/remote_tap_layer.dart';
+import '../../../remote_control/presentation/widgets/remote_control_gesture_layer.dart';
 import '../../domain/entities/remote_video_track.dart';
 import '../remote_screen/remote_video_renderer.dart';
 
@@ -31,18 +31,23 @@ typedef RemoteControlStatusBuilder =
 /// mounted widget, and a parent that wants a fresh one — a different remote
 /// session, for instance — gives this widget a different key.
 ///
-/// Clicks are only listened to over a real picture and when [onRemoteTap] is
-/// given. The placeholder, the bands left by `contain` and anything outside the
-/// surface never produce a tap. Keys are not listened to at all.
+/// The pointer is only listened to over a real picture and when [onRemoteTap]
+/// and [onRemoteSwipe] are given. The placeholder, the bands left by `contain`
+/// and anything outside the surface never produce a gesture. Keys are not
+/// listened to at all.
 class RemoteScreenView extends StatefulWidget {
   const RemoteScreenView({
     required this.track,
     required this.rendererFactory,
     required this.maxHeight,
     this.onRemoteTap,
+    this.onRemoteSwipe,
     this.controlStatusBuilder,
     super.key,
-  });
+  }) : assert(
+         (onRemoteTap == null) == (onRemoteSwipe == null),
+         'Remote control is either available or not.',
+       );
 
   /// The screen to show, or `null` while none is arriving.
   final RemoteVideoTrack? track;
@@ -55,6 +60,10 @@ class RemoteScreenView extends StatefulWidget {
   /// Called with the position on the tablet under a click. `null` while remote
   /// control cannot be used, which leaves the surface visual only.
   final ValueChanged<NormalizedRemotePoint>? onRemoteTap;
+
+  /// Called with a drag across the picture once it is over. `null` exactly when
+  /// [onRemoteTap] is.
+  final RemoteSwipeCallback? onRemoteSwipe;
 
   /// Builds what is said about remote control under the surface. Only this
   /// widget knows whether a picture is really being displayed: a track exists
@@ -111,6 +120,7 @@ class _RemoteScreenViewState extends State<RemoteScreenView> {
         // track is attached but nothing can be seen yet.
         final isWaiting = !isDisplaying || videoAspectRatio == null;
         final onRemoteTap = widget.onRemoteTap;
+        final onRemoteSwipe = widget.onRemoteSwipe;
         final controlStatusBuilder = widget.controlStatusBuilder;
 
         return LayoutBuilder(
@@ -145,11 +155,14 @@ class _RemoteScreenViewState extends State<RemoteScreenView> {
                                 child: _renderer.buildView(context),
                               ),
                             if (isWaiting) const _WaitingForScreen(),
-                            if (!isWaiting && onRemoteTap != null)
-                              RemoteTapLayer(
-                                key: const Key('remote_screen_tap_layer'),
+                            if (!isWaiting &&
+                                onRemoteTap != null &&
+                                onRemoteSwipe != null)
+                              RemoteControlGestureLayer(
+                                key: const Key('remote_screen_gesture_layer'),
                                 videoAspectRatio: () => _renderer.aspectRatio,
                                 onTap: onRemoteTap,
+                                onSwipe: onRemoteSwipe,
                               ),
                           ],
                         ),

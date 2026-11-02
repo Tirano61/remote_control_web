@@ -1,7 +1,9 @@
 import 'package:equatable/equatable.dart';
 
-/// What became of the last tap.
-enum RemoteTapOutcome {
+import 'remote_control_command.dart';
+
+/// What became of the last command.
+enum RemoteCommandOutcome {
   /// Handed to the channel; no acknowledgement yet.
   pending,
 
@@ -18,7 +20,7 @@ enum RemoteTapOutcome {
   incompatible,
 
   /// No acknowledgement in time. The gesture may still have run, which is why
-  /// a tap is never sent again on its own.
+  /// a command is never sent again on its own.
   timedOut,
 
   /// The channel stopped being open before the acknowledgement arrived.
@@ -28,23 +30,31 @@ enum RemoteTapOutcome {
   notSent,
 }
 
-/// The last tap, identified so that an acknowledgement can only ever speak about
-/// the command it names.
-final class RemoteTapFeedback extends Equatable {
-  const RemoteTapFeedback({required this.commandId, required this.outcome});
+/// The last command, identified so that an acknowledgement can only ever speak
+/// about the command it names.
+final class RemoteCommandFeedback extends Equatable {
+  const RemoteCommandFeedback({
+    required this.commandId,
+    required this.kind,
+    required this.outcome,
+  });
 
   final String commandId;
-  final RemoteTapOutcome outcome;
+
+  /// Whether the technician should read about a touch or about a stroke.
+  final RemoteCommandKind kind;
+
+  final RemoteCommandOutcome outcome;
 
   @override
-  List<Object?> get props => [commandId, outcome];
+  List<Object?> get props => [commandId, kind, outcome];
 }
 
 /// The remote control side of a negotiation.
 final class RemoteControlStatus extends Equatable {
   const RemoteControlStatus({
     this.isSessionActive = false,
-    this.lastTap,
+    this.lastCommand,
     this.pendingCommands = 0,
   });
 
@@ -52,11 +62,11 @@ final class RemoteControlStatus extends Equatable {
   /// closed. WebRTC alone never decides it.
   final bool isSessionActive;
 
-  final RemoteTapFeedback? lastTap;
+  final RemoteCommandFeedback? lastCommand;
 
   /// Commands sent and not yet settled.
   final int pendingCommands;
 
   @override
-  List<Object?> get props => [isSessionActive, lastTap, pendingCommands];
+  List<Object?> get props => [isSessionActive, lastCommand, pendingCommands];
 }

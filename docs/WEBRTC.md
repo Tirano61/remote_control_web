@@ -1,7 +1,7 @@
 # WebRTC on the technician console — decisions
 
-Stage: Prompt 12 (the tablet's screen is displayed and a click sends a tap; see
-[CONTROL_CHANNEL.md](CONTROL_CHANNEL.md)).
+Stage: Prompt 13 (the tablet's screen is displayed, a click sends a tap and a drag
+sends a swipe; see [CONTROL_CHANNEL.md](CONTROL_CHANNEL.md)).
 
 This document records the choices that are **not** part of the backend
 contract. `docs/backend/REALTIME.md` only relays SDP and ICE and is
@@ -115,9 +115,9 @@ through `onDataChannel`.
 Its state (`connecting`, `open`, `closing`, `closed`) is tracked apart from the
 peer connection state: `connected` does not imply the channel is already open.
 
-It carries one command, the tap, and its acknowledgement. The protocol and what
-each side does with it are in [CONTROL_CHANNEL.md](CONTROL_CHANNEL.md). Swipe,
-back, home and text are not defined.
+It carries two commands, the tap and the swipe, and their acknowledgements. The
+protocol and what each side does with it are in
+[CONTROL_CHANNEL.md](CONTROL_CHANNEL.md). Back, home and text are not defined.
 
 ## The screen: one `recvonly` video section
 
@@ -299,9 +299,9 @@ attached, the surface shows **"Esperando pantalla del dispositivo..."**. That
 is decided by the renderer reporting a size, never by a timer.
 
 Over a real picture, and only while remote control can be used, a layer on top
-of the view turns clicks into taps. The view itself is not touched, and neither
-the keyboard nor the wheel is listened to. See
-[CONTROL_CHANNEL.md](CONTROL_CHANNEL.md#from-a-pointer-to-a-coordinate).
+of the view turns clicks into taps and drags into swipes. The view itself is not
+touched, and the keyboard is not listened to. The wheel sends nothing. See
+[CONTROL_CHANNEL.md](CONTROL_CHANNEL.md#tap-or-swipe).
 
 ### What the console does not know
 

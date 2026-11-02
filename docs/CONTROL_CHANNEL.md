@@ -1,6 +1,7 @@
 # Control channel — `remote_control_web`
 
-How a click on the console becomes a touch on the tablet, seen from the web.
+How what the technician does on the picture becomes a gesture on the tablet, seen
+from the web.
 
 The protocol itself is an agreement with `remote_control_device`, carried peer
 to peer: the backend never sees it. Its source is
@@ -11,40 +12,51 @@ repeats what the web has to honour. How the channel is created is in
 ## The whole path
 
 ```text
-pointer up on the picture
-  -> RemoteTapLayer                  reads the size and the aspect ratio now
+pointer down, move, up on the picture
+  -> RemoteControlGestureLayer       reads the size and the aspect ratio each time
   -> RemoteVideoGeometry.normalize   video content rect, or nothing
   -> NormalizedRemotePoint           x, y in 0..1 over the frame
   -> WebRtcRemoteTapRequested        the BLoC checks the gate again
+     WebRtcRemoteSwipeRequested
   -> RemoteTapCommand                id from the generator
+     RemoteSwipeCommand
   -> PendingRemoteCommands           tracked before it is sent
   -> RemoteControlChannelCodec       the only JSON in the application
   -> `control` data channel
   -> Android dispatchGesture
   -> ack
   -> RemoteControlAckReceived        typed, or never published
-  -> RemoteTapFeedback               the line under the picture
+  -> RemoteCommandFeedback           the line under the picture
 ```
 
-Presentation knows normalized coordinates, tap intents and a status. It does not
-know `RTCDataChannel`, `RTCDataChannelMessage`, `jsonEncode` or `flutter_webrtc`.
+Presentation knows normalized coordinates, gesture intents and a status. It does
+not know `RTCDataChannel`, `RTCDataChannelMessage`, `jsonEncode` or `flutter_webrtc`.
 
 ## Protocol v1
 
-Only `tap`. One text frame holding one JSON object, on the existing `control`
-channel. No other channel is created.
+`tap` and `swipe`. One text frame holding one JSON object, on the existing
+`control` channel. No other channel is created.
 
 ```json
 {"v":1,"type":"tap","id":"tap-1","x":0.5,"y":0.25}
 ```
 
 ```json
-{"v":1,"type":"ack","id":"tap-1","ok":true}
+{"v":1,"type":"swipe","id":"swipe-2","startX":0.5,"startY":0.8,"endX":0.5,"endY":0.2,"durationMs":350}
+```
+
+```json
+{"v":1,"type":"ack","id":"swipe-2","ok":true}
 ```
 
 ```json
 {"v":1,"type":"ack","id":"tap-1","ok":false,"error":"accessibility_unavailable"}
 ```
+
+In a swipe the four coordinates are the same kind of value as a tap's, and
+`durationMs` is an integer in `50..2000`. The tablet refuses `350.0`, and refuses
+a swipe whose start equals its end. A tap has no `durationMs`: Android holds it
+for its own 50 ms.
 
 An ack is valid when `v == 1`, `type == "ack"`, `id` is a non-empty string and
 `ok` is a bool; with `ok: false`, `error` must also be a string. Anything else is
@@ -79,9 +91,10 @@ videoX = pointerX - offsetX           x = videoX / renderedWidth
 videoY = pointerY - offsetY           y = videoY / renderedHeight
 ```
 
-Origin at the top-left, x grows right, y grows down.
+Origin at the top-left, x grows right, y grows down. Both ends of a swipe go
+through this same conversion, each with the geometry of its own moment.
 
-### Letterbox and pillarbox clicks are ignored
+### Letterbox and pillarbox are not the picture
 
 A click on a band is not a touch on anything. It produces no command, no channel
 message and no gesture, and it is **never** moved to the nearest edge of the
@@ -100,25 +113,116 @@ new geometry and the rebuild, and the geometry is computed for that case too.
 ### Rotation needs no signal
 
 The size and the aspect ratio are read when the pointer event happens, from the
-renderer's current value, and never kept. The tablet can rotate during a session
-and the next click already uses the new geometry. Nothing hardcodes an orientation
-or a resolution.
+renderer's current value, and never carried over to the next gesture. The tablet
+can rotate during a session and the next gesture already uses the new geometry.
+Nothing hardcodes an orientation or a resolution.
 
 What cannot be avoided: between Android rotating and the browser being told, the
-picture on screen is still the old frame. A click in that instant is aimed at the
-old frame, and Android reads its display when the command runs. It is the same
+picture on screen is still the old frame. A gesture in that instant is aimed at
+the old frame, and Android reads its display when the command runs. It is the same
 limitation the tablet documents under `SCREEN_SHARING.md#noticing-a-rotation`.
 
-### What counts as a tap
+## Tap or swipe
 
-A press and release without a drag, with the primary button, acting on the
-pointer going **up**: the slop is the gesture recognizer's. A drag sends nothing.
-Keys, the wheel and every other gesture send nothing either.
+The press is followed by `RemoteControlGestureLayer`, with raw pointer events
+inside Flutter: no JavaScript and nothing on the `<video>` element.
 
-## When a click is accepted
+```text
+pointer down   on the picture, primary button: position, point, time and
+               geometry are kept. Anywhere else: this press is ignored for good
+pointer move   it may become a drag; nothing is ever sent from here
+pointer up     exactly one tap, one swipe, or nothing
+```
+
+Flutter keeps delivering a pointer that is down to the widget it went down on,
+wherever it goes, and the web engine listens on the window. So no capture is
+needed to notice a pointer leaving the picture.
+
+### The threshold
+
+`RemoteControlGestureLayer.dragThreshold` is **6 logical pixels** of the surface,
+measured as a straight distance from where the press started.
+
+```text
+distance <  6    a tap, where the pointer was released
+distance >= 6    a drag, and it stays one
+```
+
+The tablet's resolution plays no part: the threshold is about what the technician
+meant. A press held still for any length of time is still a tap.
+
+The web does not try to predict whether a drag collapses onto one physical pixel
+of the tablet. If it does, the tablet answers `gesture_rejected`, which is shown
+as such and never turned into a tap.
+
+A press that became a drag and was released **less than the threshold from where
+it started** sends nothing. It is not a tap, because the technician dragged; and
+a stroke of almost nothing, lasting as long as the detour did, would reach the
+tablet as a long press on whatever is there.
+
+Only the two ends are sent. A curved path arrives as a straight stroke, because
+the protocol has no other kind.
+
+### What drops a press
+
+All of these send nothing, neither a tap nor a swipe, and the next press starts
+clean.
+
+| What happened | Why |
+| --- | --- |
+| it started on a band or outside the picture | even if the pointer then enters the picture |
+| it left the picture, even by a pixel | **never clamped** to the edge, and **not** picked up again if it comes back |
+| the aspect ratio changed | see below |
+| the surface changed size | its positions no longer mean the same |
+| a second pointer went down | several fingers are not a gesture the tablet has |
+| another mouse button | on the press, or joining it on the way |
+| the wheel moved | it scrolls the page, and positions would stop being comparable |
+| the system cancelled the pointer | |
+| the layer went away | see [Cleanup](#cleanup) |
+
+Leaving the picture cancels rather than clamps because the alternative runs a
+gesture different from the one the technician made: a swipe that ends somewhere
+they never pointed at. Coming back does not revive it because a stroke that passed
+through a band was not a stroke on the tablet.
+
+### A rotation during the press
+
+The ratio is compared with the one the press started with at every pointer event,
+and also whenever the surface is rebuilt, because a pointer standing still reports
+nothing and the ratio could be back by the time it moves. Any difference drops the
+press: `start` would belong to a portrait screen and `end` to a landscape one.
+
+The comparison is exact. A resolution change that alters the ratio slightly also
+drops the press, which costs the technician one gesture and never runs a wrong one.
+
+### The duration
+
+```text
+durationMs = clamp(pointer up time - pointer down time, 50, 2000)
+```
+
+`RemoteSwipeCommand.durationMsFor`, from the timestamps of the pointer events
+themselves, so it is the time the gesture took and not the time it took to reach
+this code. There is no default for a normal interaction.
+
+```text
+20 ms -> 50     50 ms -> 50     180 ms -> 180     2000 ms -> 2000     3500 ms -> 2000
+```
+
+Clamping is correct here and wrong for a coordinate: the contract defines the range
+it can execute, and a different duration only changes the speed of the same stroke.
+A moved coordinate would touch something else.
+
+### A finger on the picture
+
+A touch drag would also move the console page, which sits in a scroll view. An
+otherwise empty `GestureDetector` inside the layer holds the gesture arena, so the
+page stays put and only the tablet moves. A mouse never scrolled the page this way.
+
+## When a gesture is accepted
 
 All of them, checked twice: the surface does not listen at all unless they hold,
-and the BLoC checks them again when the click arrives.
+and the BLoC checks them again when the gesture arrives. The same for both kinds.
 
 ```text
 RemoteSession ACTIVE, and not being closed    REST, through the coordinator
@@ -126,7 +230,7 @@ RTCPeerConnectionState connected              WebRtcSessionBloc
 control channel open                          WebRtcSessionBloc
 a remote video track                          WebRtcSessionBloc
 the renderer really displaying a picture      RemoteScreenView
-the click is aimed at the current session     WebRtcRemoteTapRequested
+aimed at the current session                  the event, tap or swipe
 ```
 
 The picture condition cannot be read from the track: `ontrack` fires when the
@@ -134,9 +238,9 @@ answer is applied, while the tablet may still be asking for MediaProjection
 consent. So until the renderer reports a size there is no pointer layer, and the
 line says `Control remoto: no disponible`.
 
-If anything is missing nothing is sent. **Clicks are not queued** while connecting:
-a touch that lands seconds later, on whatever is on screen by then, is worse than
-a click that did nothing.
+If anything is missing nothing is sent. **Gestures are not queued** while
+connecting: a touch that lands seconds later, on whatever is on screen by then, is
+worse than a click that did nothing.
 
 ## Pending commands
 
@@ -150,41 +254,74 @@ commandId -> pending command (with its deadline)
 | ack for an unknown id | ignored |
 | second ack for an id | ignored |
 | ack after the timeout | ignored; the timeout stands |
-| ack of an older tap | settles it; says nothing about the last tap |
+| ack of an older command | settles it; says nothing about the last one |
 
-The line under the picture follows the **last** tap. There is no history.
+The line under the picture follows the **last** command. There is no history.
 
-| Situation | Line |
-| --- | --- |
-| ready, no tap yet | `Control remoto: listo` |
-| ack pending | `Enviando toque...` |
-| `ok: true` | `Toque enviado` |
-| `accessibility_unavailable` | `El dispositivo no tiene habilitado el control remoto.` |
-| `session_not_active` | `La asistencia no está activa en el dispositivo.` |
-| `gesture_rejected` | `No se pudo ejecutar el toque.` |
-| timeout | `El dispositivo no confirmó el toque.` |
-| `invalid_command`, `unsupported_command`, unknown | `Control remoto no disponible` |
-| anything needed is missing | `Control remoto: no disponible` |
+| Situation | Tap | Swipe |
+| --- | --- | --- |
+| ready, nothing sent yet | `Control remoto: listo` | |
+| ack pending | `Enviando toque...` | `Enviando desplazamiento...` |
+| `ok: true` | `Toque enviado` | `Desplazamiento enviado` |
+| `gesture_rejected` | `No se pudo ejecutar el toque.` | `No se pudo ejecutar el desplazamiento.` |
+| timeout | `El dispositivo no confirmó el toque.` | `El dispositivo no confirmó el desplazamiento.` |
+| `accessibility_unavailable` | `El dispositivo no tiene habilitado el control remoto.` | the same |
+| `session_not_active` | `La asistencia no está activa en el dispositivo.` | the same |
+| `invalid_command`, `unsupported_command`, unknown | `Control remoto no disponible` | the same |
+| anything needed is missing | `Control remoto: no disponible` | the same |
 
 ### No automatic retry
 
 A command is sent at most once, whatever happens to it. A gesture may have run
 with its acknowledgement lost, so sending it again could press something twice.
-The technician clicks again if they want to.
+A swipe that expired is not repeated either: it could scroll twice. The technician
+repeats the gesture if they want to.
 
 ### ACK timeout
 
-Three seconds, per command (`WebRtcSessionBloc.defaultRemoteCommandTimeout`). The
-tablet sends nothing on a channel that closed or was replaced, so an answer may
-never come. The timeout reports and does nothing else.
+The tablet runs one gesture at a time, up to 16 waiting behind the running one, and
+a swipe may take two seconds. So a valid answer can take as long as everything sent
+before it, and a fixed three second wait would report as lost a swipe that is only
+behind others. Each command gets its own deadline when it is sent
+(`PendingRemoteCommands.deadlineFor`, a pure function):
+
+```text
+deadline = min(work of what is still pending ahead
+               + its own work
+               + margin,
+               45 s)
+
+work     tap 50 ms, swipe its durationMs
+margin   3 s  (WebRtcSessionBloc.defaultRemoteCommandMargin)
+```
+
+```text
+a tap alone                      3.05 s    the minimum is the margin: never under 3 s
+a swipe of 350 ms alone          3.35 s
+swipe 2 s behind a swipe of 2 s  7 s
+the 17th long swipe in a row     37 s
+```
+
+**45 seconds** is the ceiling (`PendingRemoteCommands.maxDeadline`): enough for
+everything the tablet accepts to hold, `17 x 2 s + 3 s = 37 s`, and beyond that the
+tablet answers `gesture_rejected` rather than queue.
+
+`ahead` is only what is still unanswered at that moment, and a deadline is never
+recalculated: it can only be generous, since the tablet may already have finished
+part of that work. The tablet also has a five second guard per gesture against a
+bridge that never answers. A queue full of those can outlive the ceiling, in which
+case the command is reported as timed out and its late ack ignored.
+
+The timeout reports and does nothing else. The tablet sends nothing on a channel
+that closed or was replaced, so an answer may never come.
 
 ## What each refusal does
 
 ```text
 accessibility_unavailable   a message; the session and the picture go on
-session_not_active          one GET /remote-sessions/current per refused tap;
+session_not_active          one GET /remote-sessions/current per refused command;
                             WebRTC is left alone; REST decides what happens
-gesture_rejected            a message
+gesture_rejected            a message; never turned into a tap, never sent again
 invalid_command             a log line and a message: a bug or a version mismatch
 unsupported_command         idem
 ```
@@ -194,10 +331,12 @@ None of them closes the `RemoteSession` or the peer connection.
 ## Cleanup
 
 ```text
-channel closing/closed       pending cleared at once, no deadline waited for,
-                             a tap still pending shown as not available
-session leaves ACTIVE        clicks stop, pending and feedback cleared
+channel closing/closed       pending cleared at once, tap and swipe, no deadline
+                             waited for, a command still pending shown as not
+                             available
+session leaves ACTIVE        gestures stop, pending and feedback cleared
 FINALIZAR pressed            idem, at the press and not at the backend's answer;
+                             a press under way is dropped with the layer;
                              a close that fails gives the control back
 session id changes           idem
 sign out                     idem, and the peer connection goes
@@ -205,16 +344,20 @@ peer connection failed       pending and feedback released with the negotiation
 new peer connection          starts with nothing pending
 ```
 
+The pointer layer exists only while control is available. A pointer already down
+when it goes away keeps reporting to the old layer, which ignores it, and a layer
+that comes back does not pick it up: only a new press starts a gesture.
+
 ## Generations
 
 Commands belong to the negotiation that sent them, and the existing generation
 guard covers them: an ack is a peer event, so one from a replaced or closed peer
 connection is dropped before it can touch anything, and a deadline carries the
-generation it was started in. An old `tap-1` can therefore not resolve a new
-`tap-1`, even if a generator repeated the id.
+generation it was started in. An old `swipe-1` can therefore not resolve a new
+`swipe-1`, even if a generator repeated the id.
 
-The default generator counts `tap-1`, `tap-2`, ... for as long as the page lives,
-and does not restart with a negotiation. It is injectable
+The default generator counts `tap-1`, `swipe-2`, `tap-3`, ... on one counter for
+as long as the page lives, and does not restart with a negotiation. It is injectable
 (`RemoteControlCommandIdGenerator`), and never derives an id from coordinates or
 screen content.
 
@@ -227,7 +370,46 @@ The toggle and the *full control* dialog are the user's, by hand, always.
 
 ### What has been observed on the physical tablet
 
-Chrome and a tablet running Android 14, with the Calculator as the target, because
+Chrome and a tablet running Android 14 (800x1280), with `remote_control_device` on
+`feature/device-remote-control-swipe`, and the accessibility toggle and every
+consent done by hand. Frames were read by wrapping `RTCDataChannel.prototype.send`
+in the page during the test, and scrolling was read from the picture and from
+`adb exec-out screencap`. Some strokes were real mouse drags from the browser
+extension, and those needing an exact distance or duration were `PointerEvent`s
+dispatched on the page, which go through the same Flutter path.
+
+Swipes, in the Settings list and in the overview of recent apps:
+
+```text
+tap regression: AC 7 8 in the Calculator     78, ack ok, tap completed on Android
+drag up, then down, Settings list            the list scrolls both ways, ack ok
+drag left, then right, recent apps           the cards move both ways, ack ok
+stroke of < 50 ms, 183, 1203, 3000 ms        durationMs 50, 183, 1203, 2000
+ack of a 2000 ms swipe                       2096 ms after it was sent
+landscape, up and down                       scrolls, aligned
+portrait -> landscape -> portrait, same
+  session and peer connection                correct, without an F5
+with the console page scrolled               correct
+5 px                                         tap
+exactly 6 px                                 swipe
+pressed beside the picture, entering it      nothing sent
+released beside the picture                  nothing sent
+left the picture and came back               nothing sent
+dragged away and brought back                nothing sent
+service disabled by hand                     ack accessibility_unavailable,
+                                             message, session and picture go on
+service enabled again                        swipes work, same session
+FINALIZAR with a swipe unanswered and a      the drag sends nothing, the ack that
+  drag under way                             arrives is ignored, the peer
+                                             connection closes
+```
+
+A swipe just over the threshold is a swipe on the wire, and the application under
+it may still read it as a press: 6 logical pixels were about 12 physical ones here,
+below Android's own touch slop, and a Calculator key registered it as a click. The
+web cannot know that, and does not try.
+
+Taps, as observed before swipes existed, with the Calculator as the target, because
 a wrong key shows up in the result.
 
 ```text
@@ -245,20 +427,22 @@ FINALIZAR, then clicks where the picture was no command
 ```
 
 Covered by automated tests only, and never seen on the device: bands inside the
-pointer layer, `session_not_active`, `gesture_rejected`, the timeout, the channel
-closing with a tap pending, a replaced peer connection, and FINALIZAR with an ack
-really in flight.
+pointer layer, a rotation during a press, a second pointer, the wheel during a
+press, a touch drag on a touch screen, `session_not_active`, `gesture_rejected`
+(including a swipe collapsing onto one pixel), the timeout, a long queue behind
+several swipes, the channel closing with a command pending, and a replaced peer
+connection.
 
 ## Logging
 
 ```text
-tap command sent <id>
-tap confirmed <id>
-tap timed out <id>
+tap command sent <id>            swipe command sent <id>
+tap confirmed <id>               swipe confirmed <id>
+tap timed out <id>               swipe timed out <id>
+remote tap ignored <session>     remote swipe ignored <session>
 remote control command rejected: <code>
 control message ignored <remoteSessionId>
 control ack ignored <id>
-remote tap ignored <remoteSessionId>
 ```
 
 Coordinates and frames are not logged, here or on the tablet.
