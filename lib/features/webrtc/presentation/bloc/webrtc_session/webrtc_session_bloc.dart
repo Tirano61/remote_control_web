@@ -177,7 +177,9 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     final generation = _generation;
     await _releaseNegotiation();
 
-    emit(_withNegotiationFacts(WebRtcPreparing(remoteSessionId: remoteSessionId)));
+    emit(
+      _withNegotiationFacts(WebRtcPreparing(remoteSessionId: remoteSessionId)),
+    );
 
     try {
       final session = await _peerClient.createSession(
@@ -435,7 +437,8 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
           RemoteCommandOutcome.accessibilityUnavailable,
         RemoteControlError.sessionNotActive =>
           RemoteCommandOutcome.sessionNotActive,
-        RemoteControlError.gestureRejected => RemoteCommandOutcome.gestureRejected,
+        RemoteControlError.gestureRejected =>
+          RemoteCommandOutcome.gestureRejected,
         RemoteControlError.invalidCommand ||
         RemoteControlError.unsupportedCommand ||
         RemoteControlError.unknown => RemoteCommandOutcome.incompatible,

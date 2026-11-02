@@ -113,8 +113,7 @@ class _LiveAssistance extends StatelessWidget {
                 key: const Key('remote_session_error_banner'),
                 message: state.failure!.message,
                 isError: true,
-                onDismiss: () =>
-                    bloc.add(const RemoteSessionNoticeDismissed()),
+                onDismiss: () => bloc.add(const RemoteSessionNoticeDismissed()),
               ),
               const SizedBox(height: 6),
               Align(

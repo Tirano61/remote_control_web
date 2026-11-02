@@ -140,7 +140,8 @@ void main() {
       'an empty id': '{"v":1,"type":"ack","id":"","ok":true}',
       'an id that is not a string': '{"v":1,"type":"ack","id":7,"ok":true}',
       'no ok': '{"v":1,"type":"ack","id":"tap-1"}',
-      'an ok that is not a bool': '{"v":1,"type":"ack","id":"tap-1","ok":"yes"}',
+      'an ok that is not a bool':
+          '{"v":1,"type":"ack","id":"tap-1","ok":"yes"}',
       'a refusal with no error': '{"v":1,"type":"ack","id":"tap-1","ok":false}',
       'a refusal whose error is not a string':
           '{"v":1,"type":"ack","id":"tap-1","ok":false,"error":3}',
