@@ -19,7 +19,7 @@ webrtc:offer / webrtc:answer / webrtc:ice-candidate relay
 RTCPeerConnection (flutter_webrtc), technician side as the offerer
 the control RTCDataChannel
 the tablet's screen, received as remote video
-remote control over that channel: tap, swipe, back and home
+remote control over that channel: tap, swipe, back, home and recents
 ```
 
 Not implemented yet: recent apps and text input. The commands and what each one

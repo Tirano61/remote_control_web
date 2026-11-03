@@ -2,11 +2,11 @@ import 'package:equatable/equatable.dart';
 
 import 'normalized_remote_point.dart';
 
-/// What a Back or a Home counts for in the tablet's queue. Not how long Android
+/// What a global action counts for in the tablet's queue. Not how long Android
 /// takes to animate it: nothing says that, and nothing here waits for it.
 const Duration remoteNavigationEstimatedWork = Duration(milliseconds: 50);
 
-/// How long after a Back or a Home was sent the screen is assumed to be still on
+/// How long after a global action was sent the screen is assumed to be still on
 /// its way somewhere else. See `RemoteNavigationGuard`.
 const Duration remoteNavigationSettleDuration = Duration(milliseconds: 350);
 
@@ -15,17 +15,18 @@ enum RemoteCommandKind {
   tap,
   swipe,
   back,
-  home;
+  home,
+  recents;
 
   /// A global action of Android, as opposed to a touch on the picture.
-  bool get isNavigation => this == back || this == home;
+  bool get isNavigation => this != tap && this != swipe;
 }
 
 /// Something the technician asks the tablet to do over the `control` channel.
 ///
 /// Sealed on purpose: the protocol is an agreement with `remote_control_device`,
 /// and a command exists here only once both sides implement it. Today that is
-/// the tap, the swipe, Back and Home, and nothing else.
+/// the tap, the swipe, Back, Home and Recents, and nothing else.
 sealed class RemoteControlCommand extends Equatable {
   const RemoteControlCommand({required this.id});
 
@@ -142,4 +143,15 @@ final class RemoteHomeCommand extends RemoteNavigationCommand {
 
   @override
   String toString() => 'RemoteHomeCommand($id)';
+}
+
+/// Android's overview of recent apps.
+final class RemoteRecentsCommand extends RemoteNavigationCommand {
+  const RemoteRecentsCommand({required super.id});
+
+  @override
+  RemoteCommandKind get kind => RemoteCommandKind.recents;
+
+  @override
+  String toString() => 'RemoteRecentsCommand($id)';
 }

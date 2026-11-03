@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -108,55 +110,119 @@ class _LiveAssistance extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (state.failure != null) ...[
-              ConsoleBanner(
-                key: const Key('remote_session_error_banner'),
-                message: state.failure!.message,
-                isError: true,
-                onDismiss: () => bloc.add(const RemoteSessionNoticeDismissed()),
+            // Everything that has to be on screen, inside one budget. What is
+            // not the picture is laid out first, whatever it takes at this width,
+            // and the picture gets what is left. So the bar stays in the window
+            // without moving the page, and not because of a guess about how tall
+            // it wrapped.
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: _remoteControlBudget(
+                  MediaQuery.sizeOf(context).height,
+                ),
               ),
-              const SizedBox(height: 6),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: TextButton.icon(
-                  key: const Key('remote_session_retry_button'),
-                  // An activation that failed on the way out is retried as
-                  // what it was. Everything else is recovered by re-reading
-                  // the backend, which is the console's usual answer.
-                  onPressed: () => bloc.add(
-                    state.canRetryActivation
-                        ? RemoteSessionActivationRequested(session.id)
-                        : const RemoteSessionRefreshRequested(),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (state.failure != null) ...[
+                    ConsoleBanner(
+                      key: const Key('remote_session_error_banner'),
+                      message: state.failure!.message,
+                      isError: true,
+                      onDismiss: () =>
+                          bloc.add(const RemoteSessionNoticeDismissed()),
+                    ),
+                    const SizedBox(height: 6),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        key: const Key('remote_session_retry_button'),
+                        // An activation that failed on the way out is retried
+                        // as what it was. Everything else is recovered by
+                        // re-reading the backend, which is the console's usual
+                        // answer.
+                        onPressed: () => bloc.add(
+                          state.canRetryActivation
+                              ? RemoteSessionActivationRequested(session.id)
+                              : const RemoteSessionRefreshRequested(),
+                        ),
+                        icon: const Icon(Icons.refresh, size: 18),
+                        label: const Text('REINTENTAR'),
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                  ],
+                  // On one line: a pixel spent here is a pixel less of picture.
+                  Wrap(
+                    spacing: 12,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      Text(
+                        session.deviceLabel,
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      if (session.devicePublicId != null)
+                        Text(
+                          session.devicePublicId!,
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                    ],
                   ),
-                  icon: const Icon(Icons.refresh, size: 18),
-                  label: const Text('REINTENTAR'),
-                ),
-              ),
-              const SizedBox(height: 6),
-            ],
-            Text(
-              session.deviceLabel,
-              style: theme.textTheme.titleMedium?.copyWith(
-                fontWeight: FontWeight.w700,
+                  const SizedBox(height: 14),
+                  // Keyed by the session: another assistance gets another
+                  // renderer, and the slot is matched by key however many
+                  // optional lines around it come and go.
+                  Flexible(
+                    key: ValueKey('remote_screen_${session.id}'),
+                    child: _RemoteScreen(
+                      remoteSessionId: session.id,
+                      rendererFactory: remoteVideoRendererFactory,
+                    ),
+                  ),
+                  // Under the picture and outside its pointer layer, never on
+                  // top of it.
+                  Wrap(
+                    key: const Key('remote_control_bar'),
+                    spacing: 8,
+                    runSpacing: 8,
+                    alignment: WrapAlignment.spaceBetween,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      _RemoteNavigationControls(remoteSessionId: session.id),
+                      FilledButton.icon(
+                        key: const Key('close_remote_session_button'),
+                        // Disabled while the close is in flight: the backend
+                        // answers `409` to a second one, and the user should
+                        // not have to see that.
+                        onPressed: state.isClosing
+                            ? null
+                            : () =>
+                                  bloc.add(const RemoteSessionCloseRequested()),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: theme.colorScheme.error,
+                          foregroundColor: theme.colorScheme.onError,
+                        ),
+                        icon: state.isClosing
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.stop_circle_outlined),
+                        label: const Text('FINALIZAR ASISTENCIA'),
+                      ),
+                    ],
+                  ),
+                ],
               ),
             ),
-            if (session.devicePublicId != null)
-              Text(
-                session.devicePublicId!,
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
-            const SizedBox(height: 14),
-            // Keyed by the session: another assistance gets another renderer,
-            // and the slot is matched by key however many optional lines
-            // around it come and go.
-            _RemoteScreen(
-              key: ValueKey('remote_screen_${session.id}'),
-              remoteSessionId: session.id,
-              rendererFactory: remoteVideoRendererFactory,
-            ),
-            _RemoteNavigationControls(remoteSessionId: session.id),
             const SizedBox(height: 14),
             Row(
               children: [
@@ -193,36 +259,31 @@ class _LiveAssistance extends StatelessWidget {
             const _AssistanceChannelStatus(),
             const SizedBox(height: 6),
             const _RemoteConnectionStatus(),
-            const SizedBox(height: 18),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: FilledButton.icon(
-                key: const Key('close_remote_session_button'),
-                // Disabled while the close is in flight: the backend answers
-                // `409` to a second one, and the user should not have to see
-                // that.
-                onPressed: state.isClosing
-                    ? null
-                    : () => bloc.add(const RemoteSessionCloseRequested()),
-                style: FilledButton.styleFrom(
-                  backgroundColor: theme.colorScheme.error,
-                  foregroundColor: theme.colorScheme.onError,
-                ),
-                icon: state.isClosing
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.stop_circle_outlined),
-                label: const Text('FINALIZAR ASISTENCIA'),
-              ),
-            ),
           ],
         ),
       ),
     );
   }
+
+  /// How tall what has to stay on screen may get together, for a window of
+  /// [viewportHeight].
+  ///
+  /// There is a floor, because in a very low window the bar has to be scrolled
+  /// to anyway and a picture of nothing would help nobody.
+  static double _remoteControlBudget(double viewportHeight) => math.max(
+    viewportHeight - _chromeAboveTheBudget - _spareHeight,
+    _minBudget,
+  );
+
+  /// What the page puts on top and no width changes: the app bar (56), the
+  /// padding of the page (20) and of the section (18), and the title of the
+  /// section with its subtitle and their gap (60).
+  static const double _chromeAboveTheBudget = 154;
+
+  /// So the bar never touches the edge of the window.
+  static const double _spareHeight = 16;
+
+  static const double _minBudget = 360;
 }
 
 /// The tablet's screen, while a peer connection for this session exists.
@@ -246,31 +307,23 @@ class _RemoteScreen extends StatelessWidget {
   const _RemoteScreen({
     required this.remoteSessionId,
     required this.rendererFactory,
-    super.key,
   });
 
   final String remoteSessionId;
   final RemoteVideoRendererFactory rendererFactory;
 
-  /// Share of the window height the picture may take. The rest is left for
-  /// the header, the diagnostics and FINALIZAR ASISTENCIA.
-  static const double _viewportShare = 0.7;
-  static const double _minHeight = 200;
+  /// However tall the window gets. How much room there is comes from the
+  /// parent, which takes what operates the picture out of it first.
   static const double _maxHeight = 900;
 
   @override
   Widget build(BuildContext context) {
-    final viewportHeight = MediaQuery.sizeOf(context).height;
-    final maxHeight = (viewportHeight * _viewportShare).clamp(
-      _minHeight,
-      _maxHeight,
-    );
-
     return BlocBuilder<WebRtcSessionBloc, WebRtcSessionState>(
       buildWhen: (previous, current) =>
           _isShown(previous) != _isShown(current) ||
           !identical(previous.remoteVideoTrack, current.remoteVideoTrack) ||
           previous.canSendRemoteControl != current.canSendRemoteControl ||
+          previous.canSendRemoteNavigation != current.canSendRemoteNavigation ||
           previous.remoteControl.lastCommand !=
               current.remoteControl.lastCommand ||
           previous.remoteControl.isNavigationSettling !=
@@ -278,18 +331,19 @@ class _RemoteScreen extends StatelessWidget {
       builder: (context, state) {
         if (!_isShown(state)) return const SizedBox.shrink();
         final canSend = state.canSendRemoteControl;
-        // Not listening while a Back or a Home settles: a press that starts on
+        // Not listening while a global action settles: a press that starts on
         // a picture on its way somewhere else is not picked up afterwards. The
         // line below says nothing about it, because it lasts an instant.
         final isListening =
             canSend && !state.remoteControl.isNavigationSettling;
         final lastCommand = state.remoteControl.lastCommand;
+        final isNavigation = lastCommand?.kind.isNavigation == true;
         return Padding(
-          padding: const EdgeInsets.only(bottom: 16),
+          padding: const EdgeInsets.only(bottom: 8),
           child: RemoteScreenView(
             track: state.remoteVideoTrack,
             rendererFactory: rendererFactory,
-            maxHeight: maxHeight,
+            maxHeight: _maxHeight,
             onRemoteTap: isListening
                 ? (point) => context.read<WebRtcSessionBloc>().add(
                     WebRtcRemoteTapRequested(
@@ -311,10 +365,10 @@ class _RemoteScreen extends StatelessWidget {
                 : null,
             controlStatusBuilder: (context, hasPicture) => _RemoteControlLine(
               isAvailable: canSend && hasPicture,
-              // Back and Home are spoken about next to their buttons.
-              lastCommand: lastCommand?.kind.isNavigation == true
-                  ? null
-                  : lastCommand,
+              lastCommand: isNavigation ? null : lastCommand,
+              lastNavigation: isNavigation && state.canSendRemoteNavigation
+                  ? lastCommand
+                  : null,
             ),
           ),
         );
@@ -328,8 +382,12 @@ class _RemoteScreen extends StatelessWidget {
       state.hasNegotiation && state.remoteSessionId == remoteSessionId;
 }
 
-/// One discreet line under the picture: whether gestures reach the tablet, and
-/// what became of the last one.
+/// One discreet line under the picture: whether gestures reach the tablet, what
+/// became of the last one, and at its end, right above the buttons, what became
+/// of the last global action.
+///
+/// Above the buttons rather than among them, so that a message coming and going
+/// never moves a button from under the pointer.
 ///
 /// A refusal is not an emergency. The picture keeps arriving and the assistance
 /// goes on, so nothing here takes over the screen.
@@ -337,10 +395,12 @@ class _RemoteControlLine extends StatelessWidget {
   const _RemoteControlLine({
     required this.isAvailable,
     required this.lastCommand,
+    required this.lastNavigation,
   });
 
   final bool isAvailable;
   final RemoteCommandFeedback? lastCommand;
+  final RemoteCommandFeedback? lastNavigation;
 
   @override
   Widget build(BuildContext context) {
@@ -354,6 +414,7 @@ class _RemoteControlLine extends StatelessWidget {
     final color = isProblem
         ? theme.colorScheme.error
         : theme.colorScheme.onSurfaceVariant;
+    final navigation = lastNavigation;
 
     return Row(
       children: [
@@ -366,14 +427,57 @@ class _RemoteControlLine extends StatelessWidget {
             style: theme.textTheme.bodySmall?.copyWith(color: color),
           ),
         ),
+        if (navigation != null) ...[
+          const SizedBox(width: 12),
+          Flexible(
+            child: Text(
+              key: const Key('remote_navigation_status'),
+              _navigationLabel(navigation),
+              textAlign: TextAlign.end,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: _isNavigationProblem(navigation.outcome)
+                    ? theme.colorScheme.error
+                    : theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ],
       ],
     );
+  }
+
+  static bool _isNavigationProblem(RemoteCommandOutcome outcome) =>
+      outcome != RemoteCommandOutcome.pending &&
+      outcome != RemoteCommandOutcome.confirmed;
+
+  static String _navigationLabel(RemoteCommandFeedback last) {
+    final name = switch (last.kind) {
+      RemoteCommandKind.back => 'Atrás',
+      RemoteCommandKind.home => 'Inicio',
+      RemoteCommandKind.recents => 'Recientes',
+      // Never asked for: the line gives these to `lastCommand`.
+      RemoteCommandKind.tap || RemoteCommandKind.swipe => last.kind.name,
+    };
+    return switch (last.outcome) {
+      RemoteCommandOutcome.pending => 'Enviando $name...',
+      RemoteCommandOutcome.confirmed => '$name enviado',
+      RemoteCommandOutcome.accessibilityUnavailable =>
+        'El dispositivo no tiene habilitado el control remoto.',
+      RemoteCommandOutcome.sessionNotActive =>
+        'La asistencia no está activa en el dispositivo.',
+      RemoteCommandOutcome.gestureRejected => 'No se pudo ejecutar la acción.',
+      RemoteCommandOutcome.timedOut => 'El dispositivo no confirmó la acción.',
+      RemoteCommandOutcome.incompatible ||
+      RemoteCommandOutcome.channelClosed ||
+      RemoteCommandOutcome.notSent => 'Control remoto no disponible',
+    };
   }
 
   static String _label(RemoteCommandFeedback? last) {
     if (last == null) return 'Control remoto: listo';
     final isSwipe = last.kind == RemoteCommandKind.swipe;
-    // Only a tap or a swipe gets here: see _RemoteNavigationControls.
+    // Only a tap or a swipe gets here: global actions have their own end of
+    // the line.
     return switch (last.outcome) {
       RemoteCommandOutcome.pending =>
         isSwipe ? 'Enviando desplazamiento...' : 'Enviando toque...',
@@ -398,7 +502,7 @@ class _RemoteControlLine extends StatelessWidget {
   }
 }
 
-/// Android's Back and Home, and what became of the last one.
+/// Android's Back, Home and Recents.
 ///
 /// They sit outside the picture and outside its pointer layer, and they do not
 /// depend on the picture either: these are global actions, so they work while the
@@ -415,25 +519,17 @@ class _RemoteNavigationControls extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
     return BlocBuilder<WebRtcSessionBloc, WebRtcSessionState>(
       builder: (context, state) {
-        final isAvailable =
-            state.remoteSessionId == remoteSessionId &&
-            state.canSendRemoteNavigation;
         final isEnabled =
-            isAvailable && !state.remoteControl.isNavigationSettling;
-        final lastCommand = state.remoteControl.lastCommand;
-        final feedback = isAvailable && lastCommand != null
-            ? _label(lastCommand)
-            : null;
+            state.remoteSessionId == remoteSessionId &&
+            state.canSendRemoteNavigation &&
+            !state.remoteControl.isNavigationSettling;
         final bloc = context.read<WebRtcSessionBloc>();
 
         return Wrap(
           spacing: 8,
           runSpacing: 8,
-          crossAxisAlignment: WrapCrossAlignment.center,
           children: [
             OutlinedButton.icon(
               key: const Key('remote_back_button'),
@@ -459,47 +555,22 @@ class _RemoteNavigationControls extends StatelessWidget {
               icon: const Icon(Icons.home_outlined, size: 18),
               label: const Text('Inicio'),
             ),
-            if (feedback != null)
-              Text(
-                key: const Key('remote_navigation_status'),
-                feedback,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: _isProblem(lastCommand!.outcome)
-                      ? theme.colorScheme.error
-                      : theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
+            OutlinedButton.icon(
+              key: const Key('remote_recents_button'),
+              onPressed: isEnabled
+                  ? () => bloc.add(
+                      WebRtcRemoteRecentsRequested(
+                        remoteSessionId: remoteSessionId,
+                      ),
+                    )
+                  : null,
+              icon: const Icon(Icons.crop_square, size: 18),
+              label: const Text('Recientes'),
+            ),
           ],
         );
       },
     );
-  }
-
-  static bool _isProblem(RemoteCommandOutcome outcome) =>
-      outcome != RemoteCommandOutcome.pending &&
-      outcome != RemoteCommandOutcome.confirmed;
-
-  /// `null` for a tap or a swipe: the line under the picture speaks about those.
-  static String? _label(RemoteCommandFeedback last) {
-    final name = switch (last.kind) {
-      RemoteCommandKind.back => 'Atrás',
-      RemoteCommandKind.home => 'Inicio',
-      RemoteCommandKind.tap || RemoteCommandKind.swipe => null,
-    };
-    if (name == null) return null;
-    return switch (last.outcome) {
-      RemoteCommandOutcome.pending => 'Enviando $name...',
-      RemoteCommandOutcome.confirmed => '$name enviado',
-      RemoteCommandOutcome.accessibilityUnavailable =>
-        'El dispositivo no tiene habilitado el control remoto.',
-      RemoteCommandOutcome.sessionNotActive =>
-        'La asistencia no está activa en el dispositivo.',
-      RemoteCommandOutcome.gestureRejected => 'No se pudo ejecutar la acción.',
-      RemoteCommandOutcome.timedOut => 'El dispositivo no confirmó la acción.',
-      RemoteCommandOutcome.incompatible ||
-      RemoteCommandOutcome.channelClosed ||
-      RemoteCommandOutcome.notSent => 'Control remoto no disponible',
-    };
   }
 }
 

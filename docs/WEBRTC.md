@@ -1,7 +1,7 @@
 # WebRTC on the technician console — decisions
 
-Stage: Prompt 14 (the tablet's screen is displayed, a click sends a tap, a drag
-sends a swipe, and two buttons send Back and Home; see
+Stage: Prompt 15 (the tablet's screen is displayed, a click sends a tap, a drag
+sends a swipe, and three buttons send Back, Home and Recents; see
 [CONTROL_CHANNEL.md](CONTROL_CHANNEL.md)).
 
 This document records the choices that are **not** part of the backend
@@ -116,7 +116,7 @@ through `onDataChannel`.
 Its state (`connecting`, `open`, `closing`, `closed`) is tracked apart from the
 peer connection state: `connected` does not imply the channel is already open.
 
-It carries four commands, the tap, the swipe, Back and Home, and their
+It carries five commands, the tap, the swipe, Back, Home and Recents, and their
 acknowledgements. The protocol and what each side does with it are in
 [CONTROL_CHANNEL.md](CONTROL_CHANNEL.md). Text is not defined.
 
@@ -154,8 +154,8 @@ Nothing is degraded by the absence of a screen. The assistance is established
 when the peer connection is `connected` **and** `control` is `open`, exactly as
 before. "Control connected" and "screen available" are two different facts:
 the second never gates the first, and never gates `POST /remote-sessions/:id/activate`.
-It does not gate Back and Home either: they work without a picture, and only a tap
-or a swipe needs one to aim at
+It does not gate Back, Home and Recents either: they work without a picture, and only
+a tap or a swipe needs one to aim at
 ([CONTROL_CHANNEL.md](CONTROL_CHANNEL.md#they-need-no-picture)).
 
 ### Why a transceiver
@@ -295,8 +295,10 @@ The surface is laid out with the aspect ratio the stream itself reports
 (`RTCVideoValue`, updated on `canplay` and `resize`). Nothing is hardcoded —
 the physical tablet happens to capture 1280x800, but a rotation or another
 resolution simply reports another ratio and the surface reshapes. The surface
-takes the full width of the assistance block, at most 70% of the window
-height, and the largest box of the video's ratio that fits both.
+takes the full width of the assistance block and the height left in the window
+once the buttons under it are on screen, and the largest box of the video's
+ratio that fits both. See
+[CONTROL_CHANNEL.md](CONTROL_CHANNEL.md#the-bar-stays-on-screen).
 
 Until the first frames have told their size, and whenever no track is
 attached, the surface shows **"Esperando pantalla del dispositivo..."**. That
@@ -307,7 +309,7 @@ of the view turns clicks into taps and drags into swipes. The view itself is not
 touched, and the keyboard is not listened to. The wheel sends nothing. See
 [CONTROL_CHANNEL.md](CONTROL_CHANNEL.md#tap-or-swipe).
 
-For the 350 ms after a Back or a Home is sent, or until it is answered if that takes
+For the 350 ms after a global action is sent, or until it is answered if that takes
 longer, the layer is not there: the transition is still running, so a click would
 land somewhere the technician did not aim at. The picture itself keeps arriving and
 the renderer is left alone. See

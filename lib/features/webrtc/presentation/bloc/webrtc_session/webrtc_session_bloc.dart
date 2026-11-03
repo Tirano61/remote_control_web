@@ -58,7 +58,7 @@ part 'webrtc_session_state.dart';
 /// and an acknowledgement from a replaced peer connection is dropped like any
 /// other late callback. A command is sent at most once. Nothing queues a gesture
 /// and nothing repeats one, because it may have run even when its acknowledgement
-/// was lost. While a Back or a Home settles, new commands are dropped rather than
+/// was lost. While a global action settles, new commands are dropped rather than
 /// held for later, for the same reason.
 ///
 /// Security: SDP and ICE candidate contents never reach the log, and neither do
@@ -89,6 +89,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     on<WebRtcRemoteSwipeRequested>(_onRemoteSwipeRequested);
     on<WebRtcRemoteBackRequested>(_onRemoteBackRequested);
     on<WebRtcRemoteHomeRequested>(_onRemoteHomeRequested);
+    on<WebRtcRemoteRecentsRequested>(_onRemoteRecentsRequested);
     on<WebRtcRemoteSessionActivityChanged>(_onRemoteSessionActivityChanged);
     on<_WebRtcRemoteCommandTimedOut>(_onRemoteCommandTimedOut);
     on<_WebRtcRemoteNavigationSettled>(_onRemoteNavigationSettled);
@@ -157,7 +158,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   /// The most recent command of the current negotiation.
   RemoteCommandFeedback? _lastRemoteCommand;
 
-  /// Holds new commands back while a Back or a Home of the current negotiation
+  /// Holds new commands back while a global action of the current negotiation
   /// is under way.
   final RemoteNavigationGuard _navigationGuard;
 
@@ -390,10 +391,32 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     );
   }
 
+  /// The Recientes button.
+  Future<void> _onRemoteRecentsRequested(
+    WebRtcRemoteRecentsRequested event,
+    Emitter<WebRtcSessionState> emit,
+  ) async {
+    final session = _sessionAcceptingCommands(
+      event.remoteSessionId,
+      isAvailable: state.canSendRemoteNavigation,
+    );
+    if (session == null) {
+      logDebug('remote recents ignored ${event.remoteSessionId}');
+      return;
+    }
+    await _sendRemoteCommand(
+      session,
+      RemoteRecentsCommand(
+        id: _commandIdGenerator.next(RemoteCommandKind.recents),
+      ),
+      emit,
+    );
+  }
+
   /// The session a command aimed at [remoteSessionId] may be sent on, if any.
   ///
-  /// [isAvailable] is what this kind of command asks of the state. A Back or a
-  /// Home settling holds back every kind alike.
+  /// [isAvailable] is what this kind of command asks of the state. A global
+  /// action settling holds back every kind alike.
   WebRtcPeerSession? _sessionAcceptingCommands(
     String remoteSessionId, {
     required bool isAvailable,
