@@ -89,6 +89,11 @@ class _Harness {
     run();
   }
 
+  void recents({String id = _sessionId}) {
+    bloc.add(WebRtcRemoteRecentsRequested(remoteSessionId: id));
+    run();
+  }
+
   void tap() {
     bloc.add(
       const WebRtcRemoteTapRequested(
@@ -281,6 +286,511 @@ void main() {
         expect(h.peers.sessions, isEmpty);
         expect(h.bloc.state, isA<WebRtcIdle>());
       });
+    });
+  });
+
+  group('Recents', () {
+    group('what it takes to send', () {
+      test('ACTIVE, connected and control open: it goes out', () {
+        onClock((h) {
+          h.ready();
+          expect(h.bloc.state.canSendRemoteNavigation, isTrue);
+
+          h.recents();
+
+          expect(h.peers.last.sentRemoteControlCommands, const [
+            RemoteRecentsCommand(id: 'recents-1'),
+          ]);
+        });
+      });
+
+      test('a session still CONNECTING', () {
+        onClock((h) {
+          h.negotiate();
+          h.peers.last
+            ..emitControlChannelState(WebRtcDataChannelState.open)
+            ..emitPeerState(WebRtcPeerConnectionState.connected);
+          h.run();
+
+          h.recents();
+
+          expect(h.sent, isEmpty);
+          expect(h.isSettling, isFalse);
+        });
+      });
+
+      for (final channelState in const [
+        WebRtcDataChannelState.connecting,
+        WebRtcDataChannelState.closing,
+        WebRtcDataChannelState.closed,
+      ]) {
+        test('a channel ${channelState.name}', () {
+          onClock((h) {
+            h.ready();
+            h.peers.last.emitControlChannelState(channelState);
+            h.run();
+
+            h.recents();
+
+            expect(h.sent, isEmpty);
+          });
+        });
+      }
+
+      test('the session being closed', () {
+        onClock((h) {
+          h.ready();
+          h.bloc.add(const WebRtcRemoteSessionActivityChanged(null));
+          h.run();
+
+          h.recents();
+
+          expect(h.sent, isEmpty);
+        });
+      });
+
+      test('aimed at another session', () {
+        onClock((h) {
+          h.ready();
+
+          h.recents(id: _otherSessionId);
+
+          expect(h.sent, isEmpty);
+          expect(h.isSettling, isFalse);
+        });
+      });
+    });
+
+    test('no picture: Recents goes out, a tap and a swipe do not', () {
+      onClock((h) {
+        h.readyWithoutVideo();
+
+        expect(h.bloc.state.remoteVideoTrack, isNull);
+        expect(h.bloc.state.canSendRemoteNavigation, isTrue);
+        expect(h.bloc.state.canSendRemoteControl, isFalse);
+
+        h.tap();
+        h.swipe();
+        expect(h.sent, isEmpty);
+
+        h.recents();
+        expect(h.sent, ['recents-1']);
+
+        h.ack('recents-1');
+        h.wait(350);
+        expect(h.outcome, RemoteCommandOutcome.confirmed);
+        expect(h.isSettling, isFalse);
+      });
+    });
+
+    test('sent, pending, answered', () {
+      onClock((h) {
+        h.ready();
+
+        h.recents();
+        expect(h.status.pendingCommands, 1);
+        expect(
+          h.status.lastCommand,
+          const RemoteCommandFeedback(
+            commandId: 'recents-1',
+            kind: RemoteCommandKind.recents,
+            outcome: RemoteCommandOutcome.pending,
+          ),
+        );
+
+        h.ack('recents-1');
+        expect(h.status.pendingCommands, 0);
+        expect(
+          h.status.lastCommand,
+          const RemoteCommandFeedback(
+            commandId: 'recents-1',
+            kind: RemoteCommandKind.recents,
+            outcome: RemoteCommandOutcome.confirmed,
+          ),
+        );
+      });
+    });
+
+    test('it shares one sequence of ids with everything else', () {
+      onClock((h) {
+        h.ready();
+
+        h.tap();
+        h.ack('tap-1');
+        h.recents();
+        h.ack('recents-2');
+        h.wait(350);
+        h.home();
+
+        expect(h.sent, ['tap-1', 'recents-2', 'home-3']);
+      });
+    });
+
+    test('only its own answer resolves it', () {
+      onClock((h) {
+        h.ready();
+        h.recents();
+
+        h.ack('recents-999');
+        h.wait(350);
+
+        expect(h.outcome, RemoteCommandOutcome.pending);
+        expect(h.isSettling, isTrue);
+
+        h.ack('recents-1');
+        expect(h.outcome, RemoteCommandOutcome.confirmed);
+
+        h.ack('recents-1');
+        expect(h.outcome, RemoteCommandOutcome.confirmed);
+      });
+    });
+
+    test('a channel that refuses the message is reported at once', () {
+      onClock((h) {
+        h.ready();
+        h.peers.last.acceptsRemoteControlCommands = false;
+
+        h.recents();
+
+        expect(h.status.pendingCommands, 0);
+        expect(h.outcome, RemoteCommandOutcome.notSent);
+        expect(h.isSettling, isFalse);
+      });
+    });
+
+    group('timeout', () {
+      test('50 ms of work and the margin, not a timeout of its own', () {
+        onClock((h) {
+          h.ready();
+          h.recents();
+
+          h.wait(3049);
+          expect(h.outcome, RemoteCommandOutcome.pending);
+
+          h.wait(1);
+          expect(h.outcome, RemoteCommandOutcome.timedOut);
+          expect(h.status.pendingCommands, 0);
+          expect(h.isSettling, isFalse);
+        });
+      });
+
+      test('what is pending ahead of it counts', () {
+        onClock((h) {
+          h.ready();
+          h.swipe();
+          h.recents();
+
+          // The swipe's 350 ms, its own 50 ms and the margin.
+          h.wait(3399);
+          expect(h.outcome, RemoteCommandOutcome.pending);
+
+          h.wait(1);
+          expect(h.outcome, RemoteCommandOutcome.timedOut);
+        });
+      });
+
+      test('an answer after it changes nothing, and it is not sent again', () {
+        onClock((h) {
+          h.ready();
+          h.recents();
+          h.wait(3050);
+
+          h.ack('recents-1');
+          h.wait(60000);
+
+          expect(h.outcome, RemoteCommandOutcome.timedOut);
+          expect(h.sent, ['recents-1']);
+        });
+      });
+    });
+
+    group('the guard', () {
+      test('an answer at 50 ms holds until 350 ms', () {
+        onClock((h) {
+          h.ready();
+
+          h.recents();
+          expect(h.isSettling, isTrue);
+
+          h.wait(50);
+          h.ack('recents-1');
+          expect(h.outcome, RemoteCommandOutcome.confirmed);
+          expect(h.isSettling, isTrue);
+
+          h.wait(299);
+          expect(h.isSettling, isTrue);
+
+          h.wait(1);
+          expect(h.isSettling, isFalse);
+        });
+      });
+
+      test('an answer at 500 ms frees at 500 ms, with nothing added', () {
+        onClock((h) {
+          h.ready();
+
+          h.recents();
+          h.wait(350);
+          expect(h.isSettling, isTrue);
+
+          h.wait(150);
+          expect(h.isSettling, isTrue);
+
+          h.ack('recents-1');
+          expect(h.isSettling, isFalse);
+        });
+      });
+
+      test('nothing goes out during it, and a tap does afterwards', () {
+        onClock((h) {
+          h.ready();
+          h.recents();
+          h.wait(50);
+          h.ack('recents-1');
+          h.wait(150);
+
+          h.tap();
+          h.swipe();
+          h.back();
+          h.home();
+          h.recents();
+          expect(h.sent, ['recents-1']);
+
+          h.wait(150);
+          h.tap();
+          expect(h.sent, ['recents-1', 'tap-2']);
+        });
+      });
+
+      test('it also holds what a Back or a Home started', () {
+        onClock((h) {
+          h.ready();
+
+          h.back();
+          h.recents();
+          expect(h.sent, ['back-1']);
+
+          h.ack('back-1');
+          h.wait(350);
+
+          h.home();
+          h.recents();
+          expect(h.sent, ['back-1', 'home-2']);
+        });
+      });
+
+      test('a double click in the same turn is one action', () {
+        onClock((h) {
+          h.ready();
+
+          h.bloc
+            ..add(
+              const WebRtcRemoteRecentsRequested(remoteSessionId: _sessionId),
+            )
+            ..add(
+              const WebRtcRemoteRecentsRequested(remoteSessionId: _sessionId),
+            );
+          h.run();
+
+          expect(h.sent, ['recents-1']);
+        });
+      });
+
+      test('nothing dropped comes back afterwards', () {
+        onClock((h) {
+          h.ready();
+          h.recents();
+          h.tap();
+          h.swipe();
+
+          h.ack('recents-1');
+          h.wait(5000);
+
+          expect(h.sent, ['recents-1']);
+        });
+      });
+
+      test('the answer to an older tap does not end it', () {
+        onClock((h) {
+          h.ready();
+          h.tap();
+          h.recents();
+          h.wait(350);
+
+          h.ack('tap-1');
+          expect(h.isSettling, isTrue);
+          expect(h.outcome, RemoteCommandOutcome.pending);
+
+          h.ack('recents-2');
+          expect(h.isSettling, isFalse);
+        });
+      });
+    });
+
+    group('a refused action frees the control at once', () {
+      const refusals = {
+        RemoteControlError.accessibilityUnavailable:
+            RemoteCommandOutcome.accessibilityUnavailable,
+        RemoteControlError.gestureRejected:
+            RemoteCommandOutcome.gestureRejected,
+        RemoteControlError.sessionNotActive:
+            RemoteCommandOutcome.sessionNotActive,
+        RemoteControlError.invalidCommand: RemoteCommandOutcome.incompatible,
+        RemoteControlError.unsupportedCommand:
+            RemoteCommandOutcome.incompatible,
+      };
+
+      refusals.forEach((error, outcome) {
+        test(error.code, () {
+          onClock((h) {
+            h.ready();
+            h.recents();
+
+            h.wait(40);
+            h.ack('recents-1', error: error);
+
+            expect(h.outcome, outcome);
+            expect(h.isSettling, isFalse);
+            expect(h.peers.last.isClosed, isFalse);
+            expect(h.bloc.state, isA<WebRtcConnected>());
+
+            h.tap();
+            expect(h.sent, ['recents-1', 'tap-2']);
+          });
+        });
+      });
+    });
+
+    group('cleanup', () {
+      test('the session closing, with it pending', () {
+        onClock((h) {
+          h.ready();
+          h.recents();
+
+          h.bloc.add(const WebRtcRemoteSessionActivityChanged(null));
+          h.run();
+
+          expect(h.status.pendingCommands, 0);
+          expect(h.status.lastCommand, isNull);
+          expect(h.isSettling, isFalse);
+          expect(h.time.pendingTimers, isEmpty);
+
+          h.recents();
+          expect(h.sent, ['recents-1']);
+        });
+      });
+
+      test('the session closing, with it answered and settling', () {
+        onClock((h) {
+          h.ready();
+          h.recents();
+          h.ack('recents-1');
+          expect(h.isSettling, isTrue);
+
+          h.bloc.add(const WebRtcRemoteSessionActivityChanged(null));
+          h.run();
+
+          expect(h.isSettling, isFalse);
+          expect(h.status.lastCommand, isNull);
+          expect(h.time.pendingTimers, isEmpty);
+        });
+      });
+
+      test('the channel closing', () {
+        onClock((h) {
+          h.ready();
+          h.recents();
+          h.ack('recents-1');
+
+          h.peers.last.emitControlChannelState(WebRtcDataChannelState.closed);
+          h.run();
+
+          expect(h.isSettling, isFalse);
+          expect(h.time.pendingTimers, isEmpty);
+        });
+      });
+
+      test('the peer connection failing', () {
+        onClock((h) {
+          h.ready();
+          h.recents();
+
+          h.peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+          h.run();
+
+          expect(h.bloc.state, isA<WebRtcFailed>());
+          expect(h.bloc.state.remoteControl, const RemoteControlStatus());
+          expect(h.time.pendingTimers, isEmpty);
+        });
+      });
+    });
+
+    group('generations', () {
+      FakeWebRtcPeerSession replacedByNewPeer(_Harness h) {
+        h.ready();
+        final replaced = h.peers.last;
+        h.recents();
+        h.wait(100);
+
+        h.peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+        h.run();
+        h.ready();
+        return replaced;
+      }
+
+      test('the answer of a replaced channel does not end the new guard', () {
+        onClock((h) {
+          final replaced = replacedByNewPeer(h);
+          h.recents();
+
+          replaced.emitRemoteControlAck('recents-1');
+          h.run();
+          h.wait(350);
+
+          expect(h.isSettling, isTrue);
+          expect(h.outcome, RemoteCommandOutcome.pending);
+
+          h.ack('recents-1');
+          expect(h.isSettling, isFalse);
+          expect(h.outcome, RemoteCommandOutcome.confirmed);
+        }, ids: _FixedCommandIds(['recents-1', 'recents-1']));
+      });
+
+      test('a refusal of a replaced channel changes nothing new', () {
+        onClock((h) {
+          final replaced = replacedByNewPeer(h);
+          h.recents();
+
+          replaced.emitRemoteControlAck(
+            'recents-1',
+            error: RemoteControlError.gestureRejected,
+          );
+          h.run();
+
+          expect(h.isSettling, isTrue);
+          expect(h.outcome, RemoteCommandOutcome.pending);
+          expect(h.status.pendingCommands, 1);
+        }, ids: _FixedCommandIds(['recents-1', 'recents-1']));
+      });
+
+      test(
+        'the settle time of a replaced channel does not end the new guard',
+        () {
+          onClock((h) {
+            replacedByNewPeer(h);
+            h.wait(200);
+            h.recents();
+            h.ack('recents-2');
+
+            // Where the first one would have settled, this one has only had 50 ms.
+            h.wait(50);
+            expect(h.isSettling, isTrue);
+
+            h.wait(300);
+            expect(h.isSettling, isFalse);
+          });
+        },
+      );
     });
   });
 
