@@ -456,7 +456,9 @@ class _RemoteControlLine extends StatelessWidget {
       RemoteCommandKind.home => 'Inicio',
       RemoteCommandKind.recents => 'Recientes',
       // Never asked for: the line gives these to `lastCommand`.
-      RemoteCommandKind.tap || RemoteCommandKind.swipe => last.kind.name,
+      RemoteCommandKind.tap ||
+      RemoteCommandKind.swipe ||
+      RemoteCommandKind.setText => last.kind.name,
     };
     return switch (last.outcome) {
       RemoteCommandOutcome.pending => 'Enviando $name...',
@@ -465,7 +467,9 @@ class _RemoteControlLine extends StatelessWidget {
         'El dispositivo no tiene habilitado el control remoto.',
       RemoteCommandOutcome.sessionNotActive =>
         'La asistencia no está activa en el dispositivo.',
-      RemoteCommandOutcome.gestureRejected => 'No se pudo ejecutar la acción.',
+      RemoteCommandOutcome.gestureRejected ||
+      RemoteCommandOutcome.textTargetUnavailable ||
+      RemoteCommandOutcome.textRejected => 'No se pudo ejecutar la acción.',
       RemoteCommandOutcome.timedOut => 'El dispositivo no confirmó la acción.',
       RemoteCommandOutcome.incompatible ||
       RemoteCommandOutcome.channelClosed ||
@@ -487,7 +491,9 @@ class _RemoteControlLine extends StatelessWidget {
         'El dispositivo no tiene habilitado el control remoto.',
       RemoteCommandOutcome.sessionNotActive =>
         'La asistencia no está activa en el dispositivo.',
-      RemoteCommandOutcome.gestureRejected =>
+      RemoteCommandOutcome.gestureRejected ||
+      RemoteCommandOutcome.textTargetUnavailable ||
+      RemoteCommandOutcome.textRejected =>
         isSwipe
             ? 'No se pudo ejecutar el desplazamiento.'
             : 'No se pudo ejecutar el toque.',

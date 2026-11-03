@@ -1,3 +1,5 @@
+import 'dart:developer' as developer;
+
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_web/features/remote_control/domain/entities/normalized_remote_point.dart';
@@ -84,6 +86,22 @@ void main() {
 
       expect(
         deadline(const RemoteBackCommand(id: 'last'), ahead),
+        PendingRemoteCommands.maxDeadline,
+      );
+    });
+
+    test('a text alone is its five seconds and the margin', () {
+      expect(
+        deadline(const RemoteSetTextCommand(id: 'a', text: 'b')),
+        const Duration(seconds: 8),
+      );
+    });
+
+    test('a text stops at the same maximum', () {
+      final ahead = [for (var i = 0; i < 40; i++) swipe('$i', 2000)];
+
+      expect(
+        deadline(const RemoteSetTextCommand(id: 'last', text: 'b'), ahead),
         PendingRemoteCommands.maxDeadline,
       );
     });
@@ -207,6 +225,69 @@ void main() {
       });
     });
 
+    group('a text', () {
+      const sentinel = 'SUPER_SECRET_REMOTE_TEXT_123';
+
+      test('what is kept while waiting is not the command', () {
+        fakeAsync((time) {
+          final pending = PendingRemoteCommands(margin: margin);
+          pending.track(
+            const RemoteSetTextCommand(id: 'text-1', text: sentinel),
+            onTimeout: expired.add,
+          );
+
+          final kept = pending.commands.single;
+          expect(kept, isNot(isA<RemoteControlCommand>()));
+          expect(kept.commandId, 'text-1');
+          expect(kept.kind, RemoteCommandKind.setText);
+          expect(kept.estimatedWork, remoteSetTextEstimatedWork);
+          expect(kept.props, isNot(contains(sentinel)));
+          expect('$kept', isNot(contains(sentinel)));
+
+          final settled = pending.settle('text-1')!;
+          expect(settled, isNot(isA<RemoteControlCommand>()));
+          expect(settled, kept);
+        });
+      });
+
+      test('its deadline is eight seconds', () {
+        fakeAsync((time) {
+          final pending = PendingRemoteCommands(margin: margin);
+          pending.track(
+            const RemoteSetTextCommand(id: 'text-1', text: sentinel),
+            onTimeout: expired.add,
+          );
+
+          time.elapse(const Duration(milliseconds: 7999));
+          expect(expired, isEmpty);
+
+          time.elapse(const Duration(milliseconds: 1));
+          expect(expired, ['text-1']);
+        });
+      });
+
+      test('neither the map nor the deadline keep the command alive', () async {
+        final pending = PendingRemoteCommands(margin: margin);
+
+        WeakReference<RemoteSetTextCommand> tracked() {
+          final command = RemoteSetTextCommand(
+            id: 'text-1',
+            // Not a constant: those are never collected.
+            text: String.fromCharCodes(sentinel.codeUnits),
+          );
+          pending.track(command, onTimeout: expired.add);
+          return WeakReference(command);
+        }
+
+        final reference = tracked();
+        await _collectGarbage();
+
+        expect(pending.length, 1);
+        expect(reference.target, isNull);
+        pending.clear();
+      });
+    });
+
     test('clearing cancels every deadline, tap or swipe', () {
       fakeAsync((time) {
         final pending = PendingRemoteCommands(margin: margin);
@@ -223,4 +304,16 @@ void main() {
       });
     });
   });
+}
+
+/// Allocates until the VM has been through full collections, which is the only
+/// way to see that something is really not referenced any more.
+Future<void> _collectGarbage() async {
+  final barrier = developer.reachabilityBarrier;
+  final storage = <List<int>>[];
+  while (developer.reachabilityBarrier < barrier + 2) {
+    await Future<void>.delayed(Duration.zero);
+    storage.add(List.generate(30000, (n) => n));
+    if (storage.length > 100) storage.removeAt(0);
+  }
 }

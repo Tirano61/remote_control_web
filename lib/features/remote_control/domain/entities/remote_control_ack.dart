@@ -20,6 +20,13 @@ enum RemoteControlError {
   /// The tablet does not know this command or protocol version.
   unsupportedCommand('unsupported_command'),
 
+  /// A valid text with nowhere to go: no active window, nothing with input focus,
+  /// or a focused node that is not editable or not enabled.
+  textTargetUnavailable('text_target_unavailable'),
+
+  /// There was somewhere to write, and `ACTION_SET_TEXT` did not take it.
+  textRejected('text_rejected'),
+
   /// A code this version does not know. The tablet did answer that the command
   /// failed, which is all that can be said about it.
   unknown('unknown');
@@ -38,8 +45,9 @@ enum RemoteControlError {
 /// What `ok: true` promises depends on the command. For a tap or a swipe, Android
 /// reported the gesture **completed**, not that it was requested. For Back or
 /// Home, Android **accepted** the global action, which may still be animating and
-/// may have had no visible effect at all. A command may also never get an answer,
-/// so the sender keeps its own timeout.
+/// may have had no visible effect at all. For a text, the focused node **accepted**
+/// `ACTION_SET_TEXT`, and nothing says what the field ended up holding. A command may
+/// also never get an answer, so the sender keeps its own timeout.
 final class RemoteControlAck extends Equatable {
   const RemoteControlAck({required this.commandId, this.error});
 

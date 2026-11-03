@@ -553,6 +553,9 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
           RemoteCommandOutcome.sessionNotActive,
         RemoteControlError.gestureRejected =>
           RemoteCommandOutcome.gestureRejected,
+        RemoteControlError.textTargetUnavailable =>
+          RemoteCommandOutcome.textTargetUnavailable,
+        RemoteControlError.textRejected => RemoteCommandOutcome.textRejected,
         RemoteControlError.invalidCommand ||
         RemoteControlError.unsupportedCommand ||
         RemoteControlError.unknown => RemoteCommandOutcome.incompatible,
