@@ -37,23 +37,47 @@ void main() {
       expect(deadline(swipe('a', 350)), const Duration(milliseconds: 3350));
     });
 
-    test('Back and Home alone are their 50 ms and the margin', () {
+    test('Back, Home and Recents alone are their 50 ms and the margin', () {
       const expected = Duration(milliseconds: 3050);
 
       expect(deadline(const RemoteBackCommand(id: 'a')), expected);
       expect(deadline(const RemoteHomeCommand(id: 'a')), expected);
+      expect(deadline(const RemoteRecentsCommand(id: 'a')), expected);
     });
 
-    test('Back and Home wait for what is ahead, and count for what follows', () {
+    test('Recents waits for what is ahead, and counts for what follows', () {
       expect(
-        deadline(const RemoteHomeCommand(id: 'b'), [swipe('a', 2000)]),
+        deadline(const RemoteRecentsCommand(id: 'b'), [swipe('a', 2000)]),
         const Duration(milliseconds: 2000 + 50 + 3000),
       );
       expect(
-        deadline(tap('b'), [const RemoteBackCommand(id: 'a')]),
+        deadline(tap('b'), [const RemoteRecentsCommand(id: 'a')]),
         const Duration(milliseconds: 50 + 50 + 3000),
       );
     });
+
+    test('Recents stops at the same maximum', () {
+      final ahead = [for (var i = 0; i < 40; i++) swipe('$i', 2000)];
+
+      expect(
+        deadline(const RemoteRecentsCommand(id: 'last'), ahead),
+        PendingRemoteCommands.maxDeadline,
+      );
+    });
+
+    test(
+      'Back and Home wait for what is ahead, and count for what follows',
+      () {
+        expect(
+          deadline(const RemoteHomeCommand(id: 'b'), [swipe('a', 2000)]),
+          const Duration(milliseconds: 2000 + 50 + 3000),
+        );
+        expect(
+          deadline(tap('b'), [const RemoteBackCommand(id: 'a')]),
+          const Duration(milliseconds: 50 + 50 + 3000),
+        );
+      },
+    );
 
     test('Back and Home stop at the same maximum', () {
       final ahead = [for (var i = 0; i < 40; i++) swipe('$i', 2000)];

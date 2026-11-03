@@ -83,8 +83,9 @@ void main() {
       expect(WebRtcIceConfiguration.fromStunUrl(null).isLanOnly, isTrue);
       expect(WebRtcIceConfiguration.fromStunUrl('   ').isLanOnly, isTrue);
       expect(
-        WebRtcIceConfiguration.fromStunUrl(' stun:host:3478 ').iceServers.single
-            .urls,
+        WebRtcIceConfiguration.fromStunUrl(
+          ' stun:host:3478 ',
+        ).iceServers.single.urls,
         'stun:host:3478',
       );
     });
@@ -117,8 +118,7 @@ void main() {
       const expected = {
         rtc.RTCDataChannelState.RTCDataChannelConnecting:
             WebRtcDataChannelState.connecting,
-        rtc.RTCDataChannelState.RTCDataChannelOpen:
-            WebRtcDataChannelState.open,
+        rtc.RTCDataChannelState.RTCDataChannelOpen: WebRtcDataChannelState.open,
         rtc.RTCDataChannelState.RTCDataChannelClosing:
             WebRtcDataChannelState.closing,
         rtc.RTCDataChannelState.RTCDataChannelClosed:
@@ -234,15 +234,18 @@ void main() {
       streams: streams,
     );
 
-    test('the peer connection is built with the configured ICE servers', () async {
-      await createSession();
+    test(
+      'the peer connection is built with the configured ICE servers',
+      () async {
+        await createSession();
 
-      expect(configurations.single, {
-        'iceServers': [
-          {'urls': 'stun:host:3478'},
-        ],
-      });
-    });
+        expect(configurations.single, {
+          'iceServers': [
+            {'urls': 'stun:host:3478'},
+          ],
+        });
+      },
+    );
 
     test('exactly one control channel is created', () async {
       final session = await createSession();
@@ -291,16 +294,19 @@ void main() {
       expect(session.createLocalOffer, throwsStateError);
     });
 
-    test('the answer is applied as a remote description of type answer', () async {
-      final session = await createSession();
+    test(
+      'the answer is applied as a remote description of type answer',
+      () async {
+        final session = await createSession();
 
-      await session.applyRemoteAnswer(
-        const WebRtcAnswer(remoteSessionId: sessionId, sdp: 'v=0 answer'),
-      );
+        await session.applyRemoteAnswer(
+          const WebRtcAnswer(remoteSessionId: sessionId, sdp: 'v=0 answer'),
+        );
 
-      expect(connection.remoteDescriptions.single.type, 'answer');
-      expect(connection.remoteDescriptions.single.sdp, 'v=0 answer');
-    });
+        expect(connection.remoteDescriptions.single.type, 'answer');
+        expect(connection.remoteDescriptions.single.sdp, 'v=0 answer');
+      },
+    );
 
     test('a remote candidate is handed to addCandidate', () async {
       final session = await createSession();
@@ -359,38 +365,41 @@ void main() {
       );
     });
 
-    test('channel states and acknowledgements are published, decoded', () async {
-      final session = await createSession();
-      await session.openControlChannel();
-      final events = <WebRtcPeerEvent>[];
-      session.events.listen(events.add);
-      final channel = connection.dataChannel!;
+    test(
+      'channel states and acknowledgements are published, decoded',
+      () async {
+        final session = await createSession();
+        await session.openControlChannel();
+        final events = <WebRtcPeerEvent>[];
+        session.events.listen(events.add);
+        final channel = connection.dataChannel!;
 
-      channel.onDataChannelState!(
-        rtc.RTCDataChannelState.RTCDataChannelOpen,
-      );
-      channel.onMessage!(
-        rtc.RTCDataChannelMessage('{"v":1,"type":"ack","id":"tap-1","ok":true}'),
-      );
-      channel.onMessage!(
-        rtc.RTCDataChannelMessage(
-          '{"v":1,"type":"ack","id":"tap-2","ok":false,'
-          '"error":"accessibility_unavailable"}',
-        ),
-      );
-      await Future<void>.delayed(Duration.zero);
-
-      expect(events, [
-        const ControlChannelStateChanged(WebRtcDataChannelState.open),
-        const RemoteControlAckReceived(RemoteControlAck(commandId: 'tap-1')),
-        const RemoteControlAckReceived(
-          RemoteControlAck(
-            commandId: 'tap-2',
-            error: RemoteControlError.accessibilityUnavailable,
+        channel.onDataChannelState!(rtc.RTCDataChannelState.RTCDataChannelOpen);
+        channel.onMessage!(
+          rtc.RTCDataChannelMessage(
+            '{"v":1,"type":"ack","id":"tap-1","ok":true}',
           ),
-        ),
-      ]);
-    });
+        );
+        channel.onMessage!(
+          rtc.RTCDataChannelMessage(
+            '{"v":1,"type":"ack","id":"tap-2","ok":false,'
+            '"error":"accessibility_unavailable"}',
+          ),
+        );
+        await Future<void>.delayed(Duration.zero);
+
+        expect(events, [
+          const ControlChannelStateChanged(WebRtcDataChannelState.open),
+          const RemoteControlAckReceived(RemoteControlAck(commandId: 'tap-1')),
+          const RemoteControlAckReceived(
+            RemoteControlAck(
+              commandId: 'tap-2',
+              error: RemoteControlError.accessibilityUnavailable,
+            ),
+          ),
+        ]);
+      },
+    );
 
     test('anything that is not a valid acknowledgement is dropped', () async {
       final session = await createSession();
@@ -460,33 +469,55 @@ void main() {
         expect(connection.dataChannelLabels, ['control']);
       });
 
-      test('Back and Home go out on the same channel, as protocol frames', () async {
-        final session = await createSession();
-        await session.openControlChannel();
-        connection.dataChannel!.channelState =
-            rtc.RTCDataChannelState.RTCDataChannelOpen;
+      test(
+        'Recents goes out on the same channel, as a protocol frame',
+        () async {
+          final session = await createSession();
+          await session.openControlChannel();
+          connection.dataChannel!.channelState =
+              rtc.RTCDataChannelState.RTCDataChannelOpen;
 
-        expect(
-          await session.sendRemoteControlCommand(
-            const RemoteBackCommand(id: 'back-1'),
-          ),
-          isTrue,
-        );
-        expect(
-          await session.sendRemoteControlCommand(
-            const RemoteHomeCommand(id: 'home-2'),
-          ),
-          isTrue,
-        );
+          expect(
+            await session.sendRemoteControlCommand(
+              const RemoteRecentsCommand(id: 'recents-1'),
+            ),
+            isTrue,
+          );
 
-        expect(
-          connection.dataChannel!.sentMessages.map((m) => m.text),
-          [
+          expect(connection.dataChannelLabels, ['control']);
+          expect(connection.dataChannel!.sentMessages.map((m) => m.text), [
+            '{"v":1,"type":"recents","id":"recents-1"}',
+          ]);
+        },
+      );
+
+      test(
+        'Back and Home go out on the same channel, as protocol frames',
+        () async {
+          final session = await createSession();
+          await session.openControlChannel();
+          connection.dataChannel!.channelState =
+              rtc.RTCDataChannelState.RTCDataChannelOpen;
+
+          expect(
+            await session.sendRemoteControlCommand(
+              const RemoteBackCommand(id: 'back-1'),
+            ),
+            isTrue,
+          );
+          expect(
+            await session.sendRemoteControlCommand(
+              const RemoteHomeCommand(id: 'home-2'),
+            ),
+            isTrue,
+          );
+
+          expect(connection.dataChannel!.sentMessages.map((m) => m.text), [
             '{"v":1,"type":"back","id":"back-1"}',
             '{"v":1,"type":"home","id":"home-2"}',
-          ],
-        );
-      });
+          ]);
+        },
+      );
 
       test('nothing is sent without a channel', () async {
         final session = await createSession();
@@ -568,22 +599,25 @@ void main() {
       expect(connection.transceiverKinds, hasLength(1));
     });
 
-    test('everything the offer describes exists before it is created', () async {
-      final session = await createSession();
+    test(
+      'everything the offer describes exists before it is created',
+      () async {
+        final session = await createSession();
 
-      await session.openControlChannel();
-      await session.prepareScreenVideoReceiver();
-      final offer = await session.createLocalOffer();
+        await session.openControlChannel();
+        await session.prepareScreenVideoReceiver();
+        final offer = await session.createLocalOffer();
 
-      expect(connection.calls, [
-        'createDataChannel',
-        'addTransceiver',
-        'createOffer',
-        'setLocalDescription',
-      ]);
-      // The SDP is whatever WebRTC produced: no m-section is written here.
-      expect(offer.sdp, connection.offerSdp);
-    });
+        expect(connection.calls, [
+          'createDataChannel',
+          'addTransceiver',
+          'createOffer',
+          'setLocalDescription',
+        ]);
+        // The SDP is whatever WebRTC produced: no m-section is written here.
+        expect(offer.sdp, connection.offerSdp);
+      },
+    );
 
     test('nothing is negotiated for a session already closed', () async {
       final session = await createSession();
@@ -654,22 +688,25 @@ void main() {
       expect(session.remoteVideoTrack, isNull);
     });
 
-    test('closing releases the channel, the peer connection and the stream', () async {
-      final session = await createSession();
-      await session.openControlChannel();
-      final channel = connection.dataChannel!;
+    test(
+      'closing releases the channel, the peer connection and the stream',
+      () async {
+        final session = await createSession();
+        await session.openControlChannel();
+        final channel = connection.dataChannel!;
 
-      await session.close();
+        await session.close();
 
-      expect(channel.closeCount, 1);
-      expect(connection.closeCount, 1);
-      expect(connection.disposeCount, 1);
-      // Detached: a callback firing during the teardown reaches nobody.
-      expect(connection.onIceCandidate, isNull);
-      expect(connection.onConnectionState, isNull);
-      expect(session.events.isBroadcast, isTrue);
-      expect(() => session.events.listen((_) {}), returnsNormally);
-    });
+        expect(channel.closeCount, 1);
+        expect(connection.closeCount, 1);
+        expect(connection.disposeCount, 1);
+        // Detached: a callback firing during the teardown reaches nobody.
+        expect(connection.onIceCandidate, isNull);
+        expect(connection.onConnectionState, isNull);
+        expect(session.events.isBroadcast, isTrue);
+        expect(() => session.events.listen((_) {}), returnsNormally);
+      },
+    );
 
     test('closing lets go of the remote video track', () async {
       final session = await createAdapterSession();

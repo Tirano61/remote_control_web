@@ -58,14 +58,14 @@ sealed class WebRtcSessionState extends Equatable {
   /// The remote control side of this negotiation.
   RemoteControlStatus get remoteControl => const RemoteControlStatus();
 
-  /// Whether a global action, Back or Home, can reach the tablet.
+  /// Whether a global action, Back, Home or Recents, can reach the tablet.
   ///
   /// Every condition matters on its own: an open channel on a session that is
   /// not `ACTIVE` would only get `session_not_active` back. The picture is not
   /// one of them. These are not touches, and the tablet runs them whether or not
   /// it is sharing its screen.
   ///
-  /// A Back or a Home still settling holds everything back for a moment without
+  /// A global action still settling holds everything back for a moment without
   /// making anything unavailable: see [RemoteControlStatus.isNavigationSettling].
   bool get canSendRemoteNavigation =>
       isConnected && isControlChannelOpen && remoteControl.isSessionActive;

@@ -97,6 +97,16 @@ final class WebRtcRemoteHomeRequested extends WebRtcSessionEvent {
   List<Object?> get props => [remoteSessionId];
 }
 
+/// The technician pressed Recientes. See [WebRtcRemoteBackRequested].
+final class WebRtcRemoteRecentsRequested extends WebRtcSessionEvent {
+  const WebRtcRemoteRecentsRequested({required this.remoteSessionId});
+
+  final String remoteSessionId;
+
+  @override
+  List<Object?> get props => [remoteSessionId];
+}
+
 /// Which session REST currently says is `ACTIVE` and not being closed, if any.
 ///
 /// The BLoC only learns this from outside: `RemoteSession` is not its state, and
@@ -121,7 +131,7 @@ final class _WebRtcRemoteCommandTimedOut extends WebRtcSessionEvent {
   List<Object?> get props => [commandId, generation];
 }
 
-/// The settle time of a Back or a Home has passed. Internal.
+/// The settle time of a global action has passed. Internal.
 final class _WebRtcRemoteNavigationSettled extends WebRtcSessionEvent {
   const _WebRtcRemoteNavigationSettled(this.commandId, this.generation);
 
