@@ -1346,7 +1346,7 @@ void main() {
         final editor = tester.widget<TextField>(field);
         expect(editor.autocorrect, isFalse);
         expect(editor.enableSuggestions, isFalse);
-        expect(editor.autofillHints, isEmpty);
+        expect(editor.autofillHints, isNull);
         expect(editor.inputFormatters, isNull);
         expect(editor.maxLength, isNull);
         expect(editor.keyboardType, TextInputType.multiline);

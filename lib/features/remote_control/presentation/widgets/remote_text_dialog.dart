@@ -95,6 +95,11 @@ class _RemoteTextDialogState extends State<RemoteTextDialog> {
                     maxLines: 6,
                     autocorrect: false,
                     enableSuggestions: false,
+                    // Null, not the default empty list, which still enables
+                    // autofill: the browser would get autocomplete="on", and the
+                    // web engine would keep the element with the text in the page
+                    // after this widget is gone, waiting for that context to end.
+                    autofillHints: null,
                     decoration: InputDecoration(
                       border: const OutlineInputBorder(),
                       counterText: '$length / $maxRemoteTextLength',
