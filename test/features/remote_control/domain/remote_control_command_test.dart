@@ -82,10 +82,10 @@ void main() {
     });
 
     test('only they are navigation', () {
-      expect(
-        RemoteCommandKind.values.where((kind) => kind.isNavigation),
-        [RemoteCommandKind.back, RemoteCommandKind.home],
-      );
+      expect(RemoteCommandKind.values.where((kind) => kind.isNavigation), [
+        RemoteCommandKind.back,
+        RemoteCommandKind.home,
+      ]);
     });
 
     test('what gets printed is the id', () {

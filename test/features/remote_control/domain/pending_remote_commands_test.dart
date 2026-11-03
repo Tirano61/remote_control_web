@@ -44,16 +44,19 @@ void main() {
       expect(deadline(const RemoteHomeCommand(id: 'a')), expected);
     });
 
-    test('Back and Home wait for what is ahead, and count for what follows', () {
-      expect(
-        deadline(const RemoteHomeCommand(id: 'b'), [swipe('a', 2000)]),
-        const Duration(milliseconds: 2000 + 50 + 3000),
-      );
-      expect(
-        deadline(tap('b'), [const RemoteBackCommand(id: 'a')]),
-        const Duration(milliseconds: 50 + 50 + 3000),
-      );
-    });
+    test(
+      'Back and Home wait for what is ahead, and count for what follows',
+      () {
+        expect(
+          deadline(const RemoteHomeCommand(id: 'b'), [swipe('a', 2000)]),
+          const Duration(milliseconds: 2000 + 50 + 3000),
+        );
+        expect(
+          deadline(tap('b'), [const RemoteBackCommand(id: 'a')]),
+          const Duration(milliseconds: 50 + 50 + 3000),
+        );
+      },
+    );
 
     test('Back and Home stop at the same maximum', () {
       final ahead = [for (var i = 0; i < 40; i++) swipe('$i', 2000)];
