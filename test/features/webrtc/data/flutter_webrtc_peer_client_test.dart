@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:remote_control_web/features/remote_control/domain/entities/normalized_remote_point.dart';
@@ -467,6 +468,32 @@ void main() {
           '"endX":0.5,"endY":0.2,"durationMs":350}',
         );
         expect(connection.dataChannelLabels, ['control']);
+      });
+
+      test('a text goes out on the same channel, and not in the log', () async {
+        const sentinel = 'SUPER_SECRET_REMOTE_TEXT_123';
+        final printed = <String?>[];
+        final previous = debugPrint;
+        debugPrint = (message, {wrapWidth}) => printed.add(message);
+        addTearDown(() => debugPrint = previous);
+
+        final session = await createSession();
+        await session.openControlChannel();
+        connection.dataChannel!.channelState =
+            rtc.RTCDataChannelState.RTCDataChannelOpen;
+
+        expect(
+          await session.sendRemoteControlCommand(
+            const RemoteSetTextCommand(id: 'text-1', text: sentinel),
+          ),
+          isTrue,
+        );
+
+        expect(connection.dataChannelLabels, ['control']);
+        expect(connection.dataChannel!.sentMessages.map((m) => m.text), [
+          '{"v":1,"type":"set_text","id":"text-1","text":"$sentinel"}',
+        ]);
+        expect(printed.join(), isNot(contains(sentinel)));
       });
 
       test(

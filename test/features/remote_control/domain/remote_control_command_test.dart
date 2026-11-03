@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_web/features/remote_control/domain/entities/normalized_remote_point.dart';
 import 'package:remote_control_web/features/remote_control/domain/entities/remote_control_command.dart';
 import 'package:remote_control_web/features/remote_control/domain/services/remote_control_command_id_generator.dart';
+import 'package:remote_control_web/features/webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dart';
 
 void main() {
   const start = NormalizedRemotePoint(0.5, 0.8);
@@ -144,6 +145,13 @@ void main() {
 
       expect(command.toString(), 'RemoteSetTextCommand(text-1)');
       expect('$command', isNot(contains(sentinel)));
+      expect(
+        const WebRtcRemoteTextRequested(
+          remoteSessionId: 'session',
+          text: sentinel,
+        ).toString(),
+        isNot(contains(sentinel)),
+      );
     });
 
     test('nothing normalizes what was written', () {
