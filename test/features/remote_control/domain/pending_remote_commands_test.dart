@@ -24,8 +24,8 @@ void main() {
       RemoteControlCommand command, [
       List<RemoteControlCommand> ahead = const [],
     ]) => PendingRemoteCommands.deadlineFor(
-      command,
-      ahead: ahead,
+      command.estimatedWork,
+      ahead: ahead.map((pending) => pending.estimatedWork),
       margin: margin,
     );
 
@@ -186,13 +186,19 @@ void main() {
       });
     });
 
-    test('settling cancels the deadline and gives the command back', () {
+    test('settling cancels the deadline and says what it was', () {
       fakeAsync((time) {
         final pending = PendingRemoteCommands(margin: margin);
-        final command = swipe('a', 350);
-        pending.track(command, onTimeout: expired.add);
+        pending.track(swipe('a', 350), onTimeout: expired.add);
 
-        expect(pending.settle('a'), command);
+        expect(
+          pending.settle('a'),
+          const PendingRemoteCommand(
+            commandId: 'a',
+            kind: RemoteCommandKind.swipe,
+            estimatedWork: Duration(milliseconds: 350),
+          ),
+        );
         expect(pending.settle('a'), isNull);
 
         time.elapse(const Duration(minutes: 1));
