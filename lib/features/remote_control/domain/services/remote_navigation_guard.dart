@@ -1,6 +1,6 @@
 import 'dart:async';
 
-/// Keeps new commands away from the tablet while a Back or a Home is under way.
+/// Keeps new commands away from the tablet while a global action is under way.
 ///
 /// Android acknowledges a global action as soon as it accepts it, with the
 /// transition still animating, so a tap right after the answer to a Home could

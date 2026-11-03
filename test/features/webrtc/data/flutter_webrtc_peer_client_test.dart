@@ -470,6 +470,28 @@ void main() {
       });
 
       test(
+        'Recents goes out on the same channel, as a protocol frame',
+        () async {
+          final session = await createSession();
+          await session.openControlChannel();
+          connection.dataChannel!.channelState =
+              rtc.RTCDataChannelState.RTCDataChannelOpen;
+
+          expect(
+            await session.sendRemoteControlCommand(
+              const RemoteRecentsCommand(id: 'recents-1'),
+            ),
+            isTrue,
+          );
+
+          expect(connection.dataChannelLabels, ['control']);
+          expect(connection.dataChannel!.sentMessages.map((m) => m.text), [
+            '{"v":1,"type":"recents","id":"recents-1"}',
+          ]);
+        },
+      );
+
+      test(
         'Back and Home go out on the same channel, as protocol frames',
         () async {
           final session = await createSession();

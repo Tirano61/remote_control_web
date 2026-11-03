@@ -63,6 +63,48 @@ void main() {
     });
   });
 
+  group('recents', () {
+    test('produces exactly the fields of the protocol', () {
+      expect(
+        RemoteControlChannelCodec.encode(
+          const RemoteRecentsCommand(id: 'recents-1'),
+        ),
+        '{"v":1,"type":"recents","id":"recents-1"}',
+      );
+    });
+
+    test('nothing else goes on the wire', () {
+      final frame =
+          jsonDecode(
+                RemoteControlChannelCodec.encode(
+                  const RemoteRecentsCommand(id: 'recents-1'),
+                ),
+              )
+              as Map<String, dynamic>;
+
+      expect(frame.keys, unorderedEquals(['v', 'type', 'id']));
+    });
+
+    test('its ack is read like any other', () {
+      expect(
+        RemoteControlChannelCodec.decodeAck(
+          '{"v":1,"type":"ack","id":"recents-1","ok":true}',
+        ),
+        const RemoteControlAck(commandId: 'recents-1'),
+      );
+      expect(
+        RemoteControlChannelCodec.decodeAck(
+          '{"v":1,"type":"ack","id":"recents-1","ok":false,'
+          '"error":"accessibility_unavailable"}',
+        ),
+        const RemoteControlAck(
+          commandId: 'recents-1',
+          error: RemoteControlError.accessibilityUnavailable,
+        ),
+      );
+    });
+  });
+
   group('swipe', () {
     test('produces exactly the fields of the protocol', () {
       expect(

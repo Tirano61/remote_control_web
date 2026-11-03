@@ -484,6 +484,7 @@ class _RemoteNavigationControls extends StatelessWidget {
     final name = switch (last.kind) {
       RemoteCommandKind.back => 'Atrás',
       RemoteCommandKind.home => 'Inicio',
+      RemoteCommandKind.recents => 'Recientes',
       RemoteCommandKind.tap || RemoteCommandKind.swipe => null,
     };
     if (name == null) return null;
