@@ -1,7 +1,8 @@
 # Control channel — `remote_control_web`
 
 How what the technician does on the picture becomes a gesture on the tablet, and
-what the Atrás, Inicio and Recientes buttons become, seen from the web.
+what the Atrás, Inicio and Recientes buttons and the Texto dialog become, seen from
+the web.
 
 The protocol itself is an agreement with `remote_control_device`, carried peer
 to peer: the backend never sees it. Its source is
@@ -48,13 +49,28 @@ Atrás, Inicio, Recientes
   -> RemoteCommandFeedback           the end of the line above the buttons
 ```
 
+A text joins it at the event too, and only from an explicit press in its dialog:
+
+```text
+técnico sees the field focused on the picture -> Texto -> writes -> Enviar texto
+  -> RemoteTextDialog                the editor is emptied and closed right here
+  -> WebRtcRemoteTextRequested       the BLoC checks its own, stricter gate
+  -> RemoteSetTextCommand            id from the same generator
+  -> PendingRemoteCommands           keeps the id, the kind and the work: not the text
+  -> RemoteControlChannelCodec
+  -> `control` data channel
+  -> Android ACTION_SET_TEXT on the node with input focus
+  -> ack
+  -> RemoteCommandFeedback           the end of the line above the buttons
+```
+
 Presentation knows normalized coordinates, gesture intents and a status. It does
 not know `RTCDataChannel`, `RTCDataChannelMessage`, `jsonEncode` or `flutter_webrtc`.
 
 ## Protocol v1
 
-`tap`, `swipe`, `back`, `home` and `recents`. One text frame holding one JSON object,
-on the existing `control` channel. No other channel is created.
+`tap`, `swipe`, `back`, `home`, `recents` and `set_text`. One text frame holding one
+JSON object, on the existing `control` channel. No other channel is created.
 
 ```json
 {"v":1,"type":"tap","id":"tap-1","x":0.5,"y":0.25}
@@ -77,6 +93,10 @@ on the existing `control` channel. No other channel is created.
 ```
 
 ```json
+{"v":1,"type":"set_text","id":"text-6","text":"Hola mundo"}
+```
+
+```json
 {"v":1,"type":"ack","id":"swipe-2","ok":true}
 ```
 
@@ -88,7 +108,8 @@ In a swipe the four coordinates are the same kind of value as a tap's, and
 `durationMs` is an integer in `50..2000`. The tablet refuses `350.0`, and refuses
 a swipe whose start equals its end. A tap has no `durationMs`: Android holds it
 for its own 50 ms. `back`, `home` and `recents` carry their id and nothing else: they
-are not touches, so no coordinate and no duration means anything to them.
+are not touches, so no coordinate and no duration means anything to them. In a
+`set_text`, `text` is required and has `0..4096` UTF-16 code units.
 
 An ack is valid when `v == 1`, `type == "ack"`, `id` is a non-empty string and
 `ok` is a bool; with `ok: false`, `error` must also be a string. Anything else is
@@ -103,13 +124,16 @@ things:
 tap, swipe           Android reported the gesture completed, not merely that it was
                      requested
 back, home, recents  Android accepted the global action
+set_text             the focused node accepted ACTION_SET_TEXT
 ```
 
 `performGlobalAction` returns a boolean and has no callback. A global action that was
 acknowledged may still be animating, and may have had no visible effect at all: Back
 with nothing to go back to, for instance. So `Inicio enviado` says the tablet took the
 action, never that the launcher is on screen, and `Recientes enviado` never that the
-overview has finished appearing.
+overview has finished appearing. The field is not read back either, so `Texto enviado`
+does not say what the field ended up holding: an application may filter what it is
+given. Only the picture can show that.
 
 ## From a pointer to a coordinate
 
@@ -428,11 +452,194 @@ There is no history.
 `gesture_rejected` is the protocol's name for a refused global action too. The
 technician did not make a gesture, so they do not read that word.
 
+## Text
+
+`set_text` replaces the **whole content** of whichever field has input focus on the
+tablet. It names no field: the web receives neither the name of the field, its current
+content, its application nor a node id, and asks for none of them.
+
+### Always explicit
+
+```text
+TAP on the field -> the technician sees it focused -> Texto -> writes -> Enviar texto
+```
+
+An acknowledged tap says the touch was delivered, not that the application has moved
+the focus yet, and a text sent in that instant could find no focus or replace the
+content of the previous field. So nothing tries to infer it: there is **no text sent
+after a tap, no fixed delay, and no chain of any kind**. The confirmation is the
+technician looking at the picture, and the dialog tells them to.
+
+### When it is available
+
+More than the tablet asks for, on purpose.
+
+```text
+                                              back, home,   tap,    set_text
+                                              recents       swipe
+RemoteSession ACTIVE, and not being closed    yes           yes     yes
+RTCPeerConnectionState connected              yes           yes     yes
+control channel open                          yes           yes     yes
+aimed at the current session                  yes           yes     yes
+a remote video track                          no            yes     yes
+the renderer really displaying a picture      no            yes     yes, in the BLoC too
+no global action settling                     yes           yes     yes
+no text unanswered                            yes           yes     yes
+nothing else pending                          no            no      yes
+```
+
+**The device capability does not require video; the web UX deliberately does.** The
+tablet knows which node has input focus and the web knows nothing about it, so the
+picture is the only way the technician has to check where the text lands.
+`canSendRemoteText` says that on the state, and `RemoteScreenView` tells the BLoC
+whether its renderer is displaying a picture (`WebRtcRemotePictureChanged`), so that
+condition is checked twice like the others.
+
+**Nothing pending ahead of it**, because a swipe or a Back still running could move the
+focus away from the field the technician saw. It is checked when the button is enabled
+and again when the event arrives, and the text is never put in a queue behind them.
+
+Missing any of them, the button is disabled. A request that arrives anyway is dropped,
+reported as `No se pudo enviar el texto.` and not given back: the technician writes it
+again. Privacy over convenience, in this first version.
+
+### While it is unanswered
+
+No tap, no swipe, no Back, Home or Recents, and no other text: everything is dropped,
+never queued. `FINALIZAR ASISTENCIA` is not held back, and the picture, the channel and
+the peer connection are untouched.
+
+It ends the moment the text is resolved, with **no settle time**: the 350 ms are about
+an animated transition, and a text has none.
+
+```text
+ack ok, text_target_unavailable, text_rejected, accessibility_unavailable,
+session_not_active, any other refusal           at the answer
+timeout                                         at its deadline
+channel refused the message                     at that moment
+channel closed, peer failed, session closed     at that moment
+```
+
+### The dialog
+
+`Texto` sits with the other buttons in the bar. `RemoteTextDialog` shows
+`Enviar texto al campo enfocado`, asks the technician to confirm the field on the
+picture, and warns that the content will be replaced. It never claims to know the
+content.
+
+```text
+Enviar texto    needs at least one character, and at most 4096
+Vaciar campo    sends "" and asks nothing else: the label says what it does
+Cancelar, Esc   sends nothing
+```
+
+**It has no barrier and no route.** It sits over the side of the picture, inside the
+widget that owns the picture and the bar:
+
+| Why | |
+| --- | --- |
+| the picture stays bright and visible | it is what the technician is told to check, and on a wide window the dialog does not cover a portrait picture at all |
+| FINALIZAR ASISTENCIA stays reachable | it is never held back, and a barrier would have had to let it through |
+| it ends with its owner | no route can be left behind by a session that ended or by a sign out |
+
+Having no barrier, it holds back the rest itself: while it is open the picture has no
+pointer layer and the other buttons are disabled, so nothing the technician does moves
+the focus they confirmed. The person holding the tablet can still move it, and the web
+cannot see that happen except on the picture.
+
+**It closes, and its text goes, as soon as a text could not be offered**, whichever
+comes first:
+
+```text
+FINALIZAR pressed (at the press)        the session closed from the tablet
+sign out                                a peer connection failed or was replaced
+the connection interrupted              the channel closed
+the picture gone                        another session
+```
+
+Android rotating does not close it, as long as the renderer keeps displaying: only the
+proportions changed.
+
+### Length
+
+Dart's `String.length` counts UTF-16 code units, the same as the contract, so an emoji
+may count as two. It is checked with exactly that (`RemoteSetTextCommand.fits`), and not
+with `LengthLimitingTextInputFormatter`, which counts differently and would cut a paste
+without saying so.
+
+```text
+counter    123 / 4096
+over it    an error, Enviar texto disabled, and nothing cut
+```
+
+The text goes out as it was written. No trimming, no Unicode normalization, no change of
+case. Accents, emoji, spaces and line breaks are ordinary text. A line break is part of
+the string, not a remote Enter.
+
+### What it says
+
+The end of the line under the picture, like Back, Home and Recents.
+
+| Situation | |
+| --- | --- |
+| ack pending | `Enviando texto...` |
+| `ok: true` | `Texto enviado` |
+| `text_target_unavailable` | `No hay un campo de texto editable enfocado.` |
+| `text_rejected` | `El dispositivo rechazó el texto.` |
+| `accessibility_unavailable` | `El dispositivo no tiene habilitado el control remoto.` |
+| `session_not_active` | `La asistencia no está activa en el dispositivo.` |
+| `gesture_rejected`, too many commands queued | `No se pudo ejecutar la acción.` |
+| timeout | `El dispositivo no confirmó el texto.` |
+| could not be handed to the channel | `No se pudo enviar el texto.` |
+| `invalid_command`, `unsupported_command`, unknown | `Control remoto no disponible` |
+
+The text itself appears in none of them. After any failure the technician focuses the
+field on the picture, opens Texto again and writes it again.
+
+### Remote text privacy
+
+The text may be a password, a token or personal data, and the web does not know which:
+it does not try to detect a password field, and does not ask the tablet.
+
+```text
+the web does not receive     what the field holds, or any metadata of the node
+it does not persist          SharedPreferences, localStorage, sessionStorage, the URL,
+                             the state of a BLoC, history or analytics
+it does not log              the text, the frame, the controller, or a command printed
+it does not show             the text, once it has been sent
+```
+
+The text has to cross the `control` channel to reach the tablet, which is the operation
+itself. It is not deliberately kept after that:
+
+```text
+in the editor        emptied at the press of Enviar or Vaciar, without waiting for the
+                     ack, and at Cancelar; gone when the dialog is removed for any reason
+in the event         handed to the BLoC and not stored
+in the command       gone once handed to the channel
+while waiting        PendingRemoteCommand: id, kind and estimated work, and no text;
+                     the deadline closes over the id alone
+```
+
+A failed send never brings it back. Dart strings cannot be wiped, so "gone" means no
+longer referenced, not overwritten: until the garbage collector runs it may still be
+in the memory of the page.
+
+The browser is kept out of the editor with `autocorrect: false`,
+`enableSuggestions: false` and `autofillHints: null`. **Null, not left out.** The default
+of `TextField` is an empty list, which still enables autofill: the textarea gets
+`autocomplete="on"` inside a form, and the web engine leaves that element in the page,
+**with the text in it**, after the widget is gone, waiting for an autofill context to end.
+Emptying the controller does not reach it, because the connection is already closed.
+This only shows in a browser, so a test holds the `null` in place.
+
 ## Pending commands
 
 ```text
-commandId -> pending command (with its deadline)
+commandId -> what is kept of the command (id, kind, work), with its deadline
 ```
+
+The command object is not kept, so a text is not either.
 
 | Event | Result |
 | --- | --- |
@@ -463,7 +670,9 @@ Back, Home and Recents use this same map. The line under the picture follows the
 A command is sent at most once, whatever happens to it. A gesture may have run
 with its acknowledgement lost, so sending it again could press something twice.
 A swipe that expired is not repeated either: it could scroll twice, and a Back could
-leave two screens behind. The technician repeats the action if they want to.
+leave two screens behind. A text that expired may well have landed, and sending it
+again could overwrite a field that has changed since. The technician repeats the
+action if they want to.
 
 ### ACK timeout
 
@@ -481,17 +690,22 @@ deadline = min(work of what is still pending ahead
 
 work     tap 50 ms, swipe its durationMs,
          back, home and recents 50 ms  (remoteNavigationEstimatedWork)
+         set_text 5 s  (remoteSetTextEstimatedWork)
 margin   3 s  (WebRtcSessionBloc.defaultRemoteCommandMargin)
 ```
 
 The 50 ms of a global action are what it counts for in that sum, not how long Android
-animates it. They have no timeout of their own.
+animates it. They have no timeout of their own. The 5 s of a text are the guard the
+tablet has over that operation: an application that stopped responding can legitimately
+hold it that long. Since a text goes out with nothing ahead, its deadline is always
+8 s.
 
 ```text
 a tap alone                      3.05 s    the minimum is the margin: never under 3 s
 a back, a home or a recents alone  3.05 s
 a home behind a swipe of 2 s     5.05 s
 a swipe of 350 ms alone          3.35 s
+a text                           8 s
 swipe 2 s behind a swipe of 2 s  7 s
 the 17th long swipe in a row     37 s
 ```
@@ -518,11 +732,14 @@ session_not_active          one GET /remote-sessions/current per refused command
 gesture_rejected            a message; never turned into a tap, never sent again
 invalid_command             a log line and a message: a bug or a version mismatch
 unsupported_command         idem
+text_target_unavailable     a message; never sent again: the technician focuses the
+                            field and writes it again
+text_rejected               idem
 ```
 
 The same for Back, Home and Recents, and each of them also ends the
-[settle guard](#the-settle-guard). None of them closes the `RemoteSession` or the
-peer connection.
+[settle guard](#the-settle-guard). `gesture_rejected` on a text means the tablet's queue
+was full. None of them closes the `RemoteSession` or the peer connection.
 
 ## Cleanup
 
@@ -556,8 +773,8 @@ generation it was started in, and so does the settle time of a global action. An
 `swipe-1` can therefore not resolve a new `swipe-1`, even if a generator repeated the
 id, and an old `back-1` or `recents-1` cannot end the guard of a new one.
 
-The default generator counts `tap-1`, `swipe-2`, `back-3`, `home-4`, `recents-5`, ... on
-one counter for as long as the page lives, and does not restart with a negotiation. It is injectable
+The default generator counts `tap-1`, `swipe-2`, `back-3`, `home-4`, `recents-5`,
+`text-6`, ... on one counter for as long as the page lives, and does not restart with a negotiation. It is injectable
 (`RemoteControlCommandIdGenerator`), and never derives an id from coordinates or
 screen content.
 
@@ -567,6 +784,28 @@ screen content.
 tests**: it suppresses the accessibility service, and a command would never reach
 `dispatchGesture`. Use `adb logcat`, `dumpsys` and `adb exec-out screencap -p`.
 The toggle and the *full control* dialog are the user's, by hand, always.
+
+### What has been observed of text on the physical tablet
+
+**Nothing yet: `set_text` has not been run end to end against a tablet, and nothing here
+has crossed a real `control` channel.** What stands behind it is the automated tests on
+both sides, and the dialog alone in Chrome, in a throwaway page with no backend:
+
+```text
+opening it                       the editor has the focus, no click needed
+accents, an emoji, a line break  in the editor as typed; the emoji counts as two
+the textarea                     autocomplete="off", autocorrect="off", in no form
+Enviar, Cancelar, FINALIZAR      300 ms later: no field in the DOM, the text not in the
+                                 HTML or in either storage
+opening it again                 empty
+Esc                              cancels
+a portrait picture, 1456 and
+  1568 px wide                   the dialog beside it, covering none of it
+```
+
+A real field accepting `ACTION_SET_TEXT` is what only the tablet can show, and an
+`ok: true` is not enough without seeing the text in the field. Do not use real passwords
+for that test.
 
 ### What has been observed of Recents on the physical tablet
 
@@ -750,9 +989,12 @@ back timed out <id>              home timed out <id>
 remote back ignored <session>    remote home ignored <session>
 recents command sent <id>        recents confirmed <id>
 recents timed out <id>           remote recents ignored <session>
+set_text command sent <id>       set_text confirmed <id>
+set_text timed out <id>          set_text rejected <id>: <code>
+remote text ignored <session>
 remote control command rejected: <code>
 control message ignored <remoteSessionId>
 control ack ignored <id>
 ```
 
-Coordinates and frames are not logged, here or on the tablet.
+Coordinates, frames and the text of a `set_text` are not logged, here or on the tablet.
