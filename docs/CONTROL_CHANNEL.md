@@ -538,7 +538,7 @@ widget that owns the picture and the bar:
 
 | Why | |
 | --- | --- |
-| the picture stays bright and visible | it is what the technician is told to check, and on a wide window the dialog does not cover a portrait picture at all |
+| the picture stays bright and visible | it is what the technician is told to check. The dialog sits at the right of the section, so it covers the right edge of a portrait picture and more of a landscape one; a field it covers has to be checked before opening it |
 | FINALIZAR ASISTENCIA stays reachable | it is never held back, and a barrier would have had to let it through |
 | it ends with its owner | no route can be left behind by a session that ended or by a sign out |
 
@@ -787,25 +787,73 @@ The toggle and the *full control* dialog are the user's, by hand, always.
 
 ### What has been observed of text on the physical tablet
 
-**Nothing yet: `set_text` has not been run end to end against a tablet, and nothing here
-has crossed a real `control` channel.** What stands behind it is the automated tests on
-both sides, and the dialog alone in Chrome, in a throwaway page with no backend:
+Chrome and a tablet running Android 14 (800x1280), with a debug `remote_control_device`
+built from its `main` (2ee1646) and installed with `adb install -r`, and the accessibility
+toggle and every consent done by hand. One `RemoteSession` throughout, with no F5. The
+target was the search field of Settings. Frames were read by wrapping `RTCDataChannel` in
+the page, Android's side from `adb logcat` (`RemoteControlInput`) and `dumpsys`, and the
+field from the picture and from `adb exec-out screencap -p`. The real buttons were clicked
+with the mouse.
 
 ```text
-opening it                       the editor has the focus, no click needed
-accents, an emoji, a line break  in the editor as typed; the emoji counts as two
-the textarea                     autocomplete="off", autocorrect="off", in no form
-Enviar, Cancelar, FINALIZAR      300 ms later: no field in the DOM, the text not in the
-                                 HTML or in either storage
-opening it again                 empty
-Esc                              cancels
-a portrait picture, 1456 and
-  1568 px wide                   the dialog beside it, covering none of it
+disclosure before PERMITIR                    text entry and "replacing its content" listed
+regressions, same session: Home, tap on an
+  app, swipe both ways on a list, Back        the real effect, ack ok
+tap on the field, then 5 s of waiting         field focused and keyboard up, on the picture
+                                              and on Android; no set_text sent
+"Hola mundo"                                  in the field, set_text accepted, ack ok,
+                                              Texto enviado
+"Segundo texto" over it                       the field holds exactly that; the application
+                                              reacted to it (Sin resultados)
+"áéíóú ñ — Hola 👋"                           in the field as sent, 17 code units
+Vaciar campo                                  "text":"", ack ok, the field back to its hint;
+                                              with an empty editor Enviar texto sent nothing
+launcher, nothing focused                     ack text_target_unavailable, set_text
+                                              targetUnavailable, the message, launcher intact
+service disabled by hand, field focused       ack accessibility_unavailable, set_text
+                                              unavailable, the message, the field still empty;
+                                              session and picture go on
+service enabled again                         tap, a text and Back work, same session
+frame held 4 s in the page: tap, Back, Home,
+  Recents and Texto clicked within 391 ms     nothing sent, buttons disabled, Enviando texto...
+  the ack                                     Texto enviado, buttons back, the next tap sent
+text in the dialog, FINALIZAR                 dialog gone, no field in the DOM at 150 ms, no
+                                              set_text; peer connection and channel closed
 ```
 
-A real field accepting `ACTION_SET_TEXT` is what only the tablet can show, and an
-`ok: true` is not enough without seeing the text in the field. Do not use real passwords
-for that test.
+Over that session 21 commands were sent and 21 answered, 19 `ok: true` and 2 refusals, and
+Android's log has the same count of each kind. A `set_text` was answered in 26 to 290 ms.
+
+Unique strings sent through the dialog appeared in the field and nowhere else: not in the
+50000 lines of logcat recorded during the session, the browser console, the output of
+`flutter run`, the HTML or either storage. The frame itself carries the text: that is the
+operation.
+
+What the session also showed:
+
+```text
+a still screen sends no frames     decoded frames stopped counting on the launcher, and the
+                                   picture stayed on a frame from the middle of the Home
+                                   transition until the screen next changed. The picture
+                                   can be stale, so a focus seen on it may be older than it
+                                   looks
+the keyboard follows the field     its suggestions changed with the text: the application
+                                   and its keyboard handle what was sent like anything typed
+```
+
+Two of the seven drags made in the session sent nothing and left no trace, with the
+pointer on the picture. The next four, recorded at the level of pointer events, all went
+out, so the cause was not found. A SWIPE was not attempted during the guard: it uses the
+pointer layer a tap showed to be gone, and the automated tests cover it.
+
+Alone in the browser, with a throwaway page and no backend: the textarea has
+`autocomplete="off"` and `autocorrect="off"` and is in no form, and Esc cancels.
+
+Covered by automated tests only, and never seen on the device: `text_rejected`,
+`gesture_rejected` and `session_not_active` on a text, its timeout and a late ack, the
+channel closing or the peer failing while it is pending or with the dialog open, a
+rotation with the dialog open, the limit of 4096, and a line break reaching a multiline
+field. A password field was deliberately not tried: do not use real passwords for this.
 
 ### What has been observed of Recents on the physical tablet
 
