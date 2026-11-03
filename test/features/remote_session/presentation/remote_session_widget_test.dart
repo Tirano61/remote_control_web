@@ -1646,6 +1646,416 @@ void main() {
         expect(isEnabled(tester, backButton), isTrue);
         expect(isEnabled(tester, homeButton), isTrue);
       });
+
+      group('Recents', () {
+        final recentsButton = find.byKey(const Key('remote_recents_button'));
+
+        testWidgets('it is there, by name, and enabled', (tester) async {
+          await pumpAssistance(tester);
+
+          expect(find.text('Recientes'), findsOneWidget);
+          expect(isEnabled(tester, recentsButton), isTrue);
+          expect(navigationStatus, findsNothing);
+        });
+
+        testWidgets('its frame, its answer, its words', (tester) async {
+          await pumpAssistance(tester);
+
+          await press(tester, recentsButton);
+          expect(sent(), const [RemoteRecentsCommand(id: 'recents-1')]);
+          expect(navigationLine(tester), 'Enviando Recientes...');
+
+          peers.last.emitRemoteControlAck('recents-1');
+          await tester.pump();
+          expect(navigationLine(tester), 'Recientes enviado');
+          expect(sent().whereType<RemoteTapCommand>(), isEmpty);
+        });
+
+        testWidgets('without video, all three work and gestures do not', (
+          tester,
+        ) async {
+          await pumpWithoutVideo(tester);
+
+          expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
+          expect(statusLine(tester), 'Control remoto: no disponible');
+          expect(gestureLayer, findsNothing);
+          expect(isEnabled(tester, backButton), isTrue);
+          expect(isEnabled(tester, homeButton), isTrue);
+          expect(isEnabled(tester, recentsButton), isTrue);
+
+          await tester.tapAt(tester.getCenter(surface));
+          await settleUi(tester);
+          expect(sent(), isEmpty);
+
+          await press(tester, recentsButton);
+          expect(sent(), const [RemoteRecentsCommand(id: 'recents-1')]);
+          expect(navigationLine(tester), 'Enviando Recientes...');
+
+          peers.last.emitRemoteControlAck('recents-1');
+          await tester.pump();
+          expect(navigationLine(tester), 'Recientes enviado');
+          expect(statusLine(tester), 'Control remoto: no disponible');
+        });
+
+        testWidgets('disabled while the session is CONNECTING', (tester) async {
+          remoteSessions.activateFailure = const NetworkFailure();
+          await pumpAssistance(tester);
+
+          expect(isEnabled(tester, recentsButton), isFalse);
+          await tester.tap(recentsButton, warnIfMissed: false);
+          await settleUi(tester);
+
+          expect(sent(), isEmpty);
+        });
+
+        testWidgets('disabled before the peers are connected', (tester) async {
+          remoteSessions.current = buildRemoteSession();
+          await pumpConsole(tester);
+
+          expect(recentsButton, findsOneWidget);
+          expect(isEnabled(tester, recentsButton), isFalse);
+        });
+
+        testWidgets('disabled with the control channel closed', (tester) async {
+          await pumpAssistance(tester);
+
+          peers.last.emitControlChannelState(WebRtcDataChannelState.closed);
+          await settleUi(tester);
+
+          expect(isEnabled(tester, recentsButton), isFalse);
+        });
+
+        const refusals = {
+          RemoteControlError.accessibilityUnavailable:
+              'El dispositivo no tiene habilitado el control remoto.',
+          RemoteControlError.gestureRejected: 'No se pudo ejecutar la acción.',
+          RemoteControlError.sessionNotActive:
+              'La asistencia no está activa en el dispositivo.',
+        };
+
+        refusals.forEach((error, message) {
+          testWidgets('${error.code} is explained and frees the rest', (
+            tester,
+          ) async {
+            await pumpAssistance(tester);
+
+            await press(tester, recentsButton);
+            peers.last.emitRemoteControlAck('recents-1', error: error);
+            await settleUi(tester);
+
+            expect(navigationLine(tester), message);
+            expect(peers.last.isClosed, isFalse);
+            expect(remoteSessions.closedIds, isEmpty);
+            expect(sent(), hasLength(1));
+            expect(isEnabled(tester, recentsButton), isTrue);
+            expect(gestureLayer, findsOneWidget);
+          });
+        });
+
+        testWidgets('no answer in time says the action was not confirmed', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+
+          await press(tester, recentsButton);
+          await tester.pump(const Duration(milliseconds: 3050));
+          await tester.pump();
+
+          expect(
+            navigationLine(tester),
+            'El dispositivo no confirmó la acción.',
+          );
+          expect(isEnabled(tester, recentsButton), isTrue);
+          expect(sent(), hasLength(1));
+        });
+
+        testWidgets(
+          'during its guard nothing goes out, afterwards a tap does',
+          (tester) async {
+            await pumpAssistance(tester);
+
+            await press(tester, recentsButton);
+            peers.last.emitRemoteControlAck('recents-1');
+            await tester.pump(const Duration(milliseconds: 50));
+
+            expect(isEnabled(tester, backButton), isFalse);
+            expect(isEnabled(tester, homeButton), isFalse);
+            expect(isEnabled(tester, recentsButton), isFalse);
+            expect(gestureLayer, findsNothing);
+            await tester.tapAt(tester.getCenter(surface));
+            await tester.tap(recentsButton, warnIfMissed: false);
+            await tester.pump(const Duration(milliseconds: 150));
+            expect(sent(), hasLength(1));
+
+            await tester.pump(remoteNavigationSettleDuration);
+            await tester.pump();
+            expect(isEnabled(tester, recentsButton), isTrue);
+            expect(gestureLayer, findsOneWidget);
+
+            await clickCentre(tester);
+            expect(sent(), hasLength(2));
+            expect(sent().last, isA<RemoteTapCommand>());
+          },
+        );
+
+        testWidgets('FINALIZAR is not held by the guard, and clears it', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+          final session = peers.last;
+          final gate = Completer<void>();
+          remoteSessions.closeGate = gate.future;
+
+          await press(tester, recentsButton);
+          expect(navigationLine(tester), 'Enviando Recientes...');
+
+          await tester.tap(
+            find.byKey(const Key('close_remote_session_button')),
+          );
+          await tester.pump();
+          await tester.pump();
+          await tester.pump();
+
+          expect(remoteSessions.closedIds, hasLength(1));
+          expect(navigationStatus, findsNothing);
+          expect(isEnabled(tester, recentsButton), isFalse);
+
+          await tester.tap(recentsButton, warnIfMissed: false);
+          session.emitRemoteControlAck('recents-1');
+          await settleUi(tester);
+          expect(navigationStatus, findsNothing);
+          expect(session.sentRemoteControlCommands, hasLength(1));
+
+          gate.complete();
+          await settleUi(tester);
+
+          expect(recentsButton, findsNothing);
+          expect(session.sentRemoteControlCommands, hasLength(1));
+        });
+      });
+
+      group('the bar stays on screen', () {
+        final recentsButton = find.byKey(const Key('remote_recents_button'));
+        final closeButton = find.byKey(
+          const Key('close_remote_session_button'),
+        );
+
+        /// An ACTIVE assistance with a picture of [aspectRatio], in this window.
+        Future<void> pumpInWindow(
+          WidgetTester tester,
+          Size viewSize, {
+          double aspectRatio = 1280 / 800,
+        }) async {
+          remoteSessions.current = buildRemoteSession();
+          realtime.peerJoinedOnJoin = true;
+          await pumpConsole(tester, viewSize: viewSize);
+          await connectSocket(tester);
+          realtime.answerRelayAck({
+            'delivered': true,
+            'remoteSessionId': remoteSessionId,
+          });
+          await settleUi(tester);
+          peers.last
+            ..emitControlChannelState(WebRtcDataChannelState.open)
+            ..emitPeerState(WebRtcPeerConnectionState.connected)
+            ..emitRemoteVideoTrack('screen-0');
+          await settleUi(tester);
+          renderers.last.reportVideoAspectRatio(aspectRatio);
+          await settleUi(tester);
+        }
+
+        void expectBarInside(WidgetTester tester, Size viewSize) {
+          for (final button in [
+            backButton,
+            homeButton,
+            recentsButton,
+            closeButton,
+          ]) {
+            final rect = tester.getRect(button);
+            expect(rect.top, greaterThanOrEqualTo(0));
+            expect(rect.bottom, lessThanOrEqualTo(viewSize.height));
+            expect(rect.left, greaterThanOrEqualTo(0));
+            expect(rect.right, lessThanOrEqualTo(viewSize.width));
+          }
+        }
+
+        const windows = [
+          Size(1280, 855),
+          Size(1920, 1080),
+          Size(1280, 800),
+          Size(1280, 600),
+        ];
+
+        for (final viewSize in windows) {
+          for (final aspectRatio in const [1280 / 800, 800 / 1280]) {
+            final name =
+                '${viewSize.width.toInt()}x${viewSize.height.toInt()}, '
+                '${aspectRatio > 1 ? 'landscape' : 'portrait'}';
+
+            testWidgets('$name: inside the window, without scrolling', (
+              tester,
+            ) async {
+              await pumpInWindow(tester, viewSize, aspectRatio: aspectRatio);
+
+              expect(tester.takeException(), isNull);
+              expectBarInside(tester, viewSize);
+
+              final picture = tester.getRect(surface);
+              expect(
+                picture.width / picture.height,
+                closeTo(aspectRatio, 0.01),
+              );
+              expect(
+                tester.getRect(backButton).top,
+                greaterThan(picture.bottom),
+              );
+            });
+          }
+        }
+
+        testWidgets('at 855 px the picture keeps most of the window', (
+          tester,
+        ) async {
+          const viewSize = Size(1280, 855);
+          await pumpInWindow(tester, viewSize, aspectRatio: 800 / 1280);
+
+          // The old limit was 70% of the window, with the bar off screen.
+          expect(tester.getSize(surface).height, greaterThan(855 * 0.6));
+        });
+
+        testWidgets('a tall window does not grow it past its maximum', (
+          tester,
+        ) async {
+          await pumpInWindow(
+            tester,
+            const Size(1400, 1400),
+            aspectRatio: 800 / 1280,
+          );
+
+          expect(tester.getSize(surface).height, 900);
+        });
+
+        testWidgets('without video the bar is there too', (tester) async {
+          const viewSize = Size(1280, 855);
+          remoteSessions.current = buildRemoteSession();
+          realtime.peerJoinedOnJoin = true;
+          await pumpConsole(tester, viewSize: viewSize);
+          await connectSocket(tester);
+          realtime.answerRelayAck({
+            'delivered': true,
+            'remoteSessionId': remoteSessionId,
+          });
+          await settleUi(tester);
+          peers.last
+            ..emitControlChannelState(WebRtcDataChannelState.open)
+            ..emitPeerState(WebRtcPeerConnectionState.connected);
+          await settleUi(tester);
+
+          expect(tester.takeException(), isNull);
+          expectBarInside(tester, viewSize);
+        });
+
+        testWidgets('an error banner takes its height from the picture', (
+          tester,
+        ) async {
+          const viewSize = Size(1280, 855);
+          await pumpInWindow(tester, viewSize, aspectRatio: 800 / 1280);
+          final before = tester.getSize(surface).height;
+          final renderer = renderers.last;
+          remoteSessions.closeFailure = const NetworkFailure();
+
+          await tester.tap(closeButton);
+          await settleUi(tester);
+
+          expect(
+            find.byKey(const Key('remote_session_error_banner')),
+            findsOneWidget,
+          );
+          expect(tester.takeException(), isNull);
+          expect(tester.getSize(surface).height, lessThan(before));
+          expectBarInside(tester, viewSize);
+          expect(renderers.created, [same(renderer)]);
+          expect(renderer.disposeCount, 0);
+        });
+
+        testWidgets('a message does not move the buttons', (tester) async {
+          await pumpInWindow(tester, const Size(1280, 855));
+          final before = tester.getRect(recentsButton);
+
+          await press(tester, recentsButton);
+          peers.last.emitRemoteControlAck(
+            'recents-1',
+            error: RemoteControlError.accessibilityUnavailable,
+          );
+          await settleUi(tester);
+
+          expect(navigationStatus, findsOneWidget);
+          expect(tester.getRect(recentsButton), before);
+        });
+
+        for (final viewSize in const [
+          Size(1000, 800),
+          Size(700, 800),
+          Size(500, 800),
+          Size(420, 800),
+          Size(360, 640),
+        ]) {
+          for (final aspectRatio in const [1280 / 800, 800 / 1280]) {
+            final name =
+                '${viewSize.width.toInt()}x${viewSize.height.toInt()}, '
+                '${aspectRatio > 1 ? 'landscape' : 'portrait'}';
+
+            testWidgets('$name: wraps, nothing overflows or is cut', (
+              tester,
+            ) async {
+              await pumpInWindow(tester, viewSize, aspectRatio: aspectRatio);
+
+              expect(tester.takeException(), isNull);
+              // Down to where the title of the section starts wrapping, which
+              // the test font makes happen far sooner than a real one does.
+              expectBarInside(
+                tester,
+                viewSize.width > 420 ? viewSize : Size(viewSize.width, 5000),
+              );
+              expect(find.text('Atrás'), findsOneWidget);
+              expect(find.text('Inicio'), findsOneWidget);
+              expect(find.text('Recientes'), findsOneWidget);
+              expect(find.text('FINALIZAR ASISTENCIA'), findsOneWidget);
+              final picture = tester.getSize(surface);
+              expect(
+                picture.width / picture.height,
+                closeTo(aspectRatio, 0.01),
+              );
+            });
+          }
+        }
+
+        testWidgets('a smaller picture keeps the gestures aligned', (
+          tester,
+        ) async {
+          await pumpInWindow(tester, const Size(1280, 855));
+
+          await clickCentre(tester);
+
+          final tap = sent().single as RemoteTapCommand;
+          expect(tap.point.x, closeTo(0.5, 1e-9));
+          expect(tap.point.y, closeTo(0.5, 1e-9));
+        });
+
+        testWidgets('a resize keeps the renderer', (tester) async {
+          await pumpInWindow(tester, const Size(1280, 855));
+          final renderer = renderers.last;
+
+          tester.view.physicalSize = const Size(900, 700);
+          await settleUi(tester);
+
+          expect(tester.takeException(), isNull);
+          expect(renderers.created, [same(renderer)]);
+          expect(renderer.disposeCount, 0);
+          expect(renderer.detachCount, 0);
+          expectBarInside(tester, const Size(900, 700));
+        });
+      });
     });
   });
 

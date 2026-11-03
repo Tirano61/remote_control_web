@@ -54,7 +54,8 @@ class RemoteScreenView extends StatefulWidget {
 
   final RemoteVideoRendererFactory rendererFactory;
 
-  /// The tallest the surface may get. The width comes from the parent.
+  /// The tallest the surface may get, however much room the parent has. The
+  /// width comes from the parent, and so does any tighter limit on the height.
   final double maxHeight;
 
   /// Called with the position on the tablet under a click. `null` while remote
@@ -123,60 +124,68 @@ class _RemoteScreenViewState extends State<RemoteScreenView> {
         final onRemoteSwipe = widget.onRemoteSwipe;
         final controlStatusBuilder = widget.controlStatusBuilder;
 
-        return LayoutBuilder(
-          builder: (context, constraints) {
-            final size = _fit(
-              aspectRatio: aspectRatio,
-              maxWidth: constraints.maxWidth,
-              maxHeight: widget.maxHeight,
-            );
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Whatever comes under the surface is laid out first, so the height
+            // the parent can spare goes to the picture after that line is paid.
+            Flexible(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final size = _fit(
+                    aspectRatio: aspectRatio,
+                    maxWidth: constraints.maxWidth,
+                    maxHeight: math.min(
+                      widget.maxHeight,
+                      constraints.maxHeight,
+                    ),
+                  );
 
-            return Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Center(
-                  child: SizedBox(
-                    key: const Key('remote_screen_surface'),
-                    width: size.width,
-                    height: size.height,
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(8),
-                      child: ColoredBox(
-                        color: Colors.black,
-                        child: Stack(
-                          fit: StackFit.expand,
-                          children: [
-                            // First and always in the same slot, so that a new
-                            // size or the placeholder going away never rebuilds
-                            // the view from scratch.
-                            if (isDisplaying)
-                              KeyedSubtree(
-                                key: const Key('remote_screen_video'),
-                                child: _renderer.buildView(context),
-                              ),
-                            if (isWaiting) const _WaitingForScreen(),
-                            if (!isWaiting &&
-                                onRemoteTap != null &&
-                                onRemoteSwipe != null)
-                              RemoteControlGestureLayer(
-                                key: const Key('remote_screen_gesture_layer'),
-                                videoAspectRatio: () => _renderer.aspectRatio,
-                                onTap: onRemoteTap,
-                                onSwipe: onRemoteSwipe,
-                              ),
-                          ],
+                  return Center(
+                    heightFactor: 1,
+                    child: SizedBox(
+                      key: const Key('remote_screen_surface'),
+                      width: size.width,
+                      height: size.height,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: ColoredBox(
+                          color: Colors.black,
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              // First and always in the same slot, so that a new
+                              // size or the placeholder going away never rebuilds
+                              // the view from scratch.
+                              if (isDisplaying)
+                                KeyedSubtree(
+                                  key: const Key('remote_screen_video'),
+                                  child: _renderer.buildView(context),
+                                ),
+                              if (isWaiting) const _WaitingForScreen(),
+                              if (!isWaiting &&
+                                  onRemoteTap != null &&
+                                  onRemoteSwipe != null)
+                                RemoteControlGestureLayer(
+                                  key: const Key('remote_screen_gesture_layer'),
+                                  videoAspectRatio: () => _renderer.aspectRatio,
+                                  onTap: onRemoteTap,
+                                  onSwipe: onRemoteSwipe,
+                                ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                ),
-                if (controlStatusBuilder != null) ...[
-                  const SizedBox(height: 8),
-                  controlStatusBuilder(context, !isWaiting),
-                ],
-              ],
-            );
-          },
+                  );
+                },
+              ),
+            ),
+            if (controlStatusBuilder != null) ...[
+              const SizedBox(height: 8),
+              controlStatusBuilder(context, !isWaiting),
+            ],
+          ],
         );
       },
     );
