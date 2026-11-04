@@ -77,6 +77,24 @@ sealed class WebRtcSessionState extends Equatable {
   /// to the surface, which checks it too.
   bool get canSendRemoteControl => canSendRemoteNavigation && hasRemoteVideo;
 
+  /// Whether the technician can see what a text would land on.
+  ///
+  /// The tablet would run a text with no picture at all: this is the web's own
+  /// decision. It knows nothing about the field, not its name, its content or its
+  /// application, so the picture is the only way to check the target.
+  bool get canOfferRemoteText =>
+      canSendRemoteControl && remoteControl.isPictureDisplayed;
+
+  /// Whether a text can go out right now.
+  ///
+  /// Nothing may be ahead of it: a swipe or a Back still running could move the
+  /// focus away from the field the technician saw, and the text would replace the
+  /// content of another one.
+  bool get canSendRemoteText =>
+      canOfferRemoteText &&
+      remoteControl.pendingCommands == 0 &&
+      !remoteControl.isNavigationSettling;
+
   /// Whether losing the signaling socket must leave the peer connection alone.
   ///
   /// WebRTC is peer to peer: once media/data flows, Socket.IO is not in the

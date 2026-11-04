@@ -10,23 +10,41 @@ const Duration remoteNavigationEstimatedWork = Duration(milliseconds: 50);
 /// its way somewhere else. See `RemoteNavigationGuard`.
 const Duration remoteNavigationSettleDuration = Duration(milliseconds: 350);
 
+/// The longest text the tablet takes, in UTF-16 code units: what [String.length]
+/// counts in Dart, so an emoji may well count as two.
+const int maxRemoteTextLength = 4096;
+
+/// How long a text can keep the tablet's queue busy. The tablet gives up on the
+/// operation after five seconds, so that is what an answer may legitimately take.
+const Duration remoteSetTextEstimatedWork = Duration(seconds: 5);
+
 /// The kinds of command the protocol defines.
 enum RemoteCommandKind {
   tap,
   swipe,
   back,
   home,
-  recents;
+  recents,
+  setText;
 
-  /// A global action of Android, as opposed to a touch on the picture.
-  bool get isNavigation => this != tap && this != swipe;
+  /// A touch on the picture.
+  bool get isGesture => this == tap || this == swipe;
+
+  /// A global action of Android.
+  bool get isNavigation => this == back || this == home || this == recents;
+
+  /// How the ids of this kind start.
+  String get idPrefix => this == setText ? 'text' : name;
+
+  /// How the log calls this kind.
+  String get logName => this == setText ? 'set_text' : name;
 }
 
 /// Something the technician asks the tablet to do over the `control` channel.
 ///
 /// Sealed on purpose: the protocol is an agreement with `remote_control_device`,
 /// and a command exists here only once both sides implement it. Today that is
-/// the tap, the swipe, Back, Home and Recents, and nothing else.
+/// the tap, the swipe, Back, Home, Recents and the text, and nothing else.
 sealed class RemoteControlCommand extends Equatable {
   const RemoteControlCommand({required this.id});
 
@@ -154,4 +172,34 @@ final class RemoteRecentsCommand extends RemoteNavigationCommand {
 
   @override
   String toString() => 'RemoteRecentsCommand($id)';
+}
+
+/// Replaces the whole content of whichever field has input focus on the tablet.
+///
+/// [text] is sent exactly as it was written: never trimmed, normalized or cut.
+/// It may be a password, so this object must not outlive the send: what stays
+/// behind while the answer is awaited is `PendingRemoteCommand`, which has no
+/// text. The text is also the one thing here that never gets printed.
+final class RemoteSetTextCommand extends RemoteControlCommand {
+  const RemoteSetTextCommand({required super.id, required this.text})
+    : assert(text.length <= maxRemoteTextLength);
+
+  /// Whether the tablet would take [text]. Anything longer is `invalid_command`
+  /// there, and is refused here rather than cut.
+  static bool fits(String text) => text.length <= maxRemoteTextLength;
+
+  final String text;
+
+  @override
+  RemoteCommandKind get kind => RemoteCommandKind.setText;
+
+  @override
+  Duration get estimatedWork => remoteSetTextEstimatedWork;
+
+  @override
+  List<Object?> get props => [id, text];
+
+  /// The id only: the text is not logged, whatever it holds.
+  @override
+  String toString() => 'RemoteSetTextCommand($id)';
 }

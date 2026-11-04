@@ -8,12 +8,14 @@ enum RemoteCommandOutcome {
   pending,
 
   /// The tablet reported the gesture completed, or Android accepted the global
-  /// action.
+  /// action or the text.
   confirmed,
 
   accessibilityUnavailable,
   sessionNotActive,
   gestureRejected,
+  textTargetUnavailable,
+  textRejected,
 
   /// `invalid_command`, `unsupported_command` or a code this version does not
   /// know: a programming error or a version mismatch, nothing the technician
@@ -42,7 +44,8 @@ final class RemoteCommandFeedback extends Equatable {
 
   final String commandId;
 
-  /// Whether the technician should read about a touch, a stroke, Back or Home.
+  /// Whether the technician should read about a touch, a stroke, Back, Home or a
+  /// text. Never the text itself: nothing here holds it.
   final RemoteCommandKind kind;
 
   final RemoteCommandOutcome outcome;
@@ -58,6 +61,8 @@ final class RemoteControlStatus extends Equatable {
     this.lastCommand,
     this.pendingCommands = 0,
     this.isNavigationSettling = false,
+    this.isTextPending = false,
+    this.isPictureDisplayed = false,
   });
 
   /// REST says the session of this negotiation is `ACTIVE`, and it is not being
@@ -72,11 +77,20 @@ final class RemoteControlStatus extends Equatable {
   /// A Back or a Home is under way, and no new command of any kind is taken.
   final bool isNavigationSettling;
 
+  /// A text is unanswered, and no new command of any kind is taken.
+  final bool isTextPending;
+
+  /// The surface says the renderer is really displaying the tablet's screen. A
+  /// track exists long before that, for as long as the tablet waits for consent.
+  final bool isPictureDisplayed;
+
   @override
   List<Object?> get props => [
     isSessionActive,
     lastCommand,
     pendingCommands,
     isNavigationSettling,
+    isTextPending,
+    isPictureDisplayed,
   ];
 }

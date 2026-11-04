@@ -105,6 +105,61 @@ void main() {
     });
   });
 
+  group('set_text', () {
+    String encode(String text) => RemoteControlChannelCodec.encode(
+      RemoteSetTextCommand(id: 'text-1', text: text),
+    );
+
+    test('produces exactly the fields of the protocol', () {
+      expect(
+        encode('Hola'),
+        '{"v":1,"type":"set_text","id":"text-1","text":"Hola"}',
+      );
+    });
+
+    test('empty means empty, and the field is still there', () {
+      expect(encode(''), '{"v":1,"type":"set_text","id":"text-1","text":""}');
+    });
+
+    test('nothing else goes on the wire', () {
+      final frame = jsonDecode(encode('Hola')) as Map<String, dynamic>;
+
+      expect(frame.keys, unorderedEquals(['v', 'type', 'id', 'text']));
+    });
+
+    const texts = {
+      'Unicode': 'áéíóú ñ — Hola',
+      'an emoji': 'Hola 👋',
+      'line breaks': 'uno\ndos\r\ntres',
+      'a tab and spaces at the ends': '  \tuno  ',
+      'quotes and a backslash': 'dijo "hola" \\ chau',
+      'what looks like JSON': '{"v":2,"type":"home"}',
+      'a control character': 'a\u0001b',
+    };
+
+    texts.forEach((name, text) {
+      test('$name arrive exactly as they were written', () {
+        final frame = jsonDecode(encode(text)) as Map<String, dynamic>;
+
+        expect(frame['text'], text);
+        expect(frame['type'], 'set_text');
+      });
+    });
+
+    test('a line break is escaped, so the frame stays one JSON object', () {
+      expect(encode('a\nb'), contains(r'"text":"a\nb"'));
+    });
+
+    test('its ack is read like any other', () {
+      expect(
+        RemoteControlChannelCodec.decodeAck(
+          '{"v":1,"type":"ack","id":"text-1","ok":true}',
+        ),
+        const RemoteControlAck(commandId: 'text-1'),
+      );
+    });
+  });
+
   group('swipe', () {
     test('produces exactly the fields of the protocol', () {
       expect(
@@ -178,6 +233,8 @@ void main() {
       'gesture_rejected': RemoteControlError.gestureRejected,
       'invalid_command': RemoteControlError.invalidCommand,
       'unsupported_command': RemoteControlError.unsupportedCommand,
+      'text_target_unavailable': RemoteControlError.textTargetUnavailable,
+      'text_rejected': RemoteControlError.textRejected,
     };
 
     errors.forEach((code, error) {

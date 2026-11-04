@@ -43,6 +43,7 @@ class RemoteScreenView extends StatefulWidget {
     this.onRemoteTap,
     this.onRemoteSwipe,
     this.controlStatusBuilder,
+    this.onPictureChanged,
     super.key,
   }) : assert(
          (onRemoteTap == null) == (onRemoteSwipe == null),
@@ -71,6 +72,11 @@ class RemoteScreenView extends StatefulWidget {
   /// well before its first frame, as long as the tablet waits for consent.
   final RemoteControlStatusBuilder? controlStatusBuilder;
 
+  /// Told whether a picture is really being displayed, each time the renderer has
+  /// something new to say and, with `false`, when this surface goes away. It may
+  /// be called during a build, so whoever listens must not rebuild from it directly.
+  final ValueChanged<bool>? onPictureChanged;
+
   /// Proportions of the empty frame before the video has said what its own
   /// are. Only the placeholder uses it: the picture is always laid out with
   /// the aspect ratio the stream reports.
@@ -86,7 +92,7 @@ class _RemoteScreenViewState extends State<RemoteScreenView> {
   @override
   void initState() {
     super.initState();
-    _renderer = widget.rendererFactory();
+    _renderer = widget.rendererFactory()..addListener(_reportPicture);
     unawaited(_renderer.initialize().catchError((Object _) {}));
     final track = widget.track;
     if (track != null) unawaited(_renderer.attach(track));
@@ -104,9 +110,15 @@ class _RemoteScreenViewState extends State<RemoteScreenView> {
 
   @override
   void dispose() {
+    _renderer.removeListener(_reportPicture);
+    widget.onPictureChanged?.call(false);
     unawaited(_renderer.dispose());
     super.dispose();
   }
+
+  void _reportPicture() => widget.onPictureChanged?.call(
+    _renderer.isDisplaying && _renderer.aspectRatio != null,
+  );
 
   @override
   Widget build(BuildContext context) {

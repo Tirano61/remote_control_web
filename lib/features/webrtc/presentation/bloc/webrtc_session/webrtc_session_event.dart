@@ -107,6 +107,44 @@ final class WebRtcRemoteRecentsRequested extends WebRtcSessionEvent {
   List<Object?> get props => [remoteSessionId];
 }
 
+/// The technician explicitly sent a text from the dialog: to the field they saw
+/// focused on the picture, replacing its whole content. An empty [text] empties it.
+///
+/// It may be a password. Nothing keeps this event, and it does not print its text.
+final class WebRtcRemoteTextRequested extends WebRtcSessionEvent {
+  const WebRtcRemoteTextRequested({
+    required this.remoteSessionId,
+    required this.text,
+  });
+
+  final String remoteSessionId;
+  final String text;
+
+  @override
+  List<Object?> get props => [remoteSessionId, text];
+
+  @override
+  String toString() => 'WebRtcRemoteTextRequested($remoteSessionId)';
+}
+
+/// The surface started or stopped really displaying the tablet's screen.
+///
+/// Only the surface can tell: the BLoC knows there is a track, and a track exists
+/// well before its first frame. Carries the session the surface belongs to, so that
+/// a surface going away says nothing about the session after it.
+final class WebRtcRemotePictureChanged extends WebRtcSessionEvent {
+  const WebRtcRemotePictureChanged({
+    required this.remoteSessionId,
+    required this.isDisplayed,
+  });
+
+  final String remoteSessionId;
+  final bool isDisplayed;
+
+  @override
+  List<Object?> get props => [remoteSessionId, isDisplayed];
+}
+
 /// Which session REST currently says is `ACTIVE` and not being closed, if any.
 ///
 /// The BLoC only learns this from outside: `RemoteSession` is not its state, and
