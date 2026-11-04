@@ -1,8 +1,8 @@
 # WebRTC on the technician console — decisions
 
-Stage: Prompt 15 (the tablet's screen is displayed, a click sends a tap, a drag
-sends a swipe, and three buttons send Back, Home and Recents; see
-[CONTROL_CHANNEL.md](CONTROL_CHANNEL.md)).
+Stage: Prompt 16 (the tablet's screen is displayed, a click sends a tap, a drag
+sends a swipe, three buttons send Back, Home and Recents, and a dialog sends a text to
+the focused field; see [CONTROL_CHANNEL.md](CONTROL_CHANNEL.md)).
 
 This document records the choices that are **not** part of the backend
 contract. `docs/backend/REALTIME.md` only relays SDP and ICE and is
@@ -116,9 +116,12 @@ through `onDataChannel`.
 Its state (`connecting`, `open`, `closing`, `closed`) is tracked apart from the
 peer connection state: `connected` does not imply the channel is already open.
 
-It carries five commands, the tap, the swipe, Back, Home and Recents, and their
-acknowledgements. The protocol and what each side does with it are in
-[CONTROL_CHANNEL.md](CONTROL_CHANNEL.md). Text is not defined.
+It carries six commands, the tap, the swipe, Back, Home, Recents and `set_text`, and
+their acknowledgements. The protocol and what each side does with it are in
+[CONTROL_CHANNEL.md](CONTROL_CHANNEL.md). `set_text` is the only one whose content is
+sensitive: it crosses this channel because that is the operation, and is not logged or
+kept ([Remote text privacy](CONTROL_CHANNEL.md#remote-text-privacy)). Keys, a cursor,
+selection and a remote clipboard are not defined.
 
 ## The screen: one `recvonly` video section
 
@@ -156,7 +159,10 @@ before. "Control connected" and "screen available" are two different facts:
 the second never gates the first, and never gates `POST /remote-sessions/:id/activate`.
 It does not gate Back, Home and Recents either: they work without a picture, and only
 a tap or a swipe needs one to aim at
-([CONTROL_CHANNEL.md](CONTROL_CHANNEL.md#they-need-no-picture)).
+([CONTROL_CHANNEL.md](CONTROL_CHANNEL.md#they-need-no-picture)). A text needs one as
+well. The tablet would run it without a picture: requiring it is the web's own decision,
+because the picture is how the technician checks where the text lands
+([CONTROL_CHANNEL.md](CONTROL_CHANNEL.md#when-it-is-available)).
 
 ### Why a transceiver
 

@@ -1,6 +1,28 @@
 import 'dart:async';
 
+import 'package:equatable/equatable.dart';
+
 import '../entities/remote_control_command.dart';
+
+/// What is kept of a command while its acknowledgement is awaited: what it takes
+/// to recognise the answer and to compute the deadlines of what follows.
+///
+/// Deliberately not the command. A text may hold a password, and it has no reason
+/// to stay in memory for the seconds the answer can take.
+final class PendingRemoteCommand extends Equatable {
+  const PendingRemoteCommand({
+    required this.commandId,
+    required this.kind,
+    required this.estimatedWork,
+  });
+
+  final String commandId;
+  final RemoteCommandKind kind;
+  final Duration estimatedWork;
+
+  @override
+  List<Object?> get props => [commandId, kind, estimatedWork];
+}
 
 /// Commands sent and waiting for an acknowledgement, each with its own deadline.
 ///
@@ -16,8 +38,8 @@ class PendingRemoteCommands {
   /// so a wait this long means the answer is not coming.
   static const Duration maxDeadline = Duration(seconds: 45);
 
-  /// How long [command] may take to be answered, when [ahead] were sent before
-  /// it and are still unanswered.
+  /// How long a command of [estimatedWork] may take to be answered, when [ahead]
+  /// is the work of what was sent before it and is still unanswered.
   ///
   /// The tablet runs one gesture at a time, in the order they arrived, so a valid
   /// command may have to wait for all of them. A fixed wait would report as lost
@@ -26,57 +48,65 @@ class PendingRemoteCommands {
   /// [margin] is what the channel and the tablet's own processing may take. It
   /// is also the minimum: the shortest command never gets less than that.
   static Duration deadlineFor(
-    RemoteControlCommand command, {
-    required Iterable<RemoteControlCommand> ahead,
+    Duration estimatedWork, {
+    required Iterable<Duration> ahead,
     required Duration margin,
   }) {
-    final queued = ahead.fold(
-      Duration.zero,
-      (total, pending) => total + pending.estimatedWork,
-    );
-    final deadline = queued + command.estimatedWork + margin;
+    final queued = ahead.fold(Duration.zero, (total, work) => total + work);
+    final deadline = queued + estimatedWork + margin;
     return deadline > maxDeadline ? maxDeadline : deadline;
   }
 
   final Duration _margin;
-  final Map<String, _PendingRemoteCommand> _pending = {};
+  final Map<String, _TrackedRemoteCommand> _pending = {};
 
   int get length => _pending.length;
 
+  /// What is waiting, oldest first.
+  Iterable<PendingRemoteCommand> get commands =>
+      _pending.values.map((tracked) => tracked.command);
+
+  /// Takes what it needs from [command] and lets go of it. The deadline closes
+  /// over the id alone, so a timer does not keep a text alive either.
   void track(
     RemoteControlCommand command, {
     required void Function(String commandId) onTimeout,
   }) {
+    final commandId = command.id;
     final deadline = deadlineFor(
-      command,
-      ahead: _pending.values.map((pending) => pending.command),
+      command.estimatedWork,
+      ahead: commands.map((pending) => pending.estimatedWork),
       margin: _margin,
     );
-    _pending[command.id] = _PendingRemoteCommand(
-      command: command,
-      deadline: Timer(deadline, () => onTimeout(command.id)),
+    _pending[commandId] = _TrackedRemoteCommand(
+      command: PendingRemoteCommand(
+        commandId: commandId,
+        kind: command.kind,
+        estimatedWork: command.estimatedWork,
+      ),
+      deadline: Timer(deadline, () => onTimeout(commandId)),
     );
   }
 
   /// Takes the command out of the map, or returns `null` when it is not waiting
   /// any more: an unknown id, a duplicate acknowledgement, a late one.
-  RemoteControlCommand? settle(String commandId) {
-    final pending = _pending.remove(commandId);
-    pending?.deadline.cancel();
-    return pending?.command;
+  PendingRemoteCommand? settle(String commandId) {
+    final tracked = _pending.remove(commandId);
+    tracked?.deadline.cancel();
+    return tracked?.command;
   }
 
   void clear() {
-    for (final pending in _pending.values) {
-      pending.deadline.cancel();
+    for (final tracked in _pending.values) {
+      tracked.deadline.cancel();
     }
     _pending.clear();
   }
 }
 
-final class _PendingRemoteCommand {
-  const _PendingRemoteCommand({required this.command, required this.deadline});
+final class _TrackedRemoteCommand {
+  const _TrackedRemoteCommand({required this.command, required this.deadline});
 
-  final RemoteControlCommand command;
+  final PendingRemoteCommand command;
   final Timer deadline;
 }

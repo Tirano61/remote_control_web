@@ -10,6 +10,7 @@ import 'package:remote_control_web/features/auth/data/repositories/auth_reposito
 import 'package:remote_control_web/features/remote_control/domain/entities/normalized_remote_point.dart';
 import 'package:remote_control_web/features/remote_control/domain/entities/remote_control_ack.dart';
 import 'package:remote_control_web/features/remote_control/domain/entities/remote_control_command.dart';
+import 'package:remote_control_web/features/remote_control/presentation/widgets/remote_text_dialog.dart';
 import 'package:remote_control_web/features/remote_session/data/repositories/remote_session_repository_impl.dart';
 import 'package:remote_control_web/features/remote_session/domain/entities/remote_session_status.dart';
 import 'package:remote_control_web/features/signaling/data/technician_signaling_client_impl.dart';
@@ -1251,6 +1252,827 @@ void main() {
       expect(renderers.created, hasLength(1));
     });
 
+    group('Texto', () {
+      const sentinel = 'SUPER_SECRET_REMOTE_TEXT_123';
+
+      final textButton = find.byKey(const Key('remote_text_button'));
+      final dialog = find.byKey(const Key('remote_text_dialog'));
+      final field = find.byKey(const Key('remote_text_field'));
+      final sendButton = find.byKey(const Key('remote_text_send_button'));
+      final clearButton = find.byKey(const Key('remote_text_clear_button'));
+      final cancelButton = find.byKey(const Key('remote_text_cancel_button'));
+      final closeButton = find.byKey(const Key('close_remote_session_button'));
+      final backButton = find.byKey(const Key('remote_back_button'));
+      final homeButton = find.byKey(const Key('remote_home_button'));
+      final recentsButton = find.byKey(const Key('remote_recents_button'));
+      final actionStatus = find.byKey(const Key('remote_navigation_status'));
+
+      bool isTextEnabled(WidgetTester tester) =>
+          tester.widget<OutlinedButton>(textButton).onPressed != null;
+
+      bool isSendEnabled(WidgetTester tester) =>
+          tester.widget<FilledButton>(sendButton).onPressed != null;
+
+      bool isClearEnabled(WidgetTester tester) =>
+          tester.widget<OutlinedButton>(clearButton).onPressed != null;
+
+      bool isOutlinedEnabled(WidgetTester tester, Finder button) =>
+          tester.widget<OutlinedButton>(button).onPressed != null;
+
+      String actionLine(WidgetTester tester) =>
+          tester.widget<Text>(actionStatus).data!;
+
+      List<RemoteControlCommand> sent() => peers.last.sentRemoteControlCommands;
+
+      Future<void> press(WidgetTester tester, Finder button) async {
+        await tester.tap(button);
+        await tester.pump();
+        await tester.pump();
+      }
+
+      Future<void> openDialog(WidgetTester tester) async {
+        await press(tester, textButton);
+        expect(dialog, findsOneWidget);
+      }
+
+      /// The dialog open with [text] written in it.
+      Future<void> write(WidgetTester tester, String text) async {
+        await openDialog(tester);
+        await tester.enterText(field, text);
+        await tester.pump();
+      }
+
+      testWidgets('it is there, by name, and enabled', (tester) async {
+        await pumpAssistance(tester);
+
+        expect(find.text('Texto'), findsOneWidget);
+        expect(isTextEnabled(tester), isTrue);
+        expect(dialog, findsNothing);
+      });
+
+      testWidgets('the dialog says what it does and offers all three', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+
+        await openDialog(tester);
+
+        expect(find.text('Enviar texto al campo enfocado'), findsOneWidget);
+        expect(
+          find.text(
+            'Confirme en la pantalla remota que el campo correcto está '
+            'seleccionado.',
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.text('El texto enviado reemplazará todo su contenido.'),
+          findsOneWidget,
+        );
+        expect(field, findsOneWidget);
+        expect(find.text('Enviar texto'), findsOneWidget);
+        expect(find.text('Vaciar campo'), findsOneWidget);
+        expect(find.text('Cancelar'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      });
+
+      testWidgets('the editor stays out of what the browser would suggest', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+
+        await openDialog(tester);
+
+        final editor = tester.widget<TextField>(field);
+        expect(editor.autocorrect, isFalse);
+        expect(editor.enableSuggestions, isFalse);
+        expect(editor.autofillHints, isNull);
+        expect(editor.inputFormatters, isNull);
+        expect(editor.maxLength, isNull);
+        expect(editor.keyboardType, TextInputType.multiline);
+      });
+
+      group('when it is available', () {
+        testWidgets('a track with no frames yet: disabled', (tester) async {
+          remoteSessions.current = buildRemoteSession();
+          realtime.peerJoinedOnJoin = true;
+          await pumpConsole(tester);
+          await connectSocket(tester);
+          realtime.answerRelayAck({
+            'delivered': true,
+            'remoteSessionId': remoteSessionId,
+          });
+          await settleUi(tester);
+          peers.last
+            ..emitControlChannelState(WebRtcDataChannelState.open)
+            ..emitPeerState(WebRtcPeerConnectionState.connected)
+            ..emitRemoteVideoTrack('screen-0');
+          await settleUi(tester);
+
+          expect(find.text(kWaitingForRemoteScreenNotice), findsOneWidget);
+          expect(isTextEnabled(tester), isFalse);
+
+          renderers.last.reportVideoAspectRatio(1280 / 800);
+          await settleUi(tester);
+
+          expect(isTextEnabled(tester), isTrue);
+        });
+
+        testWidgets('no video at all, with Back enabled: disabled', (
+          tester,
+        ) async {
+          // Deliberately stricter than the tablet: see `canOfferRemoteText`.
+          remoteSessions.current = buildRemoteSession();
+          realtime.peerJoinedOnJoin = true;
+          await pumpConsole(tester);
+          await connectSocket(tester);
+          realtime.answerRelayAck({
+            'delivered': true,
+            'remoteSessionId': remoteSessionId,
+          });
+          await settleUi(tester);
+          peers.last
+            ..emitControlChannelState(WebRtcDataChannelState.open)
+            ..emitPeerState(WebRtcPeerConnectionState.connected);
+          await settleUi(tester);
+
+          expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
+          expect(isOutlinedEnabled(tester, backButton), isTrue);
+          expect(isTextEnabled(tester), isFalse);
+
+          await tester.tap(textButton, warnIfMissed: false);
+          await settleUi(tester);
+
+          expect(dialog, findsNothing);
+        });
+
+        testWidgets('a session still CONNECTING: disabled', (tester) async {
+          remoteSessions.activateFailure = const NetworkFailure();
+          await pumpAssistance(tester);
+
+          expect(isTextEnabled(tester), isFalse);
+        });
+
+        testWidgets('before the peers are connected: disabled', (tester) async {
+          remoteSessions.current = buildRemoteSession();
+          await pumpConsole(tester);
+
+          expect(textButton, findsOneWidget);
+          expect(isTextEnabled(tester), isFalse);
+        });
+
+        testWidgets('the channel closed: disabled', (tester) async {
+          await pumpAssistance(tester);
+
+          peers.last.emitControlChannelState(WebRtcDataChannelState.closed);
+          await settleUi(tester);
+
+          expect(isTextEnabled(tester), isFalse);
+        });
+
+        testWidgets('a swipe unanswered: disabled, and enabled by its answer', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+
+          await dragUpwards(tester);
+          expect(sent().single, isA<RemoteSwipeCommand>());
+          expect(isTextEnabled(tester), isFalse);
+
+          peers.last.emitRemoteControlAck(sent().single.id);
+          await settleUi(tester);
+
+          expect(isTextEnabled(tester), isTrue);
+        });
+
+        testWidgets('a global action settling: disabled', (tester) async {
+          await pumpAssistance(tester);
+
+          await press(tester, homeButton);
+          peers.last.emitRemoteControlAck('home-1');
+          await tester.pump();
+
+          expect(isTextEnabled(tester), isFalse);
+
+          await tester.pump(remoteNavigationSettleDuration);
+          await tester.pump();
+
+          expect(isTextEnabled(tester), isTrue);
+        });
+      });
+
+      testWidgets('a tap sends a tap, and never a text after it', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+
+        await clickCentre(tester);
+        peers.last.emitRemoteControlAck('tap-1');
+        await tester.pump(const Duration(seconds: 30));
+
+        expect(sent().map((c) => c.id), ['tap-1']);
+        expect(dialog, findsNothing);
+      });
+
+      group('the editor', () {
+        testWidgets('empty: only Vaciar campo can go out', (tester) async {
+          await pumpAssistance(tester);
+
+          await openDialog(tester);
+
+          expect(isSendEnabled(tester), isFalse);
+          expect(isClearEnabled(tester), isTrue);
+
+          await press(tester, clearButton);
+
+          expect(sent(), const [RemoteSetTextCommand(id: 'text-1', text: '')]);
+          expect(dialog, findsNothing);
+        });
+
+        testWidgets('Vaciar campo ignores what was written', (tester) async {
+          await pumpAssistance(tester);
+
+          await write(tester, sentinel);
+          await press(tester, clearButton);
+
+          expect(sent(), const [RemoteSetTextCommand(id: 'text-1', text: '')]);
+        });
+
+        testWidgets('spaces are text, and go out as they are', (tester) async {
+          await pumpAssistance(tester);
+
+          await write(tester, '  uno\ndos  ');
+          expect(isSendEnabled(tester), isTrue);
+          await press(tester, sendButton);
+
+          expect(sent(), const [
+            RemoteSetTextCommand(id: 'text-1', text: '  uno\ndos  '),
+          ]);
+        });
+
+        testWidgets('Unicode goes out untouched', (tester) async {
+          await pumpAssistance(tester);
+
+          await write(tester, 'áéíóú ñ — Hola 👋');
+          await press(tester, sendButton);
+
+          expect(sent(), const [
+            RemoteSetTextCommand(id: 'text-1', text: 'áéíóú ñ — Hola 👋'),
+          ]);
+        });
+
+        testWidgets('the counter counts code units, an emoji being two', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+
+          await write(tester, 'Hola 👋');
+
+          expect(find.text('7 / 4096'), findsOneWidget);
+        });
+
+        testWidgets('4096 fit', (tester) async {
+          await pumpAssistance(tester);
+
+          await write(tester, 'a' * 4096);
+
+          expect(find.text('4096 / 4096'), findsOneWidget);
+          expect(isSendEnabled(tester), isTrue);
+          expect(
+            find.text('El texto supera el máximo de 4096 caracteres.'),
+            findsNothing,
+          );
+        });
+
+        testWidgets('4097 are refused, and nothing is cut', (tester) async {
+          await pumpAssistance(tester);
+
+          await write(tester, 'a' * 4097);
+
+          expect(find.text('4097 / 4096'), findsOneWidget);
+          expect(
+            find.text('El texto supera el máximo de 4096 caracteres.'),
+            findsOneWidget,
+          );
+          expect(isSendEnabled(tester), isFalse);
+          expect(tester.widget<TextField>(field).controller!.text.length, 4097);
+        });
+
+        testWidgets('an emoji at the limit counts as two', (tester) async {
+          await pumpAssistance(tester);
+
+          await write(tester, '${'a' * 4095}👋');
+
+          expect(find.text('4097 / 4096'), findsOneWidget);
+          expect(isSendEnabled(tester), isFalse);
+        });
+      });
+
+      group('what is left of the text', () {
+        testWidgets(
+          'sending closes and empties it at once, before any answer',
+          (tester) async {
+            await pumpAssistance(tester);
+
+            await write(tester, sentinel);
+            final controller = tester.widget<TextField>(field).controller!;
+            await tester.tap(sendButton);
+            await tester.pump();
+
+            expect(controller.text, isEmpty);
+            expect(dialog, findsNothing);
+            expect(find.textContaining(sentinel), findsNothing);
+            expect(find.byType(EditableText), findsNothing);
+
+            await tester.pump();
+            expect(sent(), const [
+              RemoteSetTextCommand(id: 'text-1', text: sentinel),
+            ]);
+            expect(actionLine(tester), 'Enviando texto...');
+            expect(find.textContaining(sentinel), findsNothing);
+          },
+        );
+
+        testWidgets('Cancelar sends nothing, and the next one starts empty', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+
+          await write(tester, sentinel);
+          final controller = tester.widget<TextField>(field).controller!;
+          await press(tester, cancelButton);
+
+          expect(dialog, findsNothing);
+          expect(controller.text, isEmpty);
+          expect(find.textContaining(sentinel), findsNothing);
+          expect(sent(), isEmpty);
+
+          await openDialog(tester);
+
+          expect(tester.widget<TextField>(field).controller!.text, isEmpty);
+          expect(find.text('0 / 4096'), findsOneWidget);
+        });
+
+        testWidgets('a new dialog after a send starts empty', (tester) async {
+          await pumpAssistance(tester);
+
+          await write(tester, sentinel);
+          await press(tester, sendButton);
+          peers.last.emitRemoteControlAck('text-1');
+          await tester.pump();
+
+          await openDialog(tester);
+
+          expect(tester.widget<TextField>(field).controller!.text, isEmpty);
+        });
+
+        testWidgets('the state of the console never holds it', (tester) async {
+          await pumpAssistance(tester);
+
+          await write(tester, sentinel);
+          await press(tester, sendButton);
+          peers.last.emitRemoteControlAck('text-1');
+          await settleUi(tester);
+
+          expect(actionLine(tester), 'Texto enviado');
+          expect(find.textContaining(sentinel), findsNothing);
+          expect(storage.token, isNot(contains(sentinel)));
+        });
+      });
+
+      group('with the dialog open', () {
+        testWidgets('it holds everything back except FINALIZAR', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+
+          await write(tester, sentinel);
+
+          expect(gestureLayer, findsNothing);
+          expect(isOutlinedEnabled(tester, backButton), isFalse);
+          expect(isOutlinedEnabled(tester, homeButton), isFalse);
+          expect(isOutlinedEnabled(tester, recentsButton), isFalse);
+          expect(isTextEnabled(tester), isFalse);
+          expect(tester.widget<FilledButton>(closeButton).onPressed, isNotNull);
+
+          await tester.tapAt(tester.getTopLeft(surface) + const Offset(5, 5));
+          await settleUi(tester);
+          expect(sent(), isEmpty);
+
+          await press(tester, cancelButton);
+          expect(gestureLayer, findsOneWidget);
+          expect(isOutlinedEnabled(tester, backButton), isTrue);
+          expect(isTextEnabled(tester), isTrue);
+        });
+
+        testWidgets('it leaves the picture and the bar on their place', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+          final picture = tester.getRect(surface);
+          final finish = tester.getRect(closeButton);
+          final renderer = renderers.last;
+
+          await openDialog(tester);
+
+          expect(tester.getRect(surface), picture);
+          expect(tester.getRect(closeButton), finish);
+          expect(renderers.created, [same(renderer)]);
+          expect(renderer.disposeCount, 0);
+          expect(tester.getRect(dialog).bottom, lessThanOrEqualTo(finish.top));
+        });
+
+        for (final viewSize in const [
+          Size(1920, 855),
+          Size(1280, 600),
+          Size(1084, 435),
+          Size(700, 800),
+          Size(420, 800),
+        ]) {
+          testWidgets('${viewSize.width.toInt()}x${viewSize.height.toInt()}: '
+              'all of it can be reached', (tester) async {
+            remoteSessions.current = buildRemoteSession();
+            realtime.peerJoinedOnJoin = true;
+            await pumpConsole(tester, viewSize: viewSize);
+            await connectSocket(tester);
+            realtime.answerRelayAck({
+              'delivered': true,
+              'remoteSessionId': remoteSessionId,
+            });
+            await settleUi(tester);
+            peers.last
+              ..emitControlChannelState(WebRtcDataChannelState.open)
+              ..emitPeerState(WebRtcPeerConnectionState.connected)
+              ..emitRemoteVideoTrack('screen-0');
+            await settleUi(tester);
+            renderers.last.reportVideoAspectRatio(1280 / 800);
+            await settleUi(tester);
+
+            await tester.ensureVisible(textButton);
+            await settleUi(tester);
+            await tester.tap(textButton);
+            await settleUi(tester);
+            await tester.enterText(field, 'Hola');
+            await settleUi(tester);
+
+            expect(tester.takeException(), isNull);
+            await tester.ensureVisible(sendButton);
+            await settleUi(tester);
+            await tester.tap(sendButton);
+            await settleUi(tester);
+
+            expect(sent(), const [
+              RemoteSetTextCommand(id: 'text-1', text: 'Hola'),
+            ]);
+          });
+        }
+
+        testWidgets('a rotation does not close it', (tester) async {
+          await pumpAssistance(tester);
+          await write(tester, sentinel);
+
+          renderers.last.reportVideoAspectRatio(800 / 1280);
+          await settleUi(tester);
+
+          expect(dialog, findsOneWidget);
+          expect(tester.widget<TextField>(field).controller!.text, sentinel);
+          expect(renderers.created, hasLength(1));
+        });
+
+        /// Everything below ends with the dialog gone and its text with it.
+        void closes(
+          String name,
+          Future<void> Function(WidgetTester tester) what,
+        ) {
+          testWidgets(name, (tester) async {
+            await pumpAssistance(tester);
+            final session = peers.last;
+            await write(tester, sentinel);
+            final controller = tester.widget<TextField>(field).controller!;
+
+            await what(tester);
+            await settleUi(tester);
+
+            expect(dialog, findsNothing);
+            expect(find.textContaining(sentinel), findsNothing);
+            expect(controller.text, anyOf(isEmpty, sentinel));
+            expect(find.byType(RemoteTextDialog), findsNothing);
+            expect(session.sentRemoteControlCommands, isEmpty);
+          });
+        }
+
+        closes('FINALIZAR closes it at the press', (tester) async {
+          final gate = Completer<void>();
+          remoteSessions.closeGate = gate.future;
+
+          await tester.tap(closeButton);
+          await tester.pump();
+          await tester.pump();
+          await tester.pump();
+
+          // The backend has not answered yet.
+          expect(remoteSessions.closedIds, hasLength(1));
+          expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
+          expect(dialog, findsNothing);
+
+          gate.complete();
+        });
+
+        closes('the peer connection failing closes it', (tester) async {
+          peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+        });
+
+        closes('the connection being interrupted closes it', (tester) async {
+          peers.last.emitPeerState(WebRtcPeerConnectionState.disconnected);
+        });
+
+        closes('the channel closing closes it', (tester) async {
+          peers.last.emitControlChannelState(WebRtcDataChannelState.closed);
+        });
+
+        closes('the picture going away closes it', (tester) async {
+          await renderers.last.detach();
+        });
+
+        closes('the session closed from the tablet closes it', (tester) async {
+          remoteSessions.current = null;
+          realtime.emitRemoteSessionClosed(remoteSessionId);
+        });
+
+        closes('signing out closes it', (tester) async {
+          await tester.tap(find.byKey(const Key('logout_button')));
+        });
+
+        testWidgets('FINALIZAR with it open ends the assistance normally', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+          final session = peers.last;
+          await write(tester, sentinel);
+
+          await tester.tap(closeButton);
+          await settleUi(tester);
+
+          expect(dialog, findsNothing);
+          expect(remoteSessions.closedIds, hasLength(1));
+          expect(session.sentRemoteControlCommands, isEmpty);
+          // Releasing a peer connection resumes outside this test's clock.
+          await tester.runAsync(pumpEventQueue);
+          expect(session.isClosed, isTrue);
+        });
+
+        testWidgets('a close that fails does not bring the text back', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+          remoteSessions.closeFailure = const NetworkFailure();
+          await write(tester, sentinel);
+
+          await tester.tap(closeButton);
+          await settleUi(tester);
+
+          expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
+          expect(dialog, findsNothing);
+          expect(isTextEnabled(tester), isTrue);
+
+          await openDialog(tester);
+          expect(tester.widget<TextField>(field).controller!.text, isEmpty);
+        });
+      });
+
+      group('while it is unanswered', () {
+        testWidgets('nothing else can go out, and FINALIZAR can', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+
+          await write(tester, 'Hola');
+          await press(tester, sendButton);
+
+          expect(actionLine(tester), 'Enviando texto...');
+          expect(gestureLayer, findsNothing);
+          expect(isOutlinedEnabled(tester, backButton), isFalse);
+          expect(isOutlinedEnabled(tester, homeButton), isFalse);
+          expect(isOutlinedEnabled(tester, recentsButton), isFalse);
+          expect(isTextEnabled(tester), isFalse);
+          expect(tester.widget<FilledButton>(closeButton).onPressed, isNotNull);
+
+          await tester.tapAt(tester.getCenter(surface));
+          await tester.tap(backButton, warnIfMissed: false);
+          await tester.tap(textButton, warnIfMissed: false);
+          await settleUi(tester);
+          expect(sent(), hasLength(1));
+          expect(dialog, findsNothing);
+
+          peers.last.emitRemoteControlAck('text-1');
+          await tester.pump();
+
+          expect(actionLine(tester), 'Texto enviado');
+          expect(gestureLayer, findsOneWidget);
+          expect(isOutlinedEnabled(tester, backButton), isTrue);
+          expect(isTextEnabled(tester), isTrue);
+
+          await clickCentre(tester);
+          expect(sent(), hasLength(2));
+          expect(sent().last, isA<RemoteTapCommand>());
+        });
+
+        testWidgets('the picture stays where it is, with the same renderer', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+          final picture = tester.getRect(surface);
+          final renderer = renderers.last;
+
+          await write(tester, 'Hola');
+          await press(tester, sendButton);
+
+          expect(tester.getRect(surface), picture);
+          expect(renderers.created, [same(renderer)]);
+          expect(renderer.detachCount, 0);
+        });
+
+        testWidgets('FINALIZAR is not held back, and clears it', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+          final session = peers.last;
+          final gate = Completer<void>();
+          remoteSessions.closeGate = gate.future;
+
+          await write(tester, 'Hola');
+          await press(tester, sendButton);
+          await tester.tap(closeButton);
+          await tester.pump();
+          await tester.pump();
+          await tester.pump();
+
+          expect(remoteSessions.closedIds, hasLength(1));
+          expect(actionStatus, findsNothing);
+          expect(isTextEnabled(tester), isFalse);
+
+          session.emitRemoteControlAck('text-1');
+          await settleUi(tester);
+          expect(actionStatus, findsNothing);
+          expect(session.sentRemoteControlCommands, hasLength(1));
+
+          gate.complete();
+          await settleUi(tester);
+        });
+      });
+
+      group('the answer', () {
+        testWidgets('ok: it says the text went, and never which', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+
+          await write(tester, sentinel);
+          await press(tester, sendButton);
+          peers.last.emitRemoteControlAck('text-1');
+          await tester.pump();
+
+          expect(actionLine(tester), 'Texto enviado');
+          expect(find.textContaining(sentinel), findsNothing);
+          expect(statusLine(tester), 'Control remoto: listo');
+        });
+
+        const refusals = {
+          RemoteControlError.textTargetUnavailable:
+              'No hay un campo de texto editable enfocado.',
+          RemoteControlError.textRejected: 'El dispositivo rechazó el texto.',
+          RemoteControlError.accessibilityUnavailable:
+              'El dispositivo no tiene habilitado el control remoto.',
+          RemoteControlError.gestureRejected: 'No se pudo ejecutar la acción.',
+          RemoteControlError.invalidCommand: 'Control remoto no disponible',
+          RemoteControlError.unsupportedCommand: 'Control remoto no disponible',
+        };
+
+        refusals.forEach((error, message) {
+          testWidgets('${error.code} is explained, and nothing is repeated', (
+            tester,
+          ) async {
+            await pumpAssistance(tester);
+
+            await write(tester, 'Hola');
+            await press(tester, sendButton);
+            peers.last.emitRemoteControlAck('text-1', error: error);
+            await settleUi(tester);
+
+            expect(actionLine(tester), message);
+            expect(sent(), hasLength(1));
+            expect(peers.last.isClosed, isFalse);
+            expect(remoteSessions.closedIds, isEmpty);
+            expect(isTextEnabled(tester), isTrue);
+            expect(gestureLayer, findsOneWidget);
+            expect(dialog, findsNothing);
+          });
+        });
+
+        testWidgets('session_not_active asks REST, once, and sends nothing', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+          final readsBefore = remoteSessions.currentCount;
+
+          await write(tester, 'Hola');
+          await press(tester, sendButton);
+          peers.last.emitRemoteControlAck(
+            'text-1',
+            error: RemoteControlError.sessionNotActive,
+          );
+          await settleUi(tester);
+
+          expect(remoteSessions.currentCount, readsBefore + 1);
+          expect(sent(), hasLength(1));
+          expect(peers.last.isClosed, isFalse);
+        });
+
+        testWidgets('no answer: not before eight seconds, and not repeated', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+
+          await write(tester, 'Hola');
+          await press(tester, sendButton);
+
+          await tester.pump(const Duration(milliseconds: 7999));
+          expect(actionLine(tester), 'Enviando texto...');
+          expect(isTextEnabled(tester), isFalse);
+
+          await tester.pump(const Duration(milliseconds: 1));
+          await tester.pump();
+          expect(actionLine(tester), 'El dispositivo no confirmó el texto.');
+          expect(isTextEnabled(tester), isTrue);
+
+          peers.last.emitRemoteControlAck('text-1');
+          await tester.pump(const Duration(seconds: 30));
+          expect(actionLine(tester), 'El dispositivo no confirmó el texto.');
+          expect(sent(), hasLength(1));
+        });
+
+        testWidgets(
+          'a channel that refuses it says so, and gives nothing back',
+          (tester) async {
+            await pumpAssistance(tester);
+            peers.last.acceptsRemoteControlCommands = false;
+
+            await write(tester, sentinel);
+            await press(tester, sendButton);
+            await tester.pump();
+
+            expect(actionLine(tester), 'No se pudo enviar el texto.');
+            expect(dialog, findsNothing);
+            expect(find.textContaining(sentinel), findsNothing);
+            expect(find.byType(EditableText), findsNothing);
+          },
+        );
+
+        testWidgets('a gesture after a text speaks in the gesture line', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+
+          await write(tester, 'Hola');
+          await press(tester, sendButton);
+          peers.last.emitRemoteControlAck('text-1');
+          await tester.pump();
+          await clickCentre(tester);
+
+          expect(statusLine(tester), 'Enviando toque...');
+          expect(actionStatus, findsNothing);
+        });
+      });
+
+      testWidgets('the log of the whole round holds no text', (tester) async {
+        final printed = <String>[];
+        final previous = debugPrint;
+        debugPrint = (String? message, {int? wrapWidth}) {
+          printed.add(message ?? '');
+        };
+        // Inside the test: the framework checks it was put back as soon as the
+        // test ends, before any tear down.
+        try {
+          await pumpAssistance(tester);
+
+          await write(tester, sentinel);
+          await press(tester, sendButton);
+          peers.last.emitRemoteControlAck(
+            'text-1',
+            error: RemoteControlError.textTargetUnavailable,
+          );
+          await settleUi(tester);
+          await write(tester, sentinel);
+          await press(tester, cancelButton);
+        } finally {
+          debugPrint = previous;
+        }
+
+        expect(printed.join('\n'), isNot(contains(sentinel)));
+        expect(printed, contains(contains('set_text command sent text-1')));
+      });
+    });
+
     group('Back and Home', () {
       final backButton = find.byKey(const Key('remote_back_button'));
       final homeButton = find.byKey(const Key('remote_home_button'));
@@ -1869,6 +2691,7 @@ void main() {
             backButton,
             homeButton,
             recentsButton,
+            find.byKey(const Key('remote_text_button')),
             closeButton,
           ]) {
             final rect = tester.getRect(button);
@@ -2020,6 +2843,7 @@ void main() {
               expect(find.text('Atrás'), findsOneWidget);
               expect(find.text('Inicio'), findsOneWidget);
               expect(find.text('Recientes'), findsOneWidget);
+              expect(find.text('Texto'), findsOneWidget);
               expect(find.text('FINALIZAR ASISTENCIA'), findsOneWidget);
               final picture = tester.getSize(surface);
               expect(

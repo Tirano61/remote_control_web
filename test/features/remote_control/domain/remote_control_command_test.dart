@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_web/features/remote_control/domain/entities/normalized_remote_point.dart';
 import 'package:remote_control_web/features/remote_control/domain/entities/remote_control_command.dart';
 import 'package:remote_control_web/features/remote_control/domain/services/remote_control_command_id_generator.dart';
+import 'package:remote_control_web/features/webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dart';
 
 void main() {
   const start = NormalizedRemotePoint(0.5, 0.8);
@@ -121,6 +122,99 @@ void main() {
     });
   });
 
+  group('set_text', () {
+    const sentinel = 'SUPER_SECRET_REMOTE_TEXT_123';
+
+    test('an id and a text make it, and both tell two apart', () {
+      const command = RemoteSetTextCommand(id: 'text-1', text: 'Hola');
+
+      expect(command.kind, RemoteCommandKind.setText);
+      expect(command, const RemoteSetTextCommand(id: 'text-1', text: 'Hola'));
+      expect(
+        command == const RemoteSetTextCommand(id: 'text-1', text: 'Otra'),
+        isFalse,
+      );
+      expect(
+        command == const RemoteSetTextCommand(id: 'text-2', text: 'Hola'),
+        isFalse,
+      );
+    });
+
+    test('the text never gets printed', () {
+      const command = RemoteSetTextCommand(id: 'text-1', text: sentinel);
+
+      expect(command.toString(), 'RemoteSetTextCommand(text-1)');
+      expect('$command', isNot(contains(sentinel)));
+      expect(
+        const WebRtcRemoteTextRequested(
+          remoteSessionId: 'session',
+          text: sentinel,
+        ).toString(),
+        isNot(contains(sentinel)),
+      );
+    });
+
+    test('nothing normalizes what was written', () {
+      const written = '  Áé\n👋  ';
+
+      expect(
+        const RemoteSetTextCommand(id: 'text-1', text: written).text,
+        written,
+      );
+    });
+
+    test('empty is a valid text: it empties the field', () {
+      expect(RemoteSetTextCommand.fits(''), isTrue);
+      expect(const RemoteSetTextCommand(id: 'text-1', text: '').text, isEmpty);
+    });
+
+    test('it counts as five seconds of work', () {
+      expect(remoteSetTextEstimatedWork, const Duration(seconds: 5));
+      expect(
+        const RemoteSetTextCommand(id: 'text-1', text: 'a').estimatedWork,
+        remoteSetTextEstimatedWork,
+      );
+    });
+
+    test('it is neither a gesture nor a global action', () {
+      expect(RemoteCommandKind.setText.isGesture, isFalse);
+      expect(RemoteCommandKind.setText.isNavigation, isFalse);
+      expect(RemoteCommandKind.values.where((kind) => kind.isGesture), [
+        RemoteCommandKind.tap,
+        RemoteCommandKind.swipe,
+      ]);
+    });
+
+    group('length is counted in UTF-16 code units', () {
+      const lengths = {0: true, 1: true, 4096: true, 4097: false};
+
+      lengths.forEach((length, fits) {
+        test('$length: ${fits ? 'fits' : 'does not fit'}', () {
+          expect(RemoteSetTextCommand.fits('a' * length), fits);
+        });
+      });
+
+      test('the limit is 4096', () {
+        expect(maxRemoteTextLength, 4096);
+      });
+
+      test('an emoji counts as two', () {
+        const emoji = '👋';
+        expect(emoji.length, 2);
+
+        expect(RemoteSetTextCommand.fits('${'a' * 4094}$emoji'), isTrue);
+        expect(RemoteSetTextCommand.fits('${'a' * 4095}$emoji'), isFalse);
+      });
+
+      test('one over the limit is a bug, not something to cut', () {
+        expect(
+          () => RemoteSetTextCommand(id: 'text-1', text: 'a' * 4097),
+          throwsAssertionError,
+        );
+      });
+    });
+  });
+
   group('a swipe that breaks the contract is a bug', () {
     test('start and end being the same', () {
       expect(
@@ -170,9 +264,10 @@ void main() {
         ids.next(RemoteCommandKind.back),
         ids.next(RemoteCommandKind.home),
         ids.next(RemoteCommandKind.recents),
+        ids.next(RemoteCommandKind.setText),
         ids.next(RemoteCommandKind.tap),
       ],
-      ['tap-1', 'swipe-2', 'back-3', 'home-4', 'recents-5', 'tap-6'],
+      ['tap-1', 'swipe-2', 'back-3', 'home-4', 'recents-5', 'text-6', 'tap-7'],
     );
   });
 }

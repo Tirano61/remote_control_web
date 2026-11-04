@@ -55,6 +55,79 @@ void main() {
   Size surfaceSize(WidgetTester tester) =>
       tester.getSize(find.byKey(const Key('remote_screen_surface')));
 
+  group('what it says about the picture', () {
+    late List<bool> reported;
+
+    setUp(() => reported = []);
+
+    Future<void> pumpReporting(
+      WidgetTester tester, {
+      RemoteVideoTrack? track,
+      bool mounted = true,
+    }) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: mounted
+              ? RemoteScreenView(
+                  track: track,
+                  rendererFactory: renderers.create,
+                  maxHeight: 500,
+                  onPictureChanged: reported.add,
+                )
+              : const SizedBox.shrink(),
+        ),
+      );
+      await tester.pump();
+    }
+
+    testWidgets('a track is not a picture until its first frames', (
+      tester,
+    ) async {
+      const track = FakeRemoteVideoTrack('screen-0');
+      await pumpReporting(tester, track: track);
+
+      expect(reported, isNot(contains(true)));
+
+      renderers.last.reportVideoAspectRatio(16 / 9);
+      expect(reported.last, isTrue);
+    });
+
+    testWidgets('losing the track says so, during that very build', (
+      tester,
+    ) async {
+      const track = FakeRemoteVideoTrack('screen-0');
+      await pumpReporting(tester, track: track);
+      renderers.last.reportVideoAspectRatio(16 / 9);
+
+      await pumpReporting(tester);
+
+      expect(tester.takeException(), isNull);
+      expect(reported.last, isFalse);
+    });
+
+    testWidgets('going away says so', (tester) async {
+      const track = FakeRemoteVideoTrack('screen-0');
+      await pumpReporting(tester, track: track);
+      renderers.last.reportVideoAspectRatio(16 / 9);
+
+      await pumpReporting(tester, mounted: false);
+
+      expect(tester.takeException(), isNull);
+      expect(reported.last, isFalse);
+    });
+
+    testWidgets('a rotation is still a picture', (tester) async {
+      const track = FakeRemoteVideoTrack('screen-0');
+      await pumpReporting(tester, track: track);
+      renderers.last.reportVideoAspectRatio(16 / 9);
+      reported.clear();
+
+      renderers.last.reportVideoAspectRatio(9 / 16);
+
+      expect(reported, [true]);
+    });
+  });
+
   group('without a track', () {
     testWidgets('a placeholder is shown, not an error', (tester) async {
       await pumpView(tester);
