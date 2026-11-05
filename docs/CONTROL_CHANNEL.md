@@ -832,14 +832,38 @@ operation.
 What the session also showed:
 
 ```text
-a still screen sends no frames     decoded frames stopped counting on the launcher, and the
+a stale picture on a still screen  decoded frames stopped counting on the launcher, and the
                                    picture stayed on a frame from the middle of the Home
-                                   transition until the screen next changed. The picture
-                                   can be stale, so a focus seen on it may be older than it
-                                   looks
+                                   transition until the screen next changed. This build
+                                   predates the fix described below
 the keyboard follows the field     its suggestions changed with the text: the application
                                    and its keyboard handle what was sent like anything typed
 ```
+
+A still screen producing no frames does not make the picture wrong by itself: the last
+frame sent would be the right one. The problem observed was that the final frame of a
+transition could be lost before reaching the browser. With Android visually still
+afterwards, no other frame came to correct the image, and the technician could keep seeing
+an earlier state.
+
+`remote_control_device` has since combined two changes, and the web client did not change:
+
+```text
+enableCpuOveruseDetection = false
+one-shot settle frame               SurfaceTextureHelper.forceFrame(),
+                                    700 ms after the last real frame
+```
+
+The settle gives the final state a second chance to be transmitted. It is sent once per
+quiet period, so it is not a keepalive. CPU adaptation is disabled deliberately, to avoid
+severe restrictions such as `max_fps=2` on this screen share. No single cause is claimed to
+explain every freeze.
+
+This was validated on the physical tablet, with Chrome and a visible tab: 460 actions with
+no freeze and `max_fps=2` never applied. That is a bound and not a proof, and a settle that
+is itself lost is not sent again, so a focus seen on the picture can still be older than it
+looks. The measurements and limits are in "The final frame" of
+`docs/webrtc/SCREEN_SHARING.md` in `remote_control_device`.
 
 Two of the seven drags made in the session sent nothing and left no trace, with the
 pointer on the picture. The next four, recorded at the level of pointer events, all went
