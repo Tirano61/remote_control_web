@@ -65,8 +65,8 @@ sealed class WebRtcSessionState extends Equatable {
   /// one of them. These are not touches, and the tablet runs them whether or not
   /// it is sharing its screen.
   ///
-  /// A global action still settling holds everything back for a moment without
-  /// making anything unavailable: see [RemoteControlStatus.isNavigationSettling].
+  /// A global action or an IME action still settling holds everything back for a moment without
+  /// making anything unavailable: see [RemoteControlStatus.isSettling].
   bool get canSendRemoteNavigation =>
       isConnected && isControlChannelOpen && remoteControl.isSessionActive;
 
@@ -93,7 +93,20 @@ sealed class WebRtcSessionState extends Equatable {
   bool get canSendRemoteText =>
       canOfferRemoteText &&
       remoteControl.pendingCommands == 0 &&
-      !remoteControl.isNavigationSettling;
+      !remoteControl.isSettling;
+
+  /// Whether the IME action of the focused field can go out right now.
+  ///
+  /// The same policy as a text, for the same reason. The tablet would run it with
+  /// no picture at all, and that is precisely why the web asks for one: the action
+  /// lands on whichever field has focus, which may search, go to the next field or
+  /// send something, and the picture is the only way the technician has to check
+  /// which field that is. Nothing may be ahead of it either, or the focus could
+  /// have moved by the time it runs.
+  bool get canSendRemoteImeEnter =>
+      canOfferRemoteText &&
+      remoteControl.pendingCommands == 0 &&
+      !remoteControl.isSettling;
 
   /// Whether losing the signaling socket must leave the peer connection alone.
   ///

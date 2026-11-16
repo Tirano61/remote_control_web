@@ -6,9 +6,9 @@ import 'normalized_remote_point.dart';
 /// takes to animate it: nothing says that, and nothing here waits for it.
 const Duration remoteNavigationEstimatedWork = Duration(milliseconds: 50);
 
-/// How long after a global action was sent the screen is assumed to be still on
-/// its way somewhere else. See `RemoteNavigationGuard`.
-const Duration remoteNavigationSettleDuration = Duration(milliseconds: 350);
+/// How long after a global action or an IME action was sent the screen is assumed
+/// to be still on its way somewhere else. See `RemoteSettleGuard`.
+const Duration remoteSettleDuration = Duration(milliseconds: 350);
 
 /// The longest text the tablet takes, in UTF-16 code units: what [String.length]
 /// counts in Dart, so an emoji may well count as two.
@@ -18,6 +18,10 @@ const int maxRemoteTextLength = 4096;
 /// operation after five seconds, so that is what an answer may legitimately take.
 const Duration remoteSetTextEstimatedWork = Duration(seconds: 5);
 
+/// How long an IME action can keep the tablet's queue busy. It goes through the
+/// same accessibility bridge as a text, which gives up after the same five seconds.
+const Duration remoteImeEnterEstimatedWork = Duration(seconds: 5);
+
 /// The kinds of command the protocol defines.
 enum RemoteCommandKind {
   tap,
@@ -25,7 +29,8 @@ enum RemoteCommandKind {
   back,
   home,
   recents,
-  setText;
+  setText,
+  imeEnter;
 
   /// A touch on the picture.
   bool get isGesture => this == tap || this == swipe;
@@ -33,18 +38,31 @@ enum RemoteCommandKind {
   /// A global action of Android.
   bool get isNavigation => this == back || this == home || this == recents;
 
+  /// What may move the screen somewhere else after Android accepted it, so that
+  /// nothing else goes out until it had time to: see `RemoteSettleGuard`.
+  bool get settlesScreen => isNavigation || this == imeEnter;
+
   /// How the ids of this kind start.
-  String get idPrefix => this == setText ? 'text' : name;
+  String get idPrefix => switch (this) {
+    setText => 'text',
+    imeEnter => 'enter',
+    _ => name,
+  };
 
   /// How the log calls this kind.
-  String get logName => this == setText ? 'set_text' : name;
+  String get logName => switch (this) {
+    setText => 'set_text',
+    imeEnter => 'ime_enter',
+    _ => name,
+  };
 }
 
 /// Something the technician asks the tablet to do over the `control` channel.
 ///
 /// Sealed on purpose: the protocol is an agreement with `remote_control_device`,
 /// and a command exists here only once both sides implement it. Today that is
-/// the tap, the swipe, Back, Home, Recents and the text, and nothing else.
+/// the tap, the swipe, Back, Home, Recents, the text and the IME action, and
+/// nothing else.
 sealed class RemoteControlCommand extends Equatable {
   const RemoteControlCommand({required this.id});
 
@@ -202,4 +220,26 @@ final class RemoteSetTextCommand extends RemoteControlCommand {
   /// The id only: the text is not logged, whatever it holds.
   @override
   String toString() => 'RemoteSetTextCommand($id)';
+}
+
+/// Runs the IME action of whichever field has input focus on the tablet.
+///
+/// Not "press Enter": no key is simulated and nothing is written. The field runs
+/// the action it declares for the keyboard's action key, which may be Search, Go,
+/// Next, Send, Done or something of the application's own. Which one is not known
+/// here and is not asked: the frame carries the id and nothing else.
+final class RemoteImeEnterCommand extends RemoteControlCommand {
+  const RemoteImeEnterCommand({required super.id});
+
+  @override
+  RemoteCommandKind get kind => RemoteCommandKind.imeEnter;
+
+  @override
+  Duration get estimatedWork => remoteImeEnterEstimatedWork;
+
+  @override
+  List<Object?> get props => [id];
+
+  @override
+  String toString() => 'RemoteImeEnterCommand($id)';
 }

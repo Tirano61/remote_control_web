@@ -10,7 +10,7 @@ import '../../../../remote_control/domain/entities/remote_control_command.dart';
 import '../../../../remote_control/domain/entities/remote_control_status.dart';
 import '../../../../remote_control/domain/services/pending_remote_commands.dart';
 import '../../../../remote_control/domain/services/remote_control_command_id_generator.dart';
-import '../../../../remote_control/domain/services/remote_navigation_guard.dart';
+import '../../../../remote_control/domain/services/remote_settle_guard.dart';
 import '../../../../signaling/domain/client/technician_signaling_client.dart';
 import '../../../../signaling/domain/entities/remote_signaling_message.dart';
 import '../../../../signaling/domain/entities/webrtc_ice_candidate.dart';
@@ -58,8 +58,10 @@ part 'webrtc_session_state.dart';
 /// and an acknowledgement from a replaced peer connection is dropped like any
 /// other late callback. A command is sent at most once. Nothing queues a gesture
 /// and nothing repeats one, because it may have run even when its acknowledgement
-/// was lost. While a global action settles, new commands are dropped rather than
-/// held for later, for the same reason, and likewise while a text is unanswered.
+/// was lost. While a global action or an IME action settles, new commands are
+/// dropped rather than held for later, for the same reason, and likewise while a
+/// text is unanswered. An IME action only ever goes out because the technician
+/// pressed Acción: nothing sends one after a tap or a text.
 ///
 /// Security: SDP and ICE candidate contents never reach the log, and neither do
 /// the coordinates of a gesture or a text. What is logged is the lifecycle — created,
@@ -73,16 +75,14 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     required WebRtcIceConfiguration iceConfiguration,
     RemoteControlCommandIdGenerator? commandIdGenerator,
     Duration remoteCommandMargin = defaultRemoteCommandMargin,
-    Duration navigationSettleDuration = remoteNavigationSettleDuration,
+    Duration settleDuration = remoteSettleDuration,
   }) : _peerClient = peerClient,
        _signalingClient = signalingClient,
        _iceConfiguration = iceConfiguration,
        _commandIdGenerator =
            commandIdGenerator ?? SequentialRemoteControlCommandIdGenerator(),
        _pendingCommands = PendingRemoteCommands(margin: remoteCommandMargin),
-       _navigationGuard = RemoteNavigationGuard(
-         settleDuration: navigationSettleDuration,
-       ),
+       _settleGuard = RemoteSettleGuard(settleDuration: settleDuration),
        super(const WebRtcIdle()) {
     on<WebRtcNegotiationRequested>(_onNegotiationRequested);
     on<WebRtcSignalingLost>(_onSignalingLost);
@@ -93,10 +93,11 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     on<WebRtcRemoteHomeRequested>(_onRemoteHomeRequested);
     on<WebRtcRemoteRecentsRequested>(_onRemoteRecentsRequested);
     on<WebRtcRemoteTextRequested>(_onRemoteTextRequested);
+    on<WebRtcRemoteImeEnterRequested>(_onRemoteImeEnterRequested);
     on<WebRtcRemotePictureChanged>(_onRemotePictureChanged);
     on<WebRtcRemoteSessionActivityChanged>(_onRemoteSessionActivityChanged);
     on<_WebRtcRemoteCommandTimedOut>(_onRemoteCommandTimedOut);
-    on<_WebRtcRemoteNavigationSettled>(_onRemoteNavigationSettled);
+    on<_WebRtcRemoteActionSettled>(_onRemoteActionSettled);
     on<_WebRtcPeerReported>(_onPeerReported);
     on<_WebRtcSignalingReported>(_onSignalingReported);
 
@@ -166,15 +167,15 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   /// The most recent command of the current negotiation.
   RemoteCommandFeedback? _lastRemoteCommand;
 
-  /// Holds new commands back while a global action of the current negotiation
-  /// is under way.
-  final RemoteNavigationGuard _navigationGuard;
+  /// Holds new commands back while a global action or an IME action of the
+  /// current negotiation is under way.
+  final RemoteSettleGuard _settleGuard;
 
   @override
   Future<void> close() async {
     // Before anything is awaited: a deadline must not outlive this call.
     _pendingCommands.clear();
-    _navigationGuard.clear();
+    _settleGuard.clear();
     await _incomingSubscription.cancel();
     _generation++;
     await _releaseNegotiation();
@@ -456,6 +457,31 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     );
   }
 
+  /// The Acción button.
+  ///
+  /// Asks for what a text asks for: the picture, so that the technician could see
+  /// which field has focus, and nothing ahead of it.
+  Future<void> _onRemoteImeEnterRequested(
+    WebRtcRemoteImeEnterRequested event,
+    Emitter<WebRtcSessionState> emit,
+  ) async {
+    final session = _sessionAcceptingCommands(
+      event.remoteSessionId,
+      isAvailable: state.canSendRemoteImeEnter,
+    );
+    if (session == null) {
+      logDebug('remote ime_enter ignored ${event.remoteSessionId}');
+      return;
+    }
+    await _sendRemoteCommand(
+      session,
+      RemoteImeEnterCommand(
+        id: _commandIdGenerator.next(RemoteCommandKind.imeEnter),
+      ),
+      emit,
+    );
+  }
+
   /// What the surface says about the picture of this negotiation.
   void _onRemotePictureChanged(
     WebRtcRemotePictureChanged event,
@@ -470,7 +496,8 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   /// The session a command aimed at [remoteSessionId] may be sent on, if any.
   ///
   /// [isAvailable] is what this kind of command asks of the state. A global
-  /// action settling or a text unanswered holds back every kind alike.
+  /// action or an IME action settling, or a text unanswered, holds back every
+  /// kind alike.
   WebRtcPeerSession? _sessionAcceptingCommands(
     String remoteSessionId, {
     required bool isAvailable,
@@ -479,7 +506,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     if (session == null ||
         session.remoteSessionId != remoteSessionId ||
         !isAvailable ||
-        _navigationGuard.isActive ||
+        _settleGuard.isActive ||
         _isTextPending) {
       return null;
     }
@@ -510,12 +537,14 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         add(_WebRtcRemoteCommandTimedOut(commandId, generation));
       },
     );
-    if (command is RemoteNavigationCommand) {
-      _navigationGuard.begin(
-        command.id,
+    // From the moment it is sent: until it is answered, and then until the screen
+    // had time to move.
+    if (kind.settlesScreen) {
+      _settleGuard.begin(
+        commandId,
         onElapsed: (commandId) {
           if (isClosed) return;
-          add(_WebRtcRemoteNavigationSettled(commandId, generation));
+          add(_WebRtcRemoteActionSettled(commandId, generation));
         },
       );
     }
@@ -534,7 +563,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
       return;
     }
     if (_pendingCommands.settle(commandId) == null) return;
-    _navigationGuard.release(commandId);
+    _settleGuard.release(commandId);
     _reportCommand(commandId, RemoteCommandOutcome.notSent);
     emit(_withNegotiationFacts(state));
   }
@@ -549,7 +578,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
 
     // Nothing sent for the previous answer can be spoken about any more.
     _pendingCommands.clear();
-    _navigationGuard.clear();
+    _settleGuard.clear();
     _lastRemoteCommand = null;
 
     final next = _withNegotiationFacts(state);
@@ -567,17 +596,17 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     // Reported and left there. The gesture may have run with its answer lost,
     // so sending it again could press something twice.
     logDebug('${command.kind.logName} timed out ${event.commandId}');
-    _navigationGuard.release(event.commandId);
+    _settleGuard.release(event.commandId);
     _reportCommand(event.commandId, RemoteCommandOutcome.timedOut);
     emit(_withNegotiationFacts(state));
   }
 
-  void _onRemoteNavigationSettled(
-    _WebRtcRemoteNavigationSettled event,
+  void _onRemoteActionSettled(
+    _WebRtcRemoteActionSettled event,
     Emitter<WebRtcSessionState> emit,
   ) {
     if (event.generation != _generation) return;
-    _navigationGuard.elapse(event.commandId);
+    _settleGuard.elapse(event.commandId);
     final next = _withNegotiationFacts(state);
     if (next != state) emit(next);
   }
@@ -597,14 +626,14 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     final error = ack.error;
     if (error == null) {
       logDebug('${command.kind.logName} confirmed ${ack.commandId}');
-      _navigationGuard.accept(ack.commandId);
+      _settleGuard.accept(ack.commandId);
     } else {
-      logDebug(
-        command.kind == RemoteCommandKind.setText
-            ? 'set_text rejected ${ack.commandId}: ${error.code}'
-            : 'remote control command rejected: ${error.code}',
-      );
-      _navigationGuard.release(ack.commandId);
+      logDebug(switch (command.kind) {
+        RemoteCommandKind.setText || RemoteCommandKind.imeEnter =>
+          '${command.kind.logName} rejected ${ack.commandId}: ${error.code}',
+        _ => 'remote control command rejected: ${error.code}',
+      });
+      _settleGuard.release(ack.commandId);
     }
     _reportCommand(ack.commandId, _outcomeOf(error));
     emit(_withNegotiationFacts(state));
@@ -622,6 +651,10 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         RemoteControlError.textTargetUnavailable =>
           RemoteCommandOutcome.textTargetUnavailable,
         RemoteControlError.textRejected => RemoteCommandOutcome.textRejected,
+        RemoteControlError.imeActionUnavailable =>
+          RemoteCommandOutcome.imeActionUnavailable,
+        RemoteControlError.imeActionRejected =>
+          RemoteCommandOutcome.imeActionRejected,
         RemoteControlError.invalidCommand ||
         RemoteControlError.unsupportedCommand ||
         RemoteControlError.unknown => RemoteCommandOutcome.incompatible,
@@ -674,7 +707,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         _controlChannelState = channelState;
         if (channelState != WebRtcDataChannelState.open) {
           _abandonPendingCommands();
-          _navigationGuard.clear();
+          _settleGuard.clear();
         }
         final next = _withNegotiationFacts(state);
         if (next != state) emit(next);
@@ -880,7 +913,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     _remoteVideoTrack = null;
     _isPictureDisplayed = false;
     _pendingCommands.clear();
-    _navigationGuard.clear();
+    _settleGuard.clear();
     _lastRemoteCommand = null;
 
     await subscription?.cancel();
@@ -930,7 +963,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         isSessionActive: _activeRemoteSessionId == remoteSessionId,
         lastCommand: _lastRemoteCommand,
         pendingCommands: _pendingCommands.length,
-        isNavigationSettling: _navigationGuard.isActive,
+        isSettling: _settleGuard.isActive,
         isTextPending: _isTextPending,
         isPictureDisplayed: _isPictureDisplayed,
       );

@@ -1,10 +1,13 @@
 import 'dart:async';
 
-/// Keeps new commands away from the tablet while a global action is under way.
+/// Keeps new commands away from the tablet while an action that may move the
+/// screen somewhere else is under way: a global action, Back, Home or Recents, or
+/// the IME action of the focused field.
 ///
-/// Android acknowledges a global action as soon as it accepts it, with the
-/// transition still animating, so a tap right after the answer to a Home could
-/// land on the previous screen or on the transition itself.
+/// Android acknowledges either as soon as it accepts it, with the transition still
+/// animating or the application still reacting, so a tap right after the answer
+/// to a Home could land on the previous screen or on the transition itself. An
+/// IME action may likewise start a search, move the focus or open another screen.
 ///
 /// ```text
 /// accepted    ends when it was answered AND the settle time has passed,
@@ -15,8 +18,8 @@ import 'dart:async';
 ///
 /// A deadline only reports here too: the caller decides when to give it back, so
 /// that a timer never changes anything outside its own event.
-class RemoteNavigationGuard {
-  RemoteNavigationGuard({required Duration settleDuration})
+class RemoteSettleGuard {
+  RemoteSettleGuard({required Duration settleDuration})
     : _settleDuration = settleDuration;
 
   final Duration _settleDuration;

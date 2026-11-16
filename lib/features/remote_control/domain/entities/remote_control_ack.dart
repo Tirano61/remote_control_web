@@ -20,12 +20,18 @@ enum RemoteControlError {
   /// The tablet does not know this command or protocol version.
   unsupportedCommand('unsupported_command'),
 
-  /// A valid text with nowhere to go: no active window, nothing with input focus,
-  /// or a focused node that is not editable or not enabled.
+  /// A valid text or IME action with nowhere to go: no active window, nothing
+  /// with input focus, or a focused node that is not editable or not enabled.
   textTargetUnavailable('text_target_unavailable'),
 
   /// There was somewhere to write, and `ACTION_SET_TEXT` did not take it.
   textRejected('text_rejected'),
+
+  /// The focused field is there and editable, and declares no IME action.
+  imeActionUnavailable('ime_action_unavailable'),
+
+  /// The focused field declares an IME action, and Android did not run it.
+  imeActionRejected('ime_action_rejected'),
 
   /// A code this version does not know. The tablet did answer that the command
   /// failed, which is all that can be said about it.
@@ -46,7 +52,9 @@ enum RemoteControlError {
 /// reported the gesture **completed**, not that it was requested. For Back or
 /// Home, Android **accepted** the global action, which may still be animating and
 /// may have had no visible effect at all. For a text, the focused node **accepted**
-/// `ACTION_SET_TEXT`, and nothing says what the field ended up holding. A command may
+/// `ACTION_SET_TEXT`, and nothing says what the field ended up holding. For an IME
+/// action, the focused node **accepted** `ACTION_IME_ENTER`: not that a search ran, a
+/// form went or the screen changed. A command may
 /// also never get an answer, so the sender keeps its own timeout.
 final class RemoteControlAck extends Equatable {
   const RemoteControlAck({required this.commandId, this.error});

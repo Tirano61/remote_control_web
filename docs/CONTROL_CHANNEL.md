@@ -1,8 +1,8 @@
 # Control channel — `remote_control_web`
 
 How what the technician does on the picture becomes a gesture on the tablet, and
-what the Atrás, Inicio and Recientes buttons and the Texto dialog become, seen from
-the web.
+what the Atrás, Inicio and Recientes buttons, the Texto dialog and the Acción button
+become, seen from the web.
 
 The protocol itself is an agreement with `remote_control_device`, carried peer
 to peer: the backend never sees it. Its source is
@@ -41,7 +41,7 @@ Atrás, Inicio, Recientes
      RemoteHomeCommand
      RemoteRecentsCommand
   -> PendingRemoteCommands           the same map, the same deadlines
-     RemoteNavigationGuard           starts now, see Back, Home and Recents
+     RemoteSettleGuard               starts now, see the settle guard
   -> RemoteControlChannelCodec
   -> `control` data channel
   -> Android performGlobalAction
@@ -64,12 +64,27 @@ técnico sees the field focused on the picture -> Texto -> writes -> Enviar text
   -> RemoteCommandFeedback           the end of the line above the buttons
 ```
 
+The IME action joins it at the event too, and only from a press of Acción:
+
+```text
+técnico sees the field focused on the picture -> Acción
+  -> WebRtcRemoteImeEnterRequested   the BLoC checks the same gate as a text
+  -> RemoteImeEnterCommand           id from the same generator, and nothing else
+  -> PendingRemoteCommands           the same map, the same deadlines
+     RemoteSettleGuard               starts now, as for a global action
+  -> RemoteControlChannelCodec
+  -> `control` data channel
+  -> Android ACTION_IME_ENTER on the node with input focus
+  -> ack
+  -> RemoteCommandFeedback           the end of the line above the buttons
+```
+
 Presentation knows normalized coordinates, gesture intents and a status. It does
 not know `RTCDataChannel`, `RTCDataChannelMessage`, `jsonEncode` or `flutter_webrtc`.
 
 ## Protocol v1
 
-`tap`, `swipe`, `back`, `home`, `recents` and `set_text`. One text frame holding one
+`tap`, `swipe`, `back`, `home`, `recents`, `set_text` and `ime_enter`. One text frame holding one
 JSON object, on the existing `control` channel. No other channel is created.
 
 ```json
@@ -97,6 +112,10 @@ JSON object, on the existing `control` channel. No other channel is created.
 ```
 
 ```json
+{"v":1,"type":"ime_enter","id":"enter-7"}
+```
+
+```json
 {"v":1,"type":"ack","id":"swipe-2","ok":true}
 ```
 
@@ -109,7 +128,8 @@ In a swipe the four coordinates are the same kind of value as a tap's, and
 a swipe whose start equals its end. A tap has no `durationMs`: Android holds it
 for its own 50 ms. `back`, `home` and `recents` carry their id and nothing else: they
 are not touches, so no coordinate and no duration means anything to them. In a
-`set_text`, `text` is required and has `0..4096` UTF-16 code units.
+`set_text`, `text` is required and has `0..4096` UTF-16 code units. An `ime_enter`
+carries its id and nothing else: no `text`, no `keyCode`, no `actionId`, no position.
 
 An ack is valid when `v == 1`, `type == "ack"`, `id` is a non-empty string and
 `ok` is a bool; with `ok: false`, `error` must also be a string. Anything else is
@@ -125,6 +145,8 @@ tap, swipe           Android reported the gesture completed, not merely that it 
                      requested
 back, home, recents  Android accepted the global action
 set_text             the focused node accepted ACTION_SET_TEXT
+ime_enter            the focused node accepted ACTION_IME_ENTER, and nothing about
+                     what the application then did
 ```
 
 `performGlobalAction` returns a boolean and has no callback. A global action that was
@@ -133,7 +155,8 @@ with nothing to go back to, for instance. So `Inicio enviado` says the tablet to
 action, never that the launcher is on screen, and `Recientes enviado` never that the
 overview has finished appearing. The field is not read back either, so `Texto enviado`
 does not say what the field ended up holding: an application may filter what it is
-given. Only the picture can show that.
+given. `Acción enviada` does not say that a search ran, a form went, the focus moved or
+the screen changed. Only the picture can show that.
 
 ## From a pointer to a coordinate
 
@@ -319,7 +342,8 @@ about them.
 
 ### The bar stays on screen
 
-The three buttons and `FINALIZAR ASISTENCIA` are one bar, right under the picture and
+The buttons, `Atrás`, `Inicio`, `Recientes`, `Texto` and `Acción`, and
+`FINALIZAR ASISTENCIA` are one bar, right under the picture and
 never on top of it: there it would cover part of the tablet and take clicks from the
 pointer layer. The rest of the block, the diagnostics, goes below the bar.
 
@@ -330,7 +354,7 @@ device name  public id
 |                    picture                    |
 +-----------------------------------------------+
 gestures: Control remoto: listo   Recientes enviado
-[Atrás] [Inicio] [Recientes]   [FINALIZAR ASISTENCIA]
+[Atrás] [Inicio] [Recientes] [Texto] [Acción]   [FINALIZAR ASISTENCIA]
 Estado, Canal de asistencia, Conexión remota
 ```
 
@@ -358,7 +382,8 @@ pointer conversion reads the size at every event. A window resized during a pres
 that press, like any surface that changed size.
 
 When the buttons do not fit one row they wrap, and `FINALIZAR ASISTENCIA` goes to its
-own.
+own. Their horizontal padding is 10 px so that, with `Acción` added, the whole bar still
+takes a single row in a 1280 px window.
 
 ### They need no picture
 
@@ -392,9 +417,13 @@ HOME -> ack at once -> a tap right away -> it lands on the previous screen,
                                            or on the transition
 ```
 
-So for **350 ms** (`remoteNavigationSettleDuration`) from the moment a global action
-is sent, and for as long as it is unanswered, no new command of any kind is taken
-(`RemoteNavigationGuard`). It ends when **both** have happened:
+An IME action is the same kind of thing: Android accepts `ACTION_IME_ENTER` at once,
+and the application may then start a search, move the focus or open another screen.
+
+So for **350 ms** (`remoteSettleDuration`) from the moment a global action or an
+`ime_enter` is sent, and for as long as it is unanswered, no new command of any kind is
+taken (`RemoteSettleGuard`, formerly `RemoteNavigationGuard`: one guard, one 350 ms, for
+every command whose kind `settlesScreen`). It ends when **both** have happened:
 
 ```text
 accepted by Android     ack ok: true
@@ -411,6 +440,7 @@ ack at 500 ms    ends there and then, with nothing added
 | a tap, a swipe | dropped, never queued: the surface has no pointer layer for that moment, and the BLoC drops them too |
 | a press that starts then | not picked up afterwards, like any press the layer did not see begin |
 | another Back, Home or Recents | the buttons are disabled, and the BLoC drops them too: a double click is one action |
+| a text, an IME action | the buttons are disabled, and the BLoC drops them too |
 | FINALIZAR ASISTENCIA | not held back |
 | the picture, the channel, the peer connection, Android | untouched: frames keep arriving |
 
@@ -422,7 +452,9 @@ A command that was not accepted **ends it at once**, because nothing is animatin
 
 ```text
 accessibility_unavailable, gesture_rejected, session_not_active,
-invalid_command, unsupported_command, unknown code     at the answer
+text_target_unavailable, ime_action_unavailable,
+ime_action_rejected, invalid_command,
+unsupported_command, unknown code                      at the answer
 timeout                                                at its deadline
 channel refused the message                            at that moment
 ```
@@ -633,6 +665,113 @@ of `TextField` is an empty list, which still enables autofill: the textarea gets
 Emptying the controller does not reach it, because the connection is already closed.
 This only shows in a browser, so a test holds the `null` in place.
 
+## IME action (Acción)
+
+`ime_enter` runs the IME action of whichever field has input focus on the tablet:
+Android's `ACTION_IME_ENTER` on that node. The web presents it as **Acción**.
+
+**It is not "press Enter".** No key is simulated and nothing is written. The field runs
+the action it declares for the keyboard's action key, which may look like `Buscar`, `Ir`,
+`Siguiente`, `Enviar`, `Listo` or something of the application's own. **The web does not
+know which one**, and does not ask: the tablet sends no label, no field name, no content,
+no package and no password state, and the frame carries the id and nothing else.
+
+### Always explicit
+
+```text
+TAP on the field -> the technician sees it focused -> (Texto) -> Acción
+```
+
+The only way an `ime_enter` goes out is a press of `Acción`. There is **no action sent
+after a tap, none after a text, acknowledged or not, no fixed delay and no chain**. A tap
+says nothing about where the focus ended up, and a text sent is not a request to submit
+it. Tests hold this in place for both.
+
+### When it is available
+
+Exactly what a text asks for, for the same reason (`canSendRemoteImeEnter`):
+
+```text
+RemoteSession ACTIVE, and not being closed    yes
+RTCPeerConnectionState connected              yes
+control channel open                          yes
+aimed at the current session                  yes
+a remote video track                          yes
+the renderer really displaying a picture      yes, in the BLoC too
+no global action or IME action settling       yes
+no text unanswered                            yes
+nothing else pending                          yes
+the text dialog closed                        yes
+```
+
+**The tablet would run it with no picture at all; the web deliberately does not.** The
+action lands on whichever field has focus, and may search, move to another field or send
+something: the picture is the only way the technician has to check which field that is.
+So without video `Acción` is disabled while `Atrás`, `Inicio` and `Recientes` still work.
+
+**Nothing pending ahead of it**: a tap, a swipe, a text or a global action still running
+could move the focus away from the field the technician saw. It is never queued behind
+them: the button is disabled, and a request that arrives anyway is dropped, with no id
+taken and nothing reported.
+
+### The guard
+
+From the moment it is sent, the [settle guard](#the-settle-guard): no tap, swipe, Back,
+Home, Recents, text or second `ime_enter` goes out, and none is queued.
+`FINALIZAR ASISTENCIA` is not held back.
+
+```text
+ack ok at  40 ms     held until 350 ms
+ack ok at 600 ms     ends at 600 ms
+
+ime_action_unavailable, ime_action_rejected, text_target_unavailable,
+accessibility_unavailable, session_not_active, any other refusal    at the answer
+timeout                                                            at its deadline
+channel refused the message                                        at that moment
+channel closed, peer failed, session closed, FINALIZAR, sign out   at that moment
+```
+
+A refusal ends it at once: Android did not take the action, so nothing is moving.
+Nothing is ever sent again on its own.
+
+### Timeout
+
+`performImeEnter` goes through the same accessibility bridge as a text, with the same
+five second guard on the tablet (`gestureTimeout`), so it counts as
+`remoteImeEnterEstimatedWork = 5 s`. With nothing ahead and the 3 s margin, its deadline
+is always **8 s**, under the 45 s ceiling.
+
+### What it says
+
+| Situation | |
+| --- | --- |
+| ack pending | `Ejecutando acción...` |
+| `ok: true` | `Acción enviada` |
+| `text_target_unavailable` | `No hay un campo de texto editable enfocado.` |
+| `ime_action_unavailable` | `El campo enfocado no ofrece una acción de teclado.` |
+| `ime_action_rejected` | `El dispositivo rechazó la acción del campo.` |
+| `accessibility_unavailable` | `El dispositivo no tiene habilitado el control remoto.` |
+| `session_not_active` | `La asistencia no está activa en el dispositivo.` |
+| timeout | `El dispositivo no confirmó la acción.` |
+| could not be handed to the channel | `No se pudo enviar la acción.` |
+| `invalid_command`, `unsupported_command`, unknown | `Control remoto no disponible` |
+
+Never `Búsqueda ejecutada`, `Mensaje enviado` or `Enter presionado`: the web does not
+know what the action was or what it did. The button's tooltip says what it does without
+claiming to know which action it is: `Ejecuta la acción disponible del campo enfocado,
+por ejemplo Buscar, Ir, Siguiente o Enviar.`
+
+`text_target_unavailable` is shared with the text, because the target is the same: no
+window, nothing with input focus, or a focused node that is not editable or enabled.
+`ime_action_unavailable` is different: the field is there and is fine, and declares no
+IME action. Not every `EditText` exposes `ACTION_IME_ENTER`, and below Android 11 none
+does.
+
+### Privacy
+
+An `ime_enter` carries no text, and its answer carries no content, label or metadata of
+the node. The log has its id and, on a refusal, the public error code: nothing else.
+
 ## Pending commands
 
 ```text
@@ -691,6 +830,7 @@ deadline = min(work of what is still pending ahead
 work     tap 50 ms, swipe its durationMs,
          back, home and recents 50 ms  (remoteNavigationEstimatedWork)
          set_text 5 s  (remoteSetTextEstimatedWork)
+         ime_enter 5 s  (remoteImeEnterEstimatedWork)
 margin   3 s  (WebRtcSessionBloc.defaultRemoteCommandMargin)
 ```
 
@@ -706,6 +846,7 @@ a back, a home or a recents alone  3.05 s
 a home behind a swipe of 2 s     5.05 s
 a swipe of 350 ms alone          3.35 s
 a text                           8 s
+an ime_enter                     8 s
 swipe 2 s behind a swipe of 2 s  7 s
 the 17th long swipe in a row     37 s
 ```
@@ -735,9 +876,11 @@ unsupported_command         idem
 text_target_unavailable     a message; never sent again: the technician focuses the
                             field and writes it again
 text_rejected               idem
+ime_action_unavailable      a message; never sent again, nothing stands in for it
+ime_action_rejected         idem
 ```
 
-The same for Back, Home and Recents, and each of them also ends the
+The same for Back, Home, Recents and `ime_enter`, and each of them also ends the
 [settle guard](#the-settle-guard). `gesture_rejected` on a text means the tablet's queue
 was full. None of them closes the `RemoteSession` or the peer connection.
 
@@ -771,10 +914,10 @@ guard covers them: an ack is a peer event, so one from a replaced or closed peer
 connection is dropped before it can touch anything, and a deadline carries the
 generation it was started in, and so does the settle time of a global action. An old
 `swipe-1` can therefore not resolve a new `swipe-1`, even if a generator repeated the
-id, and an old `back-1` or `recents-1` cannot end the guard of a new one.
+id, and an old `back-1`, `recents-1` or `enter-1` cannot end the guard of a new one.
 
 The default generator counts `tap-1`, `swipe-2`, `back-3`, `home-4`, `recents-5`,
-`text-6`, ... on one counter for as long as the page lives, and does not restart with a negotiation. It is injectable
+`text-6`, `enter-7`, ... on one counter for as long as the page lives, and does not restart with a negotiation. It is injectable
 (`RemoteControlCommandIdGenerator`), and never derives an id from coordinates or
 screen content.
 
@@ -784,6 +927,80 @@ screen content.
 tests**: it suppresses the accessibility service, and a command would never reach
 `dispatchGesture`. Use `adb logcat`, `dumpsys` and `adb exec-out screencap -p`.
 The toggle and the *full control* dialog are the user's, by hand, always.
+
+### What has been observed of the IME action on the physical tablet
+
+Chrome and a LUCKYSTAR T10A running **Android 16** (SDK 36, 1200x1920 portrait), with a
+debug `remote_control_device` built from its `main` (cf23d85, which merges
+`feature/device-remote-control-ime-enter` and then `feature/device-ime-enter-disclosure`)
+against the LAN backend and installed with `adb install -r` (SHA-256 `2888bc8f...917d2d`).
+The tablet had never been enrolled: a new Device was created with `POST /devices` and
+`POST /devices/:id/enrollment`, and activated on the tablet with its `publicId` and code.
+The accessibility toggle, PERMITIR and the screen-sharing dialog were done by hand. The web
+ran from `feature/web-remote-control-ime-enter`. One `RemoteSession` for the commands, with
+no F5. Frames were read by wrapping `RTCDataChannel` in the page (type and id only, and the
+whole frame for `ime_enter` and its ack); Android's side from `dumpsys` and
+`adb exec-out screencap -p`. The buttons were clicked with the mouse, except where noted.
+
+```text
+disclosure before PERMITIR (second request)   five lines, the fifth "Usar la acción disponible
+                                              del teclado en el campo seleccionado, por ejemplo
+                                              Buscar, Ir, Siguiente o Enviar.", all of it and
+                                              both buttons on screen without scrolling
+regressions, same session: Home, swipe up on
+  the launcher, Back, tap on Settings         the real effect, ack ok (28 to 461 ms)
+tap on "Buscar en Configuración", 6 s         field focused, keyboard up with its search key;
+                                              no ime_enter sent
+set_text "wifi", then 7 s                     "wifi" in the field, results listed, ack ok in
+                                              103 ms; no ime_enter sent
+Acción                                        {"v":1,"type":"ime_enter","id":"enter-7"}
+                                              {"v":1,"type":"ack","id":"enter-7","ok":true}
+                                              in 62 ms, "Acción enviada"; Settings ran its
+                                              search action: the keyboard closed
+                                              (mInputShown=false) and the results took the
+                                              whole screen, on the tablet and on the picture
+Acción again on the same field                text_target_unavailable: the search action had
+                                              taken the input focus away from the field
+Acción on the launcher                        text_target_unavailable in 36 ms, "No hay un
+                                              campo de texto editable enfocado.", nothing else
+service disabled by hand, Acción              accessibility_unavailable in 25 ms, the message,
+                                              no effect; session, picture and channel go on
+service enabled again                         Home, tap, Back work, same session
+Acción on an empty search field               ack ok, nothing visible: Settings does nothing
+                                              with an empty query
+```
+
+The settle guard, driven with pointer events dispatched in the page on the real buttons and
+picture, because the answer is faster than a hand:
+
+```text
+ack ok at 50 ms     Inicio 111, Atrás 162, Recientes 211, tap 245, drag 266, Texto 305,
+                    Acción 337 ms: nothing sent; Acción at 475 ms sent
+ime_enter frame held 500 ms in the page, ack ok at 549 ms
+                    Atrás at 405 ms: nothing sent; Atrás at 591 ms sent, ack ok
+refused at 52 ms    (text_target_unavailable) Inicio at 105 ms sent: no settle time
+FINALIZAR 89 ms after an Acción answered ok
+                    nothing sent afterwards, the request COMPLETED, the control channel
+                    closed, no media projection left on the tablet and its capture
+                    indicator gone
+```
+
+What Android 16 on this tablet showed:
+
+```text
+FOCUS_INPUT             as expected: the focused search field was found, and lost its
+                        focus once its own search action ran
+ACTION_IME_ENTER        exposed by the Settings search field; accepted
+AccessibilityService    enabled by hand, bound with capabilities 33 (window content +
+                        gestures) and no event types; no shortcut assigned
+MediaProjection         the system dialog offers "Compartir pantalla completa" by default
+log level               log.tag=E on this build drops every Log.i, so the tablet's own
+                        RemoteControlInput lines never reach logcat. Its side was read from
+                        the acks, dumpsys and the screen. Not a bug of either project
+```
+
+`ime_action_unavailable` was **not reproduced on the device**: no natural, safe field without
+`ACTION_IME_ENTER` was at hand, and none was built for it. The automated tests cover it.
 
 ### What has been observed of text on the physical tablet
 
@@ -1064,6 +1281,9 @@ recents timed out <id>           remote recents ignored <session>
 set_text command sent <id>       set_text confirmed <id>
 set_text timed out <id>          set_text rejected <id>: <code>
 remote text ignored <session>
+ime_enter command sent <id>      ime_enter confirmed <id>
+ime_enter timed out <id>         ime_enter rejected <id>: <code>
+remote ime_enter ignored <session>
 remote control command rejected: <code>
 control message ignored <remoteSessionId>
 control ack ignored <id>

@@ -448,7 +448,7 @@ void main() {
 
           h.ack(id);
           expect(h.status.pendingCommands, 0);
-          expect(h.status.isNavigationSettling, isTrue);
+          expect(h.status.isSettling, isTrue);
           expect(h.canSendText, isFalse);
           h.text('Hola');
           expect(h.sent, [id]);
@@ -558,7 +558,7 @@ void main() {
       h.text('Otro');
 
       expect(h.sent, ['text-1']);
-      expect(h.status.isNavigationSettling, isFalse);
+      expect(h.status.isSettling, isFalse);
     }
 
     test('nothing else goes out while it is unanswered', () {
@@ -605,7 +605,7 @@ void main() {
 
         h.ack('text-1');
 
-        expect(h.status.isNavigationSettling, isFalse);
+        expect(h.status.isSettling, isFalse);
         expect(h.canSendText, isTrue);
         expect(h.time.pendingTimers, isEmpty);
 
