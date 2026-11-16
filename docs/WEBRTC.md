@@ -1,8 +1,9 @@
 # WebRTC on the technician console — decisions
 
-Stage: Prompt 16 (the tablet's screen is displayed, a click sends a tap, a drag
-sends a swipe, three buttons send Back, Home and Recents, and a dialog sends a text to
-the focused field; see [CONTROL_CHANNEL.md](CONTROL_CHANNEL.md)).
+Stage: Prompt 18 (the tablet's screen is displayed, a click sends a tap, a drag
+sends a swipe, holding the pointer still sends a long press, three buttons send Back,
+Home and Recents, a dialog sends a text to the focused field and Acción runs its IME
+action; see [CONTROL_CHANNEL.md](CONTROL_CHANNEL.md)).
 
 This document records the choices that are **not** part of the backend
 contract. `docs/backend/REALTIME.md` only relays SDP and ICE and is
@@ -116,8 +117,8 @@ through `onDataChannel`.
 Its state (`connecting`, `open`, `closing`, `closed`) is tracked apart from the
 peer connection state: `connected` does not imply the channel is already open.
 
-It carries seven commands, the tap, the swipe, Back, Home, Recents, `set_text` and
-`ime_enter`, and their acknowledgements. The protocol and what each side does with it are
+It carries eight commands, the tap, the swipe, the long press, Back, Home, Recents,
+`set_text` and `ime_enter`, and their acknowledgements. The protocol and what each side does with it are
 in [CONTROL_CHANNEL.md](CONTROL_CHANNEL.md). `set_text` is the only one whose content is
 sensitive: it crosses this channel because that is the operation, and is not logged or
 kept ([Remote text privacy](CONTROL_CHANNEL.md#remote-text-privacy)). Keys, a cursor,
@@ -130,6 +131,23 @@ says Android accepted it. It requires the picture to be really displayed, so tha
 technician can confirm on it which field has focus, nothing pending ahead of it, and a
 deliberate press: it is never sent after a tap or a text. See
 [CONTROL_CHANNEL.md](CONTROL_CHANNEL.md#ime-action-acción).
+
+`long_press` has no button: holding the pointer still on the picture sends it, from the
+same surface as a tap and a swipe.
+
+```text
+mouse/touch hold  -> long_press   {"v":1,"type":"long_press","id":"long-3","x":0.5,"y":0.25}
+
+release before kLongPressTimeout, not moved   -> tap
+moved >= 6 px before kLongPressTimeout        -> swipe
+held still for kLongPressTimeout              -> long press, once, while still down
+```
+
+The web decides **when** the technician means a long press (Flutter's
+`kLongPressTimeout`); the device decides **how long** Android holds it
+(`getLongPressTimeout() + 100 ms`), and no duration crosses the channel. It asks for the
+picture really displayed and nothing pending, like Acción, and settles like a global
+action. See [CONTROL_CHANNEL.md](CONTROL_CHANNEL.md#long-press).
 
 ## The screen: one `recvonly` video section
 
@@ -319,12 +337,13 @@ attached, the surface shows **"Esperando pantalla del dispositivo..."**. That
 is decided by the renderer reporting a size, never by a timer.
 
 Over a real picture, and only while remote control can be used, a layer on top
-of the view turns clicks into taps and drags into swipes. The view itself is not
-touched, and the keyboard is not listened to. The wheel sends nothing. See
-[CONTROL_CHANNEL.md](CONTROL_CHANNEL.md#tap-or-swipe).
+of the view turns clicks into taps, drags into swipes and holds into long presses.
+The view itself is not touched, and the keyboard is not listened to. The wheel sends
+nothing. See
+[CONTROL_CHANNEL.md](CONTROL_CHANNEL.md#tap-swipe-or-long-press).
 
-For the 350 ms after a global action or an IME action is sent, or until it is
-answered if that takes longer, the layer is not there: the transition is still
+For the 350 ms after a global action, an IME action or a long press is sent, or until
+it is answered if that takes longer, the layer is not there: the transition is still
 running, so a click would land somewhere the technician did not aim at. The picture itself keeps arriving and
 the renderer is left alone. See
 [CONTROL_CHANNEL.md](CONTROL_CHANNEL.md#the-settle-guard).

@@ -1,6 +1,7 @@
 # Control channel — `remote_control_web`
 
-How what the technician does on the picture becomes a gesture on the tablet, and
+How what the technician does on the picture becomes a gesture on the tablet (a tap, a
+swipe or a long press), and
 what the Atrás, Inicio and Recientes buttons, the Texto dialog and the Acción button
 become, seen from the web.
 
@@ -19,8 +20,10 @@ pointer down, move, up on the picture
   -> NormalizedRemotePoint           x, y in 0..1 over the frame
   -> WebRtcRemoteTapRequested        the BLoC checks the gate again
      WebRtcRemoteSwipeRequested
+     WebRtcRemoteLongPressRequested  (its own, stricter gate)
   -> RemoteTapCommand                id from the generator
      RemoteSwipeCommand
+     RemoteLongPressCommand          and RemoteSettleGuard starts now
   -> PendingRemoteCommands           tracked before it is sent
   -> RemoteControlChannelCodec       the only JSON in the application
   -> `control` data channel
@@ -84,8 +87,9 @@ not know `RTCDataChannel`, `RTCDataChannelMessage`, `jsonEncode` or `flutter_web
 
 ## Protocol v1
 
-`tap`, `swipe`, `back`, `home`, `recents`, `set_text` and `ime_enter`. One text frame holding one
-JSON object, on the existing `control` channel. No other channel is created.
+`tap`, `swipe`, `long_press`, `back`, `home`, `recents`, `set_text` and `ime_enter`. One
+text frame holding one JSON object, on the existing `control` channel. No other channel is
+created.
 
 ```json
 {"v":1,"type":"tap","id":"tap-1","x":0.5,"y":0.25}
@@ -93,6 +97,10 @@ JSON object, on the existing `control` channel. No other channel is created.
 
 ```json
 {"v":1,"type":"swipe","id":"swipe-2","startX":0.5,"startY":0.8,"endX":0.5,"endY":0.2,"durationMs":350}
+```
+
+```json
+{"v":1,"type":"long_press","id":"long-3","x":0.5,"y":0.25}
 ```
 
 ```json
@@ -126,7 +134,9 @@ JSON object, on the existing `control` channel. No other channel is created.
 In a swipe the four coordinates are the same kind of value as a tap's, and
 `durationMs` is an integer in `50..2000`. The tablet refuses `350.0`, and refuses
 a swipe whose start equals its end. A tap has no `durationMs`: Android holds it
-for its own 50 ms. `back`, `home` and `recents` carry their id and nothing else: they
+for its own 50 ms. A `long_press` has `x` and `y`, the same kind of value as a tap's,
+and nothing else: no `durationMs`, no end, no pointer type, no button. The tablet holds
+it for `ViewConfiguration.getLongPressTimeout() + 100 ms`, its own decision. `back`, `home` and `recents` carry their id and nothing else: they
 are not touches, so no coordinate and no duration means anything to them. In a
 `set_text`, `text` is required and has `0..4096` UTF-16 code units. An `ime_enter`
 carries its id and nothing else: no `text`, no `keyCode`, no `actionId`, no position.
@@ -141,8 +151,8 @@ What `ok: true` promises depends on the command, because Android promises differ
 things:
 
 ```text
-tap, swipe           Android reported the gesture completed, not merely that it was
-                     requested
+tap, swipe,          Android reported the gesture completed, not merely that it was
+long_press           requested
 back, home, recents  Android accepted the global action
 set_text             the focused node accepted ACTION_SET_TEXT
 ime_enter            the focused node accepted ACTION_IME_ENTER, and nothing about
@@ -156,7 +166,9 @@ action, never that the launcher is on screen, and `Recientes enviado` never that
 overview has finished appearing. The field is not read back either, so `Texto enviado`
 does not say what the field ended up holding: an application may filter what it is
 given. `Acción enviada` does not say that a search ran, a form went, the focus moved or
-the screen changed. Only the picture can show that.
+the screen changed. `Pulsación prolongada enviada` does not say that a menu opened or
+anything got selected: the gesture ran, and what the application made of it only the
+picture can show.
 
 ## From a pointer to a coordinate
 
@@ -183,7 +195,9 @@ videoY = pointerY - offsetY           y = videoY / renderedHeight
 ```
 
 Origin at the top-left, x grows right, y grows down. Both ends of a swipe go
-through this same conversion, each with the geometry of its own moment.
+through this same conversion, each with the geometry of its own moment, and so does
+the point of a long press: a tap and a long press on the same spot send the same
+`x` and `y`.
 
 ### Letterbox and pillarbox are not the picture
 
@@ -213,16 +227,38 @@ picture on screen is still the old frame. A gesture in that instant is aimed at
 the old frame, and Android reads its display when the command runs. It is the same
 limitation the tablet documents under `SCREEN_SHARING.md#noticing-a-rotation`.
 
-## Tap or swipe
+## Tap, swipe or long press
 
 The press is followed by `RemoteControlGestureLayer`, with raw pointer events
-inside Flutter: no JavaScript and nothing on the `<video>` element.
+inside Flutter: no JavaScript and nothing on the `<video>` element. One surface,
+three gestures, and never two of them for the same press:
+
+```text
+click                       -> tap
+drag                        -> swipe
+hold the pointer still      -> long press
+```
 
 ```text
 pointer down   on the picture, primary button: position, point, time and
-               geometry are kept. Anywhere else: this press is ignored for good
-pointer move   it may become a drag; nothing is ever sent from here
-pointer up     exactly one tap, one swipe, or nothing
+               geometry are kept, and the long press timer starts.
+               Anywhere else: this press is ignored for good
+pointer move   it may become a drag, which stops the timer; nothing is ever
+               sent from here
+timer fires    still down and never a drag: one long press, sent there and
+               then; that pointer sends nothing else
+pointer up     exactly one tap, one swipe, or nothing; nothing at all after a
+               long press
+```
+
+```text
+pointer down
+   |
+   +-- released before the timeout, without moving   -> TAP, at the release
+   |
+   +-- moved >= 6 px before the timeout               -> SWIPE, at the release
+   |
+   +-- held still for kLongPressTimeout               -> LONG_PRESS, at once
 ```
 
 Flutter keeps delivering a pointer that is down to the widget it went down on,
@@ -240,7 +276,8 @@ distance >= 6    a drag, and it stays one
 ```
 
 The tablet's resolution plays no part: the threshold is about what the technician
-meant. A press held still for any length of time is still a tap.
+meant. A press held still is a tap if it is released before the
+[long press timeout](#long-press), and a long press if it is not.
 
 The web does not try to predict whether a drag collapses onto one physical pixel
 of the tablet. If it does, the tablet answers `gesture_rejected`, which is shown
@@ -256,8 +293,9 @@ the protocol has no other kind.
 
 ### What drops a press
 
-All of these send nothing, neither a tap nor a swipe, and the next press starts
-clean.
+All of these send nothing, neither a tap, a swipe nor a long press, and the next
+press starts clean. When they happen before the long press timeout they cancel its
+timer with the press.
 
 | What happened | Why |
 | --- | --- |
@@ -310,10 +348,112 @@ A touch drag would also move the console page, which sits in a scroll view. An
 otherwise empty `GestureDetector` inside the layer holds the gesture arena, so the
 page stays put and only the tablet moves. A mouse never scrolled the page this way.
 
+### Long press
+
+There is no button for it. Holding the pointer still on the picture is a long press,
+with a mouse or a finger:
+
+```text
+the web decides WHEN    the technician means a long press: the pointer stayed down,
+                        closer than 6 px to where it went down, for kLongPressTimeout
+the device decides      how long Android holds it: getLongPressTimeout() + 100 ms.
+HOW LONG                No durationMs ever goes on the wire
+```
+
+**Recognition.** `RemoteControlGestureLayer.longPressTimeout` is Flutter's own
+`kLongPressTimeout` (500 ms), not a constant of this project. A `Timer` starts at pointer
+down, on the picture, with the primary button, and only then.
+
+**Movement.** The same threshold, the same distance: a straight line from where the press
+started, never small moves added up. `>= 6 px` before the timeout makes it a drag, stops
+the timer for good and leaves the swipe to run as before. Under 6 px, however much the
+pointer trembles, the timer keeps going.
+
+```text
+down, move 2 px, move 3 px, hold          long press
+down, 5.99 px away, hold                   long press
+down, 6 px away before the timeout         swipe, never a long press
+down, 5 px and back ten times, hold        long press: 50 px travelled, never 6 away
+```
+
+**When it fires** it checks again that the press is the same one, still down, never a
+drag, with the geometry it started with and its starting point still on the picture. The
+point sent is **where the press went down**, not wherever the pointer drifted to by less
+than the threshold since. Then the BLoC checks everything else again, at that moment and
+not at pointer down: see [when it is accepted](#a-long-press-asks-for-more). If anything
+is missing the hold sends nothing, and its release is not a tap either.
+
+**After it fires** that pointer is done. Moving it, leaving the picture, a second finger,
+a cancel or the release send nothing more: no tap, no swipe, no second long press, and
+no drag after the long press, which the protocol does not have. In practice the layer is
+gone at once anyway, held back by the [settle guard](#the-settle-guard), and a pointer
+already down is not picked up by a layer that comes back.
+
+**Before it fires**, what drops a press drops the long press with it: the release
+(which is a tap or a swipe), a cancel, a second pointer, another button, the wheel, a
+rotation, a resize, leaving the picture, the layer going away. A second pointer drops
+the press, as it always did: it never starts a timer of its own, never takes over the
+press and never makes it multitouch.
+
+**On a band** of `contain`, nothing: the press never starts, and neither does a timer.
+
+#### A long press asks for more
+
+Exactly what an `ime_enter` asks for (`canSendRemoteLongPress`):
+
+```text
+RemoteSession ACTIVE, and not being closed    yes
+RTCPeerConnectionState connected              yes
+control channel open                          yes
+aimed at the current session                  yes
+a remote video track                          yes
+the renderer really displaying a picture      yes, in the BLoC too
+no command pending                            yes: not even a tap
+no settle guard active                        yes
+```
+
+Unlike a tap it does not queue behind another command: the hold is recognised on the
+picture the technician sees, and a tap or a swipe still running could have moved it.
+A hold recognised while one of these is missing is dropped, never sent later.
+
+#### Once sent
+
+It is tracked like any other command, and its kind `settlesScreen`, so the
+[settle guard](#the-settle-guard) starts when it is sent: nothing else goes out, a tap,
+a swipe, another long press, Back, Home, Recents, a text or an `ime_enter`, until it is
+answered. `FINALIZAR ASISTENCIA` is not held back. The guard keeps its own rule, answered
+**and** 350 ms after it was sent; the tablet answers a long press only once Android
+completed it, roughly 600 ms after it went out, so in practice the answer is what ends
+the wait, and nothing is added after it.
+
+A long press may open a menu, a selection or a popup, which is why it settles at all.
+
+Its work counts as `remoteLongPressEstimatedWork = 5 s`, the tablet's own guard over a
+gesture (it takes long presses of up to 4 s), so with nothing ahead its deadline is
+**8 s**. A long press that times out is reported and never sent again.
+
+| Situation | Long press |
+| --- | --- |
+| recognised, ack pending | `Manteniendo pulsado...` |
+| `ok: true` | `Pulsación prolongada enviada` |
+| `gesture_rejected` | `El dispositivo rechazó la pulsación prolongada.` |
+| `accessibility_unavailable` | `El dispositivo no tiene habilitado el control remoto.` |
+| `session_not_active` | `La asistencia no está activa en el dispositivo.` |
+| timeout | `El dispositivo no confirmó la pulsación prolongada.` |
+| `invalid_command`, `unsupported_command`, unknown | `Control remoto no disponible` |
+
+Never `Menú abierto` or `Elemento seleccionado`: the acknowledgement does not show that.
+
+It carries `x` and `y` and nothing else, and its answer carries no content, node, text,
+cursor, selection, package or accessibility metadata. The log has its id and, on a
+refusal, the public error code.
+
 ## When a gesture is accepted
 
 All of them, checked twice: the surface does not listen at all unless they hold,
-and the BLoC checks them again when the gesture arrives. The same for both kinds.
+and the BLoC checks them again when the gesture arrives. The same for a tap and a
+swipe; a long press asks for
+[a little more](#a-long-press-asks-for-more).
 
 ```text
 RemoteSession ACTIVE, and not being closed    REST, through the coordinator
@@ -420,8 +560,10 @@ HOME -> ack at once -> a tap right away -> it lands on the previous screen,
 An IME action is the same kind of thing: Android accepts `ACTION_IME_ENTER` at once,
 and the application may then start a search, move the focus or open another screen.
 
-So for **350 ms** (`remoteSettleDuration`) from the moment a global action or an
-`ime_enter` is sent, and for as long as it is unanswered, no new command of any kind is
+A long press likewise: it may open a menu, a selection or a popup.
+
+So for **350 ms** (`remoteSettleDuration`) from the moment a global action, an
+`ime_enter` or a `long_press` is sent, and for as long as it is unanswered, no new command of any kind is
 taken (`RemoteSettleGuard`, formerly `RemoteNavigationGuard`: one guard, one 350 ms, for
 every command whose kind `settlesScreen`). It ends when **both** have happened:
 
@@ -437,7 +579,7 @@ ack at 500 ms    ends there and then, with nothing added
 
 | While it holds | |
 | --- | --- |
-| a tap, a swipe | dropped, never queued: the surface has no pointer layer for that moment, and the BLoC drops them too |
+| a tap, a swipe, a long press | dropped, never queued: the surface has no pointer layer for that moment, and the BLoC drops them too |
 | a press that starts then | not picked up afterwards, like any press the layer did not see begin |
 | another Back, Home or Recents | the buttons are disabled, and the BLoC drops them too: a double click is one action |
 | a text, an IME action | the buttons are disabled, and the BLoC drops them too |
@@ -831,6 +973,7 @@ work     tap 50 ms, swipe its durationMs,
          back, home and recents 50 ms  (remoteNavigationEstimatedWork)
          set_text 5 s  (remoteSetTextEstimatedWork)
          ime_enter 5 s  (remoteImeEnterEstimatedWork)
+         long_press 5 s  (remoteLongPressEstimatedWork)
 margin   3 s  (WebRtcSessionBloc.defaultRemoteCommandMargin)
 ```
 
@@ -847,6 +990,7 @@ a home behind a swipe of 2 s     5.05 s
 a swipe of 350 ms alone          3.35 s
 a text                           8 s
 an ime_enter                     8 s
+a long_press                     8 s
 swipe 2 s behind a swipe of 2 s  7 s
 the 17th long swipe in a row     37 s
 ```
@@ -880,7 +1024,7 @@ ime_action_unavailable      a message; never sent again, nothing stands in for i
 ime_action_rejected         idem
 ```
 
-The same for Back, Home, Recents and `ime_enter`, and each of them also ends the
+The same for a long press, Back, Home, Recents and `ime_enter`, and each of them also ends the
 [settle guard](#the-settle-guard). `gesture_rejected` on a text means the tablet's queue
 was full. None of them closes the `RemoteSession` or the peer connection.
 
@@ -907,6 +1051,12 @@ The pointer layer exists only while control is available. A pointer already down
 when it goes away keeps reporting to the old layer, which ignores it, and a layer
 that comes back does not pick it up: only a new press starts a gesture.
 
+The long press timer belongs to the press, and goes with it: at the release, a cancel,
+anything that drops the press, and when the layer is disposed. The layer is disposed when
+the session leaves `ACTIVE`, FINALIZAR is pressed, the peer connection fails, `control`
+closes, the negotiation is replaced, the picture goes away or a settle guard starts. No
+timer outlives it, and the BLoC checks the gate again anyway when a long press arrives.
+
 ## Generations
 
 Commands belong to the negotiation that sent them, and the existing generation
@@ -916,8 +1066,8 @@ generation it was started in, and so does the settle time of a global action. An
 `swipe-1` can therefore not resolve a new `swipe-1`, even if a generator repeated the
 id, and an old `back-1`, `recents-1` or `enter-1` cannot end the guard of a new one.
 
-The default generator counts `tap-1`, `swipe-2`, `back-3`, `home-4`, `recents-5`,
-`text-6`, `enter-7`, ... on one counter for as long as the page lives, and does not restart with a negotiation. It is injectable
+The default generator counts `tap-1`, `swipe-2`, `long-3`, `back-4`, `home-5`,
+`recents-6`, `text-7`, `enter-8`, ... on one counter for as long as the page lives, and does not restart with a negotiation. It is injectable
 (`RemoteControlCommandIdGenerator`), and never derives an id from coordinates or
 screen content.
 
@@ -1284,6 +1434,9 @@ remote text ignored <session>
 ime_enter command sent <id>      ime_enter confirmed <id>
 ime_enter timed out <id>         ime_enter rejected <id>: <code>
 remote ime_enter ignored <session>
+long_press command sent <id>     long_press confirmed <id>
+long_press timed out <id>        long_press rejected <id>: <code>
+remote long_press ignored <session>
 remote control command rejected: <code>
 control message ignored <remoteSessionId>
 control ack ignored <id>
