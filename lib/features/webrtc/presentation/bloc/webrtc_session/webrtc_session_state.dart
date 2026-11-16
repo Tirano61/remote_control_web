@@ -108,6 +108,18 @@ sealed class WebRtcSessionState extends Equatable {
       remoteControl.pendingCommands == 0 &&
       !remoteControl.isSettling;
 
+  /// Whether a long press can go out right now.
+  ///
+  /// Everything a tap asks for, a picture really on screen, and nothing ahead of
+  /// it: the press is recognised on what the technician sees, and a tap or a
+  /// swipe still running could have moved that elsewhere by the time it lands.
+  /// Once sent, the settle guard holds every other command back until it is
+  /// answered.
+  bool get canSendRemoteLongPress =>
+      canOfferRemoteText &&
+      remoteControl.pendingCommands == 0 &&
+      !remoteControl.isSettling;
+
   /// Whether losing the signaling socket must leave the peer connection alone.
   ///
   /// WebRTC is peer to peer: once media/data flows, Socket.IO is not in the
