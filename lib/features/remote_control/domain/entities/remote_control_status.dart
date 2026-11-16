@@ -76,8 +76,8 @@ final class RemoteControlStatus extends Equatable {
   /// Commands sent and not yet settled.
   final int pendingCommands;
 
-  /// A global action or an IME action is unanswered, or answered and still within
-  /// its settle time, and no new command of any kind is taken.
+  /// A global action, an IME action or a long press is unanswered, or answered and
+  /// still within its settle time, and no new command of any kind is taken.
   final bool isSettling;
 
   /// A text is unanswered, and no new command of any kind is taken.

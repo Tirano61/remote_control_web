@@ -74,6 +74,25 @@ final class WebRtcRemoteSwipeRequested extends WebRtcSessionEvent {
   List<Object?> get props => [remoteSessionId, start, end, durationMs];
 }
 
+/// The technician held the pointer still on the picture of the tablet for as long
+/// as a long press takes to be recognised. Sent once, while the pointer is still
+/// down: nothing that pointer does afterwards adds to it.
+///
+/// Like a click, it carries the session the picture belonged to, and the point
+/// where the press started.
+final class WebRtcRemoteLongPressRequested extends WebRtcSessionEvent {
+  const WebRtcRemoteLongPressRequested({
+    required this.remoteSessionId,
+    required this.point,
+  });
+
+  final String remoteSessionId;
+  final NormalizedRemotePoint point;
+
+  @override
+  List<Object?> get props => [remoteSessionId, point];
+}
+
 /// The technician pressed Atrás.
 ///
 /// Like a click, it carries the session it was aimed at. Unlike a click, it needs

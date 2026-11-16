@@ -22,10 +22,17 @@ const Duration remoteSetTextEstimatedWork = Duration(seconds: 5);
 /// same accessibility bridge as a text, which gives up after the same five seconds.
 const Duration remoteImeEnterEstimatedWork = Duration(seconds: 5);
 
+/// How long a long press can keep the tablet's queue busy. The web never says how
+/// long it lasts: the tablet holds it for Android's own long press timeout plus a
+/// margin, and gives up on a gesture after five seconds, so that is what an answer
+/// may legitimately take.
+const Duration remoteLongPressEstimatedWork = Duration(seconds: 5);
+
 /// The kinds of command the protocol defines.
 enum RemoteCommandKind {
   tap,
   swipe,
+  longPress,
   back,
   home,
   recents,
@@ -33,17 +40,20 @@ enum RemoteCommandKind {
   imeEnter;
 
   /// A touch on the picture.
-  bool get isGesture => this == tap || this == swipe;
+  bool get isGesture => this == tap || this == swipe || this == longPress;
 
   /// A global action of Android.
   bool get isNavigation => this == back || this == home || this == recents;
 
   /// What may move the screen somewhere else after Android accepted it, so that
-  /// nothing else goes out until it had time to: see `RemoteSettleGuard`.
-  bool get settlesScreen => isNavigation || this == imeEnter;
+  /// nothing else goes out until it had time to: see `RemoteSettleGuard`. A long
+  /// press may open a menu, a selection or a popup.
+  bool get settlesScreen =>
+      isNavigation || this == imeEnter || this == longPress;
 
   /// How the ids of this kind start.
   String get idPrefix => switch (this) {
+    longPress => 'long',
     setText => 'text',
     imeEnter => 'enter',
     _ => name,
@@ -51,6 +61,7 @@ enum RemoteCommandKind {
 
   /// How the log calls this kind.
   String get logName => switch (this) {
+    longPress => 'long_press',
     setText => 'set_text',
     imeEnter => 'ime_enter',
     _ => name,
@@ -61,8 +72,8 @@ enum RemoteCommandKind {
 ///
 /// Sealed on purpose: the protocol is an agreement with `remote_control_device`,
 /// and a command exists here only once both sides implement it. Today that is
-/// the tap, the swipe, Back, Home, Recents, the text and the IME action, and
-/// nothing else.
+/// the tap, the swipe, the long press, Back, Home, Recents, the text and the IME
+/// action, and nothing else.
 sealed class RemoteControlCommand extends Equatable {
   const RemoteControlCommand({required this.id});
 
@@ -142,6 +153,30 @@ final class RemoteSwipeCommand extends RemoteControlCommand {
   /// The id only: coordinates are not logged.
   @override
   String toString() => 'RemoteSwipeCommand($id)';
+}
+
+/// A touch held still at [point], for as long as the tablet decides.
+///
+/// The web decides *when* the technician means a long press; the tablet decides
+/// *how long* Android holds it (its own long press timeout plus a margin). No
+/// duration goes on the wire.
+final class RemoteLongPressCommand extends RemoteControlCommand {
+  const RemoteLongPressCommand({required super.id, required this.point});
+
+  final NormalizedRemotePoint point;
+
+  @override
+  RemoteCommandKind get kind => RemoteCommandKind.longPress;
+
+  @override
+  Duration get estimatedWork => remoteLongPressEstimatedWork;
+
+  @override
+  List<Object?> get props => [id, point];
+
+  /// The id only: coordinates are not logged.
+  @override
+  String toString() => 'RemoteLongPressCommand($id)';
 }
 
 /// A global action of Android: nothing but its id goes on the wire.

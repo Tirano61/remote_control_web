@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_web/features/remote_control/domain/entities/normalized_remote_point.dart';
 import 'package:remote_control_web/features/remote_control/domain/entities/remote_control_command.dart';
+import 'package:remote_control_web/features/remote_control/domain/services/pending_remote_commands.dart';
 import 'package:remote_control_web/features/remote_control/domain/services/remote_control_command_id_generator.dart';
 import 'package:remote_control_web/features/webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dart';
 
@@ -182,6 +183,7 @@ void main() {
       expect(RemoteCommandKind.values.where((kind) => kind.isGesture), [
         RemoteCommandKind.tap,
         RemoteCommandKind.swipe,
+        RemoteCommandKind.longPress,
       ]);
     });
 
@@ -317,8 +319,9 @@ void main() {
       );
     });
 
-    test('it settles like a global action, and nothing else does', () {
+    test('it settles like a global action, and so does a long press', () {
       expect(RemoteCommandKind.values.where((kind) => kind.settlesScreen), [
+        RemoteCommandKind.longPress,
         RemoteCommandKind.back,
         RemoteCommandKind.home,
         RemoteCommandKind.recents,
@@ -330,6 +333,97 @@ void main() {
       expect(
         const RemoteImeEnterCommand(id: 'enter-1').toString(),
         'RemoteImeEnterCommand(enter-1)',
+      );
+    });
+  });
+
+  group('long_press', () {
+    const point = NormalizedRemotePoint(0.5, 0.25);
+
+    test('an id and a point are all it has', () {
+      const command = RemoteLongPressCommand(id: 'long-1', point: point);
+
+      expect(command.id, 'long-1');
+      expect(command.point, point);
+      expect(command.kind, RemoteCommandKind.longPress);
+      expect(command.props, ['long-1', point]);
+      expect(command, const RemoteLongPressCommand(id: 'long-1', point: point));
+      expect(
+        command,
+        isNot(const RemoteLongPressCommand(id: 'long-2', point: point)),
+      );
+      expect(
+        command,
+        isNot(
+          const RemoteLongPressCommand(
+            id: 'long-1',
+            point: NormalizedRemotePoint(0.5, 0.26),
+          ),
+        ),
+      );
+    });
+
+    test('it is a gesture of its own, not a tap', () {
+      const command = RemoteLongPressCommand(id: 'same', point: point);
+
+      expect(command, isNot(isA<RemoteTapCommand>()));
+      expect(
+        command == const RemoteTapCommand(id: 'same', point: point),
+        isFalse,
+      );
+      expect(RemoteCommandKind.longPress.isGesture, isTrue);
+      expect(RemoteCommandKind.longPress.isNavigation, isFalse);
+      expect(RemoteCommandKind.longPress.settlesScreen, isTrue);
+    });
+
+    test('its ids start with long, and the log calls it long_press', () {
+      expect(RemoteCommandKind.longPress.idPrefix, 'long');
+      expect(RemoteCommandKind.longPress.logName, 'long_press');
+    });
+
+    test('ids come from the one counter every kind shares', () {
+      final ids = SequentialRemoteControlCommandIdGenerator();
+
+      expect(
+        [
+          ids.next(RemoteCommandKind.tap),
+          ids.next(RemoteCommandKind.swipe),
+          ids.next(RemoteCommandKind.longPress),
+          ids.next(RemoteCommandKind.home),
+        ],
+        ['tap-1', 'swipe-2', 'long-3', 'home-4'],
+      );
+    });
+
+    test(
+      'it counts as five seconds of work: the tablet gives up after that',
+      () {
+        expect(remoteLongPressEstimatedWork, const Duration(seconds: 5));
+        expect(
+          const RemoteLongPressCommand(
+            id: 'long-1',
+            point: point,
+          ).estimatedWork,
+          remoteLongPressEstimatedWork,
+        );
+      },
+    );
+
+    test('its acknowledgement is awaited for about eight seconds', () {
+      expect(
+        PendingRemoteCommands.deadlineFor(
+          remoteLongPressEstimatedWork,
+          ahead: const [],
+          margin: WebRtcSessionBloc.defaultRemoteCommandMargin,
+        ),
+        const Duration(seconds: 8),
+      );
+    });
+
+    test('what gets printed is the id, never the point', () {
+      expect(
+        const RemoteLongPressCommand(id: 'long-1', point: point).toString(),
+        'RemoteLongPressCommand(long-1)',
       );
     });
   });

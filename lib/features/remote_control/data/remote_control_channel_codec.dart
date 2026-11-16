@@ -28,6 +28,7 @@ class RemoteControlChannelCodec {
 
   static const String _tapType = 'tap';
   static const String _swipeType = 'swipe';
+  static const String _longPressType = 'long_press';
   static const String _backType = 'back';
   static const String _homeType = 'home';
   static const String _recentsType = 'recents';
@@ -61,6 +62,13 @@ class RemoteControlChannelCodec {
         _endYKey: end.y,
         _durationMsKey: durationMs,
       }),
+    RemoteLongPressCommand(:final id, :final point) => jsonEncode({
+      _versionKey: _version,
+      _typeKey: _longPressType,
+      _idKey: id,
+      _xKey: point.x,
+      _yKey: point.y,
+    }),
     RemoteBackCommand(:final id) => jsonEncode({
       _versionKey: _version,
       _typeKey: _backType,

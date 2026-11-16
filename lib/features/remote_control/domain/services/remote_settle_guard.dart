@@ -1,13 +1,16 @@
 import 'dart:async';
 
 /// Keeps new commands away from the tablet while an action that may move the
-/// screen somewhere else is under way: a global action, Back, Home or Recents, or
-/// the IME action of the focused field.
+/// screen somewhere else is under way: a global action, Back, Home or Recents,
+/// the IME action of the focused field, or a long press, which may open a menu,
+/// a selection or a popup.
 ///
 /// Android acknowledges either as soon as it accepts it, with the transition still
 /// animating or the application still reacting, so a tap right after the answer
 /// to a Home could land on the previous screen or on the transition itself. An
 /// IME action may likewise start a search, move the focus or open another screen.
+/// A long press is answered once Android completed it, well after the settle time,
+/// so in practice its answer is what ends the wait.
 ///
 /// ```text
 /// accepted    ends when it was answered AND the settle time has passed,

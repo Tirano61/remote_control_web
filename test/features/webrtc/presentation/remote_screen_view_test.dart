@@ -153,7 +153,10 @@ void main() {
 
       expect(renderers.last.attachedTracks, [same(track)]);
       expect(find.byKey(const Key('remote_screen_video')), findsOneWidget);
-      expect(find.byKey(const Key('fake_remote_video_screen-0')), findsOneWidget);
+      expect(
+        find.byKey(const Key('fake_remote_video_screen-0')),
+        findsOneWidget,
+      );
     });
 
     testWidgets('the placeholder stays until the picture has a size', (
@@ -168,7 +171,10 @@ void main() {
       await tester.pump();
 
       expect(find.text(kWaitingForRemoteScreenNotice), findsNothing);
-      expect(find.byKey(const Key('fake_remote_video_screen-0')), findsOneWidget);
+      expect(
+        find.byKey(const Key('fake_remote_video_screen-0')),
+        findsOneWidget,
+      );
     });
   });
 
@@ -196,7 +202,10 @@ void main() {
 
       expect(renderers.created, hasLength(1));
       expect(renderers.last.attachedTracks, [same(a), same(b)]);
-      expect(find.byKey(const Key('fake_remote_video_screen-b')), findsOneWidget);
+      expect(
+        find.byKey(const Key('fake_remote_video_screen-b')),
+        findsOneWidget,
+      );
       expect(find.byKey(const Key('fake_remote_video_screen-a')), findsNothing);
     });
 
@@ -279,6 +288,7 @@ void main() {
   group('remote tap', () {
     late List<NormalizedRemotePoint> taps;
     late List<_Swipe> swipes;
+    late List<NormalizedRemotePoint> longPresses;
 
     void recordSwipe({
       required NormalizedRemotePoint start,
@@ -289,6 +299,7 @@ void main() {
     setUp(() {
       taps = [];
       swipes = [];
+      longPresses = [];
     });
 
     final surface = find.byKey(const Key('remote_screen_surface'));
@@ -312,6 +323,7 @@ void main() {
                   maxHeight: 500,
                   onRemoteTap: isEnabled ? taps.add : null,
                   onRemoteSwipe: isEnabled ? recordSwipe : null,
+                  onRemoteLongPress: isEnabled ? longPresses.add : null,
                 ),
               ),
             ),
@@ -358,7 +370,10 @@ void main() {
 
       await clickAt(tester, 0.5, 0.5);
 
-      expect(find.byKey(const Key('remote_screen_gesture_layer')), findsNothing);
+      expect(
+        find.byKey(const Key('remote_screen_gesture_layer')),
+        findsNothing,
+      );
       expect(taps, isEmpty);
     });
 
@@ -367,7 +382,10 @@ void main() {
 
       await clickAt(tester, 0.5, 0.5);
 
-      expect(find.byKey(const Key('remote_screen_gesture_layer')), findsNothing);
+      expect(
+        find.byKey(const Key('remote_screen_gesture_layer')),
+        findsNothing,
+      );
       expect(taps, isEmpty);
     });
 
@@ -470,39 +488,40 @@ void main() {
     });
 
     group('a rotation during the press', () {
-      testWidgets('portrait to landscape: no swipe, and the next one is right', (
-        tester,
-      ) async {
-        await pumpInteractive(tester, aspectRatio: 800 / 1280);
+      testWidgets(
+        'portrait to landscape: no swipe, and the next one is right',
+        (tester) async {
+          await pumpInteractive(tester, aspectRatio: 800 / 1280);
 
-        final gesture = await tester.startGesture(tester.getCenter(surface));
-        await gesture.moveBy(const Offset(0, -80));
-        renderers.last.reportVideoAspectRatio(1280 / 800);
-        await tester.pump();
-        await gesture.moveBy(const Offset(0, -20));
-        await gesture.up();
-        await tester.pump();
+          final gesture = await tester.startGesture(tester.getCenter(surface));
+          await gesture.moveBy(const Offset(0, -80));
+          renderers.last.reportVideoAspectRatio(1280 / 800);
+          await tester.pump();
+          await gesture.moveBy(const Offset(0, -20));
+          await gesture.up();
+          await tester.pump();
 
-        expect(taps, isEmpty);
-        expect(swipes, isEmpty);
+          expect(taps, isEmpty);
+          expect(swipes, isEmpty);
 
-        final box = tester.getRect(surface);
-        expect(box.width, 800);
-        final next = await tester.startGesture(
-          Offset(box.left + box.width * 0.25, box.top + box.height * 0.75),
-        );
-        await next.moveTo(
-          Offset(box.left + box.width * 0.75, box.top + box.height * 0.25),
-        );
-        await next.up();
-        await tester.pump();
+          final box = tester.getRect(surface);
+          expect(box.width, 800);
+          final next = await tester.startGesture(
+            Offset(box.left + box.width * 0.25, box.top + box.height * 0.75),
+          );
+          await next.moveTo(
+            Offset(box.left + box.width * 0.75, box.top + box.height * 0.25),
+          );
+          await next.up();
+          await tester.pump();
 
-        expect(swipes, hasLength(1));
-        expect(swipes.single.start.x, closeTo(0.25, 1e-9));
-        expect(swipes.single.start.y, closeTo(0.75, 1e-9));
-        expect(swipes.single.end.x, closeTo(0.75, 1e-9));
-        expect(swipes.single.end.y, closeTo(0.25, 1e-9));
-      });
+          expect(swipes, hasLength(1));
+          expect(swipes.single.start.x, closeTo(0.25, 1e-9));
+          expect(swipes.single.start.y, closeTo(0.75, 1e-9));
+          expect(swipes.single.end.x, closeTo(0.75, 1e-9));
+          expect(swipes.single.end.y, closeTo(0.25, 1e-9));
+        },
+      );
 
       testWidgets('a press that had not moved does not become a tap', (
         tester,
@@ -519,23 +538,24 @@ void main() {
         expect(swipes, isEmpty);
       });
 
-      testWidgets('there and back with the pointer still: dropped all the same', (
-        tester,
-      ) async {
-        await pumpInteractive(tester);
+      testWidgets(
+        'there and back with the pointer still: dropped all the same',
+        (tester) async {
+          await pumpInteractive(tester);
 
-        final gesture = await tester.startGesture(tester.getCenter(surface));
-        await gesture.moveBy(const Offset(50, 0));
-        renderers.last.reportVideoAspectRatio(800 / 1280);
-        await tester.pump();
-        renderers.last.reportVideoAspectRatio(1280 / 800);
-        await tester.pump();
-        await gesture.moveBy(const Offset(50, 0));
-        await gesture.up();
-        await tester.pump();
+          final gesture = await tester.startGesture(tester.getCenter(surface));
+          await gesture.moveBy(const Offset(50, 0));
+          renderers.last.reportVideoAspectRatio(800 / 1280);
+          await tester.pump();
+          renderers.last.reportVideoAspectRatio(1280 / 800);
+          await tester.pump();
+          await gesture.moveBy(const Offset(50, 0));
+          await gesture.up();
+          await tester.pump();
 
-        expect(swipes, isEmpty);
-      });
+          expect(swipes, isEmpty);
+        },
+      );
     });
 
     testWidgets('nothing happens until the pointer goes up', (tester) async {
@@ -593,6 +613,7 @@ void main() {
                   maxHeight: 500,
                   onRemoteTap: taps.add,
                   onRemoteSwipe: recordSwipe,
+                  onRemoteLongPress: longPresses.add,
                 ),
               ),
             ),
@@ -603,8 +624,101 @@ void main() {
 
       await clickAt(tester, 0.5, 0.5);
 
-      expect(find.byKey(const Key('remote_screen_gesture_layer')), findsNothing);
+      expect(
+        find.byKey(const Key('remote_screen_gesture_layer')),
+        findsNothing,
+      );
       expect(taps, isEmpty);
+    });
+
+    group('a long press on the surface', () {
+      const timeout = RemoteControlGestureLayer.longPressTimeout;
+
+      testWidgets('held on the picture: a long press where it went down', (
+        tester,
+      ) async {
+        await pumpInteractive(tester);
+        final box = tester.getRect(surface);
+
+        final gesture = await tester.startGesture(
+          Offset(box.left + box.width * 0.5, box.top + box.height * 0.25),
+        );
+        await tester.pump(timeout);
+        await gesture.up();
+        await tester.pump();
+
+        expect(longPresses, hasLength(1));
+        expect(longPresses.single.x, closeTo(0.5, 1e-9));
+        expect(longPresses.single.y, closeTo(0.25, 1e-9));
+        expect(taps, isEmpty);
+        expect(swipes, isEmpty);
+      });
+
+      testWidgets('control going away during the hold: nothing, ever', (
+        tester,
+      ) async {
+        await pumpInteractive(tester);
+        final gesture = await tester.startGesture(tester.getCenter(surface));
+        await tester.pump(const Duration(milliseconds: 100));
+
+        await pumpInteractive(tester, isEnabled: false);
+        await tester.pump(timeout * 4);
+        await gesture.up();
+        await tester.pump();
+
+        expect(longPresses, isEmpty);
+        expect(taps, isEmpty);
+        expect(swipes, isEmpty);
+      });
+
+      testWidgets('control coming back does not revive the hold', (
+        tester,
+      ) async {
+        await pumpInteractive(tester);
+        final gesture = await tester.startGesture(tester.getCenter(surface));
+        await tester.pump(const Duration(milliseconds: 100));
+        await pumpInteractive(tester, isEnabled: false);
+        await pumpInteractive(tester);
+
+        await tester.pump(timeout * 4);
+        await gesture.up();
+        await tester.pump();
+
+        expect(longPresses, isEmpty);
+        expect(taps, isEmpty);
+      });
+
+      testWidgets('the picture going away during the hold: nothing', (
+        tester,
+      ) async {
+        await pumpInteractive(tester);
+        final gesture = await tester.startGesture(tester.getCenter(surface));
+        await tester.pump(const Duration(milliseconds: 100));
+
+        await pumpInteractive(tester, track: null, aspectRatio: null);
+        await tester.pump(timeout * 4);
+        await gesture.up();
+        await tester.pump();
+
+        expect(longPresses, isEmpty);
+        expect(taps, isEmpty);
+      });
+
+      testWidgets('the surface going away during the hold: no late timer', (
+        tester,
+      ) async {
+        await pumpInteractive(tester);
+        final gesture = await tester.startGesture(tester.getCenter(surface));
+        await tester.pump(const Duration(milliseconds: 100));
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(timeout * 4);
+        await gesture.up();
+        await tester.pump();
+
+        expect(longPresses, isEmpty);
+        expect(taps, isEmpty);
+      });
     });
 
     testWidgets('the status knows whether there is a picture', (tester) async {
@@ -637,6 +751,7 @@ void main() {
   group('RemoteControlGestureLayer', () {
     late List<NormalizedRemotePoint> taps;
     late List<_Swipe> swipes;
+    late List<NormalizedRemotePoint> longPresses;
     late double? aspectRatio;
 
     void recordSwipe({
@@ -648,6 +763,7 @@ void main() {
     setUp(() {
       taps = [];
       swipes = [];
+      longPresses = [];
       aspectRatio = 800 / 1280;
     });
 
@@ -665,6 +781,7 @@ void main() {
                 videoAspectRatio: () => aspectRatio,
                 onTap: taps.add,
                 onSwipe: recordSwipe,
+                onLongPress: longPresses.add,
               ),
             ),
           ),
@@ -995,13 +1112,463 @@ void main() {
         expect(swipes, isEmpty);
       });
 
-      testWidgets('a dropped press does not spoil the next one', (tester) async {
+      testWidgets('a dropped press does not spoil the next one', (
+        tester,
+      ) async {
         await pumpBox(tester);
         await stroke(tester, const Offset(600, 400), const [Offset(200, 400)]);
 
         await stroke(tester, const Offset(600, 400), const [Offset(600, 500)]);
 
         expect(swipes, hasLength(1));
+      });
+    });
+
+    group('tap, swipe or long press', () {
+      const centre = Offset(600, 400);
+      const timeout = RemoteControlGestureLayer.longPressTimeout;
+      const millisecond = Duration(milliseconds: 1);
+
+      void expectGestures({
+        int tapCount = 0,
+        int swipeCount = 0,
+        int longCount = 0,
+      }) {
+        expect(taps, hasLength(tapCount), reason: 'taps');
+        expect(swipes, hasLength(swipeCount), reason: 'swipes');
+        expect(longPresses, hasLength(longCount), reason: 'long presses');
+      }
+
+      test("the recognition time is Flutter's own", () {
+        expect(timeout, kLongPressTimeout);
+      });
+
+      testWidgets('released just before the timeout: a tap', (tester) async {
+        await pumpBox(tester);
+
+        final gesture = await tester.startGesture(centre);
+        await tester.pump(timeout - millisecond);
+        await gesture.up();
+        await tester.pump(timeout * 4);
+
+        expectGestures(tapCount: 1);
+      });
+
+      testWidgets('a quick click: a tap', (tester) async {
+        await pumpBox(tester);
+
+        final gesture = await tester.startGesture(centre);
+        await tester.pump(const Duration(milliseconds: 100));
+        await gesture.up();
+        await tester.pump(timeout * 4);
+
+        expectGestures(tapCount: 1);
+      });
+
+      testWidgets('held for the timeout: a long press there and then', (
+        tester,
+      ) async {
+        await pumpBox(tester);
+
+        final gesture = await tester.startGesture(centre);
+        await tester.pump(timeout - millisecond);
+        expectGestures();
+
+        await tester.pump(millisecond);
+        expectGestures(longCount: 1);
+        expectPoint(longPresses.single, 0.5, 0.5);
+
+        await gesture.up();
+        await tester.pump();
+        expectGestures(longCount: 1);
+      });
+
+      testWidgets('held for seconds: still one long press', (tester) async {
+        await pumpBox(tester);
+
+        final gesture = await tester.startGesture(centre);
+        for (var i = 0; i < 10; i++) {
+          await tester.pump(timeout);
+        }
+        await gesture.up();
+        await tester.pump(timeout * 4);
+
+        expectGestures(longCount: 1);
+      });
+
+      testWidgets(
+        'moved past the threshold first: a swipe, never a long press',
+        (tester) async {
+          await pumpBox(tester);
+
+          final gesture = await tester.startGesture(centre);
+          await tester.pump(const Duration(milliseconds: 200));
+          await gesture.moveTo(centre + const Offset(0, 6));
+          await tester.pump(timeout * 3);
+          await gesture.moveTo(centre + const Offset(0, 120));
+          await gesture.up();
+          await tester.pump();
+
+          expectGestures(swipeCount: 1);
+        },
+      );
+
+      testWidgets('exactly the threshold before the timeout: a swipe', (
+        tester,
+      ) async {
+        await pumpBox(tester);
+        expect(RemoteControlGestureLayer.dragThreshold, 6);
+
+        final gesture = await tester.startGesture(centre);
+        await gesture.moveTo(centre + const Offset(6, 0));
+        await tester.pump(timeout * 2);
+        await gesture.up();
+        await tester.pump();
+
+        expectGestures(swipeCount: 1);
+      });
+
+      testWidgets('just under the threshold: still a long press', (
+        tester,
+      ) async {
+        await pumpBox(tester);
+
+        final gesture = await tester.startGesture(centre);
+        await gesture.moveTo(centre + const Offset(5.99, 0));
+        await tester.pump(timeout);
+        await gesture.up();
+        await tester.pump();
+
+        expectGestures(longCount: 1);
+      });
+
+      testWidgets('a small tremble: a long press where it went down', (
+        tester,
+      ) async {
+        await pumpBox(tester);
+
+        final gesture = await tester.startGesture(centre);
+        await gesture.moveTo(centre + const Offset(2, 0));
+        await tester.pump(const Duration(milliseconds: 100));
+        await gesture.moveTo(centre + const Offset(3, 0));
+        await tester.pump(const Duration(milliseconds: 100));
+        // 3-4-5 from where it went down: under the threshold on both axes.
+        await gesture.moveTo(centre + const Offset(3, 4));
+        await tester.pump(timeout);
+
+        expectGestures(longCount: 1);
+        // The point it went down at, not where it drifted to.
+        expectPoint(longPresses.single, 0.5, 0.5);
+        await gesture.up();
+        await tester.pump();
+        expectGestures(longCount: 1);
+      });
+
+      testWidgets('small moves are not added up: a long press', (tester) async {
+        await pumpBox(tester);
+
+        final gesture = await tester.startGesture(centre);
+        // 50 px of travel, never more than 5 px away from where it went down.
+        for (var i = 0; i < 5; i++) {
+          await gesture.moveTo(centre + const Offset(5, 0));
+          await gesture.moveTo(centre);
+        }
+        await tester.pump(timeout);
+        await gesture.up();
+        await tester.pump();
+
+        expectGestures(longCount: 1);
+      });
+
+      testWidgets('moves after the long press: nothing more', (tester) async {
+        await pumpBox(tester);
+
+        final gesture = await tester.startGesture(centre);
+        await tester.pump(timeout);
+        await gesture.moveTo(centre + const Offset(0, 200));
+        await tester.pump(timeout * 2);
+        await gesture.moveTo(centre + const Offset(0, -200));
+        await gesture.up();
+        await tester.pump();
+
+        expectGestures(longCount: 1);
+      });
+
+      testWidgets('leaving the picture after the long press: nothing more', (
+        tester,
+      ) async {
+        await pumpBox(tester);
+
+        final gesture = await tester.startGesture(centre);
+        await tester.pump(timeout);
+        await gesture.moveTo(const Offset(100, 400));
+        await gesture.up();
+        await tester.pump();
+
+        expectGestures(longCount: 1);
+      });
+
+      testWidgets('cancelled before the timeout: nothing', (tester) async {
+        await pumpBox(tester);
+
+        final gesture = await tester.startGesture(centre);
+        await tester.pump(timeout - millisecond);
+        await gesture.cancel();
+        await tester.pump(timeout * 4);
+
+        expectGestures();
+      });
+
+      testWidgets('cancelled after the long press: only the long press', (
+        tester,
+      ) async {
+        await pumpBox(tester);
+
+        final gesture = await tester.startGesture(centre);
+        await tester.pump(timeout);
+        await gesture.cancel();
+        await tester.pump(timeout * 4);
+
+        expectGestures(longCount: 1);
+      });
+
+      testWidgets('the layer going away during the hold: no late long press', (
+        tester,
+      ) async {
+        await pumpBox(tester);
+
+        final gesture = await tester.startGesture(centre);
+        await tester.pump(const Duration(milliseconds: 100));
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(timeout * 4);
+        await gesture.up();
+        await tester.pump();
+
+        expectGestures();
+      });
+
+      testWidgets('a second finger during the hold drops it', (tester) async {
+        await pumpBox(tester);
+
+        final first = await tester.startGesture(centre);
+        await tester.pump(const Duration(milliseconds: 200));
+        final second = await tester.startGesture(const Offset(700, 200));
+        await tester.pump(timeout * 4);
+        await first.up();
+        await second.up();
+        await tester.pump();
+
+        expectGestures();
+
+        // The next press is a fresh one.
+        final next = await tester.startGesture(centre);
+        await tester.pump(timeout);
+        await next.up();
+        await tester.pump();
+        expectGestures(longCount: 1);
+      });
+
+      testWidgets('a second finger after the long press adds nothing', (
+        tester,
+      ) async {
+        await pumpBox(tester);
+
+        final first = await tester.startGesture(centre);
+        await tester.pump(timeout);
+        final second = await tester.startGesture(const Offset(700, 200));
+        await tester.pump(timeout * 4);
+        await second.up();
+        await first.up();
+        await tester.pump();
+
+        expectGestures(longCount: 1);
+      });
+
+      testWidgets('another button held is not a long press', (tester) async {
+        await pumpBox(tester);
+
+        final gesture = await tester.startGesture(
+          centre,
+          kind: PointerDeviceKind.mouse,
+          buttons: kSecondaryMouseButton,
+        );
+        await tester.pump(timeout * 2);
+        await gesture.up();
+        await tester.pump();
+
+        expectGestures();
+      });
+
+      testWidgets('the primary mouse button held is', (tester) async {
+        await pumpBox(tester);
+
+        final gesture = await tester.startGesture(
+          centre,
+          kind: PointerDeviceKind.mouse,
+        );
+        await tester.pump(timeout);
+        await gesture.up();
+        await tester.pump();
+
+        expectGestures(longCount: 1);
+      });
+
+      testWidgets('the wheel during the hold drops it', (tester) async {
+        await pumpBox(tester);
+
+        final gesture = await tester.startGesture(
+          centre,
+          kind: PointerDeviceKind.mouse,
+        );
+        await tester.sendEventToBinding(
+          const PointerScrollEvent(
+            position: centre,
+            scrollDelta: Offset(0, 100),
+          ),
+        );
+        await tester.pump(timeout * 2);
+        await gesture.up();
+        await tester.pump();
+
+        expectGestures();
+      });
+
+      testWidgets('a rotation during the hold: nothing, and no tap after', (
+        tester,
+      ) async {
+        await pumpBox(tester);
+
+        final gesture = await tester.startGesture(centre);
+        await tester.pump(const Duration(milliseconds: 100));
+        aspectRatio = 1200 / 800;
+        await tester.pump(timeout);
+        await gesture.up();
+        await tester.pump();
+
+        expectGestures();
+      });
+
+      testWidgets('losing the picture during the hold: nothing', (
+        tester,
+      ) async {
+        await pumpBox(tester);
+
+        final gesture = await tester.startGesture(centre);
+        aspectRatio = null;
+        await tester.pump(timeout);
+        await gesture.up();
+        await tester.pump();
+
+        expectGestures();
+      });
+
+      group('only on the picture', () {
+        testWidgets('portrait: held on either pillarbox band, nothing', (
+          tester,
+        ) async {
+          await pumpBox(tester);
+
+          for (final position in const [Offset(200, 400), Offset(1000, 400)]) {
+            final gesture = await tester.startGesture(position);
+            await tester.pump(timeout * 2);
+            await gesture.up();
+            await tester.pump();
+          }
+
+          expectGestures();
+        });
+
+        testWidgets('portrait: held on the picture, a long press', (
+          tester,
+        ) async {
+          await pumpBox(tester);
+
+          final gesture = await tester.startGesture(const Offset(400, 160));
+          await tester.pump(timeout);
+          await gesture.up();
+          await tester.pump();
+
+          expectGestures(longCount: 1);
+          expectPoint(longPresses.single, 0.1, 0.2);
+        });
+
+        testWidgets('landscape: held on either letterbox band, nothing', (
+          tester,
+        ) async {
+          // 1200 x 375 in a 1200 x 800 box: bands above and below.
+          aspectRatio = 1280 / 400;
+          await pumpBox(tester);
+
+          for (final position in const [Offset(600, 100), Offset(600, 700)]) {
+            final gesture = await tester.startGesture(position);
+            await tester.pump(timeout * 2);
+            await gesture.up();
+            await tester.pump();
+          }
+
+          expectGestures();
+        });
+
+        testWidgets('landscape: held on the picture, a long press', (
+          tester,
+        ) async {
+          aspectRatio = 1280 / 400;
+          await pumpBox(tester);
+
+          final gesture = await tester.startGesture(const Offset(300, 400));
+          await tester.pump(timeout);
+          await gesture.up();
+          await tester.pump();
+
+          expectGestures(longCount: 1);
+          expectPoint(longPresses.single, 0.25, 0.5);
+        });
+
+        testWidgets('pressed on a band and moved onto the picture: nothing', (
+          tester,
+        ) async {
+          await pumpBox(tester);
+
+          final gesture = await tester.startGesture(const Offset(345, 400));
+          await gesture.moveTo(const Offset(352, 400));
+          await tester.pump(timeout * 2);
+          await gesture.up();
+          await tester.pump();
+
+          expectGestures();
+        });
+
+        testWidgets(
+          'slipping off the edge by less than the threshold: nothing',
+          (tester) async {
+            await pumpBox(tester);
+
+            final gesture = await tester.startGesture(const Offset(351, 400));
+            await gesture.moveTo(const Offset(348, 400));
+            await tester.pump(timeout * 2);
+            await gesture.up();
+            await tester.pump();
+
+            expectGestures();
+          },
+        );
+
+        testWidgets('a tap and a long press on one spot land on one point', (
+          tester,
+        ) async {
+          await pumpBox(tester);
+          const spot = Offset(475, 600);
+
+          await tester.tapAt(spot);
+          await tester.pump();
+          final gesture = await tester.startGesture(spot);
+          await tester.pump(timeout);
+          await gesture.up();
+          await tester.pump();
+
+          expect(longPresses.single, taps.single);
+          expectPoint(taps.single, 0.25, 0.75);
+        });
       });
     });
 
@@ -1232,6 +1799,7 @@ void main() {
                       videoAspectRatio: () => aspectRatio,
                       onTap: taps.add,
                       onSwipe: recordSwipe,
+                      onLongPress: longPresses.add,
                     ),
                   ),
                   const SizedBox(height: 2000),

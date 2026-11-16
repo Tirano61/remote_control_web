@@ -10,6 +10,7 @@ import 'package:remote_control_web/features/auth/data/repositories/auth_reposito
 import 'package:remote_control_web/features/remote_control/domain/entities/normalized_remote_point.dart';
 import 'package:remote_control_web/features/remote_control/domain/entities/remote_control_ack.dart';
 import 'package:remote_control_web/features/remote_control/domain/entities/remote_control_command.dart';
+import 'package:remote_control_web/features/remote_control/presentation/widgets/remote_control_gesture_layer.dart';
 import 'package:remote_control_web/features/remote_control/presentation/widgets/remote_text_dialog.dart';
 import 'package:remote_control_web/features/remote_session/data/repositories/remote_session_repository_impl.dart';
 import 'package:remote_control_web/features/remote_session/domain/entities/remote_session_status.dart';
@@ -1251,6 +1252,267 @@ void main() {
         expect(command.point.y, closeTo(0.5, 1e-9));
       }
       expect(renderers.created, hasLength(1));
+    });
+
+    group('Mantener pulsado', () {
+      const holdTime = RemoteControlGestureLayer.longPressTimeout;
+      final closeButton = find.byKey(const Key('close_remote_session_button'));
+      final backButton = find.byKey(const Key('remote_back_button'));
+      final homeButton = find.byKey(const Key('remote_home_button'));
+      final recentsButton = find.byKey(const Key('remote_recents_button'));
+      final textButton = find.byKey(const Key('remote_text_button'));
+      final imeButton = find.byKey(const Key('remote_ime_enter_button'));
+      final textDialog = find.byKey(const Key('remote_text_dialog'));
+
+      List<RemoteControlCommand> sent() => peers.last.sentRemoteControlCommands;
+
+      /// Holds the pointer still on the centre of the picture until the long
+      /// press is recognised, and leaves it down.
+      Future<TestGesture> holdCentre(WidgetTester tester) async {
+        final gesture = await tester.startGesture(tester.getCenter(surface));
+        await tester.pump(holdTime);
+        await tester.pump();
+        await tester.pump();
+        return gesture;
+      }
+
+      testWidgets('a hold is one long press, and letting go adds nothing', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+
+        final gesture = await holdCentre(tester);
+
+        expect(sent(), const [
+          RemoteLongPressCommand(
+            id: 'long-1',
+            point: NormalizedRemotePoint(0.5, 0.5),
+          ),
+        ]);
+        expect(statusLine(tester), 'Manteniendo pulsado...');
+
+        await gesture.up();
+        await settleUi(tester);
+        expect(sent(), hasLength(1));
+
+        peers.last.emitRemoteControlAck('long-1');
+        await settleUi(tester);
+        expect(statusLine(tester), 'Pulsación prolongada enviada');
+        expect(sent(), hasLength(1));
+
+        // The next click is a tap again.
+        await clickCentre(tester);
+        expect(sent().map((c) => c.id), ['long-1', 'tap-2']);
+      });
+
+      testWidgets('a short click is still a tap and nothing else', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+
+        final gesture = await tester.startGesture(tester.getCenter(surface));
+        await tester.pump(const Duration(milliseconds: 100));
+        await gesture.up();
+        await settleUi(tester);
+        await tester.pump(holdTime * 4);
+
+        expect(sent().map((c) => c.id), ['tap-1']);
+      });
+
+      testWidgets('a drag is still a swipe and nothing else', (tester) async {
+        await pumpAssistance(tester);
+        final box = tester.getRect(surface);
+
+        final gesture = await tester.startGesture(box.center);
+        await tester.pump(const Duration(milliseconds: 200));
+        await gesture.moveBy(const Offset(0, -80));
+        await tester.pump(holdTime * 2);
+        await gesture.up();
+        await settleUi(tester);
+
+        expect(sent(), hasLength(1));
+        expect(sent().single, isA<RemoteSwipeCommand>());
+      });
+
+      testWidgets('held on a band of the picture: nothing', (tester) async {
+        // A wide window and a portrait picture: the surface follows the picture,
+        // so a hold beside it is not on it.
+        await pumpAssistance(tester);
+        renderers.last.reportVideoAspectRatio(800 / 1280);
+        await settleUi(tester);
+        final box = tester.getRect(surface);
+
+        final gesture = await tester.startGesture(
+          Offset(box.left - 10, box.center.dy),
+        );
+        await tester.pump(holdTime * 2);
+        await gesture.up();
+        await settleUi(tester);
+
+        expect(sent(), isEmpty);
+      });
+
+      testWidgets('while unanswered nothing else goes out, and FINALIZAR can', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+        final session = peers.last;
+        final gate = Completer<void>();
+        remoteSessions.closeGate = gate.future;
+
+        final gesture = await holdCentre(tester);
+        await gesture.up();
+        await settleUi(tester);
+        expect(gestureLayer, findsNothing);
+
+        await tester.tapAt(tester.getCenter(surface));
+        await holdCentre(tester).then((g) => g.up());
+        await tester.tap(backButton, warnIfMissed: false);
+        await tester.tap(homeButton, warnIfMissed: false);
+        await tester.tap(recentsButton, warnIfMissed: false);
+        await tester.tap(textButton, warnIfMissed: false);
+        await tester.tap(imeButton, warnIfMissed: false);
+        await settleUi(tester);
+        expect(sent(), hasLength(1));
+        expect(textDialog, findsNothing);
+
+        await tester.tap(closeButton);
+        await settleUi(tester);
+        expect(remoteSessions.closedIds, hasLength(1));
+        expect(statusLine(tester), 'Control remoto: no disponible');
+
+        session.emitRemoteControlAck('long-1');
+        await settleUi(tester);
+        expect(statusLine(tester), 'Control remoto: no disponible');
+
+        gate.complete();
+        await settleUi(tester);
+        await tester.pump(const Duration(seconds: 10));
+        expect(session.sentRemoteControlCommands, hasLength(1));
+      });
+
+      testWidgets('FINALIZAR during the hold: no late long press', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+        final session = peers.last;
+        final gate = Completer<void>();
+        remoteSessions.closeGate = gate.future;
+
+        final gesture = await tester.startGesture(tester.getCenter(surface));
+        await tester.pump(const Duration(milliseconds: 200));
+        await tester.tap(closeButton);
+        await settleUi(tester);
+        expect(gestureLayer, findsNothing);
+
+        await tester.pump(holdTime * 4);
+        await gesture.up();
+        await settleUi(tester);
+        expect(session.sentRemoteControlCommands, isEmpty);
+
+        gate.complete();
+        await settleUi(tester);
+        await tester.pump(const Duration(seconds: 10));
+        expect(surface, findsNothing);
+        expect(session.sentRemoteControlCommands, isEmpty);
+      });
+
+      testWidgets('a tap unanswered during the hold: no long press, no tap', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+        await clickCentre(tester);
+        expect(sent().map((c) => c.id), ['tap-1']);
+
+        final gesture = await holdCentre(tester);
+        await gesture.up();
+        await settleUi(tester);
+
+        expect(sent().map((c) => c.id), ['tap-1']);
+      });
+
+      testWidgets('the session leaving ACTIVE during the hold: nothing', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+
+        final gesture = await tester.startGesture(tester.getCenter(surface));
+        await tester.pump(const Duration(milliseconds: 200));
+        peers.last.emitControlChannelState(WebRtcDataChannelState.closed);
+        await settleUi(tester);
+        expect(gestureLayer, findsNothing);
+
+        await tester.pump(holdTime * 4);
+        await gesture.up();
+        await settleUi(tester);
+
+        expect(sent(), isEmpty);
+      });
+
+      testWidgets('the picture going away during the hold: nothing', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+
+        final gesture = await tester.startGesture(tester.getCenter(surface));
+        await tester.pump(const Duration(milliseconds: 200));
+        peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+        await settleUi(tester);
+
+        await tester.pump(holdTime * 4);
+        await gesture.up();
+        await settleUi(tester);
+
+        expect(sent(), isEmpty);
+      });
+
+      group('what it says', () {
+        const refusals = {
+          RemoteControlError.gestureRejected:
+              'El dispositivo rechazó la pulsación prolongada.',
+          RemoteControlError.accessibilityUnavailable:
+              'El dispositivo no tiene habilitado el control remoto.',
+          RemoteControlError.sessionNotActive:
+              'La asistencia no está activa en el dispositivo.',
+        };
+
+        refusals.forEach((error, message) {
+          testWidgets(error.code, (tester) async {
+            await pumpAssistance(tester);
+            final gesture = await holdCentre(tester);
+            await gesture.up();
+            await settleUi(tester);
+
+            peers.last.emitRemoteControlAck('long-1', error: error);
+            await settleUi(tester);
+
+            expect(statusLine(tester), message);
+            expect(sent(), hasLength(1));
+            // Nothing is animating: the next gesture can go out at once.
+            await clickCentre(tester);
+            expect(sent().map((c) => c.id), ['long-1', 'tap-2']);
+          });
+        });
+
+        testWidgets('no answer in eight seconds', (tester) async {
+          await pumpAssistance(tester);
+          final gesture = await holdCentre(tester);
+          await gesture.up();
+          await settleUi(tester);
+
+          await tester.pump(const Duration(milliseconds: 7500));
+          expect(statusLine(tester), 'Manteniendo pulsado...');
+          await tester.pump(const Duration(milliseconds: 500));
+          await settleUi(tester);
+
+          expect(
+            statusLine(tester),
+            'El dispositivo no confirmó la pulsación prolongada.',
+          );
+          await tester.pump(const Duration(seconds: 30));
+          expect(sent(), hasLength(1));
+        });
+      });
     });
 
     group('Texto', () {

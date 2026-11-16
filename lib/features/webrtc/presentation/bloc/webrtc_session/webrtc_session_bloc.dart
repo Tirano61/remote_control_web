@@ -58,10 +58,10 @@ part 'webrtc_session_state.dart';
 /// and an acknowledgement from a replaced peer connection is dropped like any
 /// other late callback. A command is sent at most once. Nothing queues a gesture
 /// and nothing repeats one, because it may have run even when its acknowledgement
-/// was lost. While a global action or an IME action settles, new commands are
-/// dropped rather than held for later, for the same reason, and likewise while a
-/// text is unanswered. An IME action only ever goes out because the technician
-/// pressed Acción: nothing sends one after a tap or a text.
+/// was lost. While a global action, an IME action or a long press settles, new
+/// commands are dropped rather than held for later, for the same reason, and
+/// likewise while a text is unanswered. An IME action only ever goes out because
+/// the technician pressed Acción: nothing sends one after a tap or a text.
 ///
 /// Security: SDP and ICE candidate contents never reach the log, and neither do
 /// the coordinates of a gesture or a text. What is logged is the lifecycle — created,
@@ -89,6 +89,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     on<WebRtcSessionTerminated>(_onTerminated);
     on<WebRtcRemoteTapRequested>(_onRemoteTapRequested);
     on<WebRtcRemoteSwipeRequested>(_onRemoteSwipeRequested);
+    on<WebRtcRemoteLongPressRequested>(_onRemoteLongPressRequested);
     on<WebRtcRemoteBackRequested>(_onRemoteBackRequested);
     on<WebRtcRemoteHomeRequested>(_onRemoteHomeRequested);
     on<WebRtcRemoteRecentsRequested>(_onRemoteRecentsRequested);
@@ -355,6 +356,34 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         start: event.start,
         end: event.end,
         durationMs: event.durationMs,
+      ),
+      emit,
+    );
+  }
+
+  /// A press held still on the picture, recognised while the pointer is down.
+  ///
+  /// Checked again here, at the moment the recognition ends, and not when the
+  /// pointer went down: by now the session, the channel, the picture or what is
+  /// pending may have changed. If anything is missing it is dropped, never kept
+  /// for later.
+  Future<void> _onRemoteLongPressRequested(
+    WebRtcRemoteLongPressRequested event,
+    Emitter<WebRtcSessionState> emit,
+  ) async {
+    final session = _sessionAcceptingCommands(
+      event.remoteSessionId,
+      isAvailable: state.canSendRemoteLongPress,
+    );
+    if (session == null) {
+      logDebug('remote long_press ignored ${event.remoteSessionId}');
+      return;
+    }
+    await _sendRemoteCommand(
+      session,
+      RemoteLongPressCommand(
+        id: _commandIdGenerator.next(RemoteCommandKind.longPress),
+        point: event.point,
       ),
       emit,
     );
@@ -629,7 +658,9 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
       _settleGuard.accept(ack.commandId);
     } else {
       logDebug(switch (command.kind) {
-        RemoteCommandKind.setText || RemoteCommandKind.imeEnter =>
+        RemoteCommandKind.longPress ||
+        RemoteCommandKind.setText ||
+        RemoteCommandKind.imeEnter =>
           '${command.kind.logName} rejected ${ack.commandId}: ${error.code}',
         _ => 'remote control command rejected: ${error.code}',
       });
