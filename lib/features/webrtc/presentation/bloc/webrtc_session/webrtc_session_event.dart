@@ -127,6 +127,20 @@ final class WebRtcRemoteTextRequested extends WebRtcSessionEvent {
   String toString() => 'WebRtcRemoteTextRequested($remoteSessionId)';
 }
 
+/// The technician pressed Acción: run the IME action of the field they saw
+/// focused on the picture, whatever that action is.
+///
+/// Only ever raised by that button. Neither a tap on a field nor a text that went
+/// out raises it.
+final class WebRtcRemoteImeEnterRequested extends WebRtcSessionEvent {
+  const WebRtcRemoteImeEnterRequested({required this.remoteSessionId});
+
+  final String remoteSessionId;
+
+  @override
+  List<Object?> get props => [remoteSessionId];
+}
+
 /// The surface started or stopped really displaying the tablet's screen.
 ///
 /// Only the surface can tell: the BLoC knows there is a track, and a track exists
@@ -169,9 +183,9 @@ final class _WebRtcRemoteCommandTimedOut extends WebRtcSessionEvent {
   List<Object?> get props => [commandId, generation];
 }
 
-/// The settle time of a global action has passed. Internal.
-final class _WebRtcRemoteNavigationSettled extends WebRtcSessionEvent {
-  const _WebRtcRemoteNavigationSettled(this.commandId, this.generation);
+/// The settle time of a global action or an IME action has passed. Internal.
+final class _WebRtcRemoteActionSettled extends WebRtcSessionEvent {
+  const _WebRtcRemoteActionSettled(this.commandId, this.generation);
 
   final String commandId;
   final int generation;

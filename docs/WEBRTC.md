@@ -116,12 +116,20 @@ through `onDataChannel`.
 Its state (`connecting`, `open`, `closing`, `closed`) is tracked apart from the
 peer connection state: `connected` does not imply the channel is already open.
 
-It carries six commands, the tap, the swipe, Back, Home, Recents and `set_text`, and
-their acknowledgements. The protocol and what each side does with it are in
-[CONTROL_CHANNEL.md](CONTROL_CHANNEL.md). `set_text` is the only one whose content is
+It carries seven commands, the tap, the swipe, Back, Home, Recents, `set_text` and
+`ime_enter`, and their acknowledgements. The protocol and what each side does with it are
+in [CONTROL_CHANNEL.md](CONTROL_CHANNEL.md). `set_text` is the only one whose content is
 sensitive: it crosses this channel because that is the operation, and is not logged or
 kept ([Remote text privacy](CONTROL_CHANNEL.md#remote-text-privacy)). Keys, a cursor,
 selection and a remote clipboard are not defined.
+
+`ime_enter` is presented as **Acción**: it runs `ACTION_IME_ENTER` on the field with
+input focus, whatever action that field declares (Buscar, Ir, Siguiente, Enviar...). It
+carries only its id, the web does not know which action it is, and its `ok: true` only
+says Android accepted it. It requires the picture to be really displayed, so that the
+technician can confirm on it which field has focus, nothing pending ahead of it, and a
+deliberate press: it is never sent after a tap or a text. See
+[CONTROL_CHANNEL.md](CONTROL_CHANNEL.md#ime-action-acción).
 
 ## The screen: one `recvonly` video section
 
@@ -315,9 +323,9 @@ of the view turns clicks into taps and drags into swipes. The view itself is not
 touched, and the keyboard is not listened to. The wheel sends nothing. See
 [CONTROL_CHANNEL.md](CONTROL_CHANNEL.md#tap-or-swipe).
 
-For the 350 ms after a global action is sent, or until it is answered if that takes
-longer, the layer is not there: the transition is still running, so a click would
-land somewhere the technician did not aim at. The picture itself keeps arriving and
+For the 350 ms after a global action or an IME action is sent, or until it is
+answered if that takes longer, the layer is not there: the transition is still
+running, so a click would land somewhere the technician did not aim at. The picture itself keeps arriving and
 the renderer is left alone. See
 [CONTROL_CHANNEL.md](CONTROL_CHANNEL.md#the-settle-guard).
 

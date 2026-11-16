@@ -32,6 +32,7 @@ class RemoteControlChannelCodec {
   static const String _homeType = 'home';
   static const String _recentsType = 'recents';
   static const String _setTextType = 'set_text';
+  static const String _imeEnterType = 'ime_enter';
   static const String _ackType = 'ack';
 
   /// The frame for [command], with exactly the fields of the protocol. It may hold
@@ -80,6 +81,11 @@ class RemoteControlChannelCodec {
       _typeKey: _setTextType,
       _idKey: id,
       _textKey: text,
+    }),
+    RemoteImeEnterCommand(:final id) => jsonEncode({
+      _versionKey: _version,
+      _typeKey: _imeEnterType,
+      _idKey: id,
     }),
   };
 

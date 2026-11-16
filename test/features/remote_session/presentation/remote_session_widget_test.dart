@@ -13,6 +13,7 @@ import 'package:remote_control_web/features/remote_control/domain/entities/remot
 import 'package:remote_control_web/features/remote_control/presentation/widgets/remote_text_dialog.dart';
 import 'package:remote_control_web/features/remote_session/data/repositories/remote_session_repository_impl.dart';
 import 'package:remote_control_web/features/remote_session/domain/entities/remote_session_status.dart';
+import 'package:remote_control_web/features/remote_session/presentation/widgets/active_assistance_section.dart';
 import 'package:remote_control_web/features/signaling/data/technician_signaling_client_impl.dart';
 import 'package:remote_control_web/features/support/domain/entities/support_request_status.dart';
 import 'package:remote_control_web/features/webrtc/domain/entities/webrtc_connection_state.dart';
@@ -1454,7 +1455,7 @@ void main() {
 
           expect(isTextEnabled(tester), isFalse);
 
-          await tester.pump(remoteNavigationSettleDuration);
+          await tester.pump(remoteSettleDuration);
           await tester.pump();
 
           expect(isTextEnabled(tester), isTrue);
@@ -2073,6 +2074,543 @@ void main() {
       });
     });
 
+    group('Acción', () {
+      final imeButton = find.byKey(const Key('remote_ime_enter_button'));
+      final textButton = find.byKey(const Key('remote_text_button'));
+      final backButton = find.byKey(const Key('remote_back_button'));
+      final homeButton = find.byKey(const Key('remote_home_button'));
+      final recentsButton = find.byKey(const Key('remote_recents_button'));
+      final closeButton = find.byKey(const Key('close_remote_session_button'));
+      final actionStatus = find.byKey(const Key('remote_navigation_status'));
+      final textDialog = find.byKey(const Key('remote_text_dialog'));
+
+      bool isEnabled(WidgetTester tester, Finder button) =>
+          tester.widget<OutlinedButton>(button).onPressed != null;
+
+      bool isImeEnabled(WidgetTester tester) => isEnabled(tester, imeButton);
+
+      String actionLine(WidgetTester tester) =>
+          tester.widget<Text>(actionStatus).data!;
+
+      List<RemoteControlCommand> sent() => peers.last.sentRemoteControlCommands;
+
+      List<RemoteControlCommand> imeEnters() =>
+          sent().whereType<RemoteImeEnterCommand>().toList();
+
+      Future<void> press(WidgetTester tester, Finder button) async {
+        await tester.tap(button);
+        await tester.pump();
+        await tester.pump();
+      }
+
+      /// Every other way of sending something, and none of them is open.
+      void expectEverythingElseHeld(WidgetTester tester) {
+        expect(gestureLayer, findsNothing);
+        expect(isEnabled(tester, backButton), isFalse);
+        expect(isEnabled(tester, homeButton), isFalse);
+        expect(isEnabled(tester, recentsButton), isFalse);
+        expect(isEnabled(tester, textButton), isFalse);
+        expect(isImeEnabled(tester), isFalse);
+        expect(tester.widget<FilledButton>(closeButton).onPressed, isNotNull);
+      }
+
+      void expectEverythingElseOpen(WidgetTester tester) {
+        expect(gestureLayer, findsOneWidget);
+        expect(isEnabled(tester, backButton), isTrue);
+        expect(isEnabled(tester, homeButton), isTrue);
+        expect(isEnabled(tester, recentsButton), isTrue);
+        expect(isEnabled(tester, textButton), isTrue);
+        expect(isImeEnabled(tester), isTrue);
+      }
+
+      testWidgets('it is there, by name, and enabled', (tester) async {
+        await pumpAssistance(tester);
+
+        expect(find.text('Acción'), findsOneWidget);
+        expect(find.text('Enter'), findsNothing);
+        expect(isImeEnabled(tester), isTrue);
+        expect(tester.takeException(), isNull);
+      });
+
+      testWidgets('it explains what it does, never which action it is', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+
+        final tooltip = tester.widget<Tooltip>(
+          find.byKey(const Key('remote_ime_enter_tooltip')),
+        );
+        expect(
+          tooltip.message,
+          'Ejecuta la acción disponible del campo enfocado, por ejemplo '
+          'Buscar, Ir, Siguiente o Enviar.',
+        );
+        expect(tooltip.message, kRemoteImeEnterHelp);
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('remote_ime_enter_tooltip')),
+            matching: imeButton,
+          ),
+          findsOneWidget,
+        );
+
+        await tester.longPress(imeButton);
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(find.text(kRemoteImeEnterHelp), findsOneWidget);
+        // Showing the help sends nothing.
+        await tester.pump(const Duration(seconds: 2));
+        expect(sent(), isEmpty);
+      });
+
+      group('when it is available', () {
+        testWidgets('a track with no frames yet: disabled', (tester) async {
+          remoteSessions.current = buildRemoteSession();
+          realtime.peerJoinedOnJoin = true;
+          await pumpConsole(tester);
+          await connectSocket(tester);
+          realtime.answerRelayAck({
+            'delivered': true,
+            'remoteSessionId': remoteSessionId,
+          });
+          await settleUi(tester);
+          peers.last
+            ..emitControlChannelState(WebRtcDataChannelState.open)
+            ..emitPeerState(WebRtcPeerConnectionState.connected)
+            ..emitRemoteVideoTrack('screen-0');
+          await settleUi(tester);
+
+          expect(find.text(kWaitingForRemoteScreenNotice), findsOneWidget);
+          expect(isImeEnabled(tester), isFalse);
+
+          renderers.last.reportVideoAspectRatio(1280 / 800);
+          await settleUi(tester);
+
+          expect(isImeEnabled(tester), isTrue);
+        });
+
+        testWidgets('no video at all, with Back enabled: disabled', (
+          tester,
+        ) async {
+          // Deliberately stricter than the tablet, which would run it: the
+          // picture is how the technician checks which field has focus.
+          remoteSessions.current = buildRemoteSession();
+          realtime.peerJoinedOnJoin = true;
+          await pumpConsole(tester);
+          await connectSocket(tester);
+          realtime.answerRelayAck({
+            'delivered': true,
+            'remoteSessionId': remoteSessionId,
+          });
+          await settleUi(tester);
+          peers.last
+            ..emitControlChannelState(WebRtcDataChannelState.open)
+            ..emitPeerState(WebRtcPeerConnectionState.connected);
+          await settleUi(tester);
+
+          expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
+          expect(isEnabled(tester, backButton), isTrue);
+          expect(isEnabled(tester, homeButton), isTrue);
+          expect(isEnabled(tester, recentsButton), isTrue);
+          expect(isImeEnabled(tester), isFalse);
+
+          await tester.tap(imeButton, warnIfMissed: false);
+          await settleUi(tester);
+          expect(sent(), isEmpty);
+        });
+
+        testWidgets('a session still CONNECTING: disabled', (tester) async {
+          remoteSessions.activateFailure = const NetworkFailure();
+          await pumpAssistance(tester);
+
+          expect(isImeEnabled(tester), isFalse);
+        });
+
+        testWidgets('before the peers are connected: disabled', (tester) async {
+          remoteSessions.current = buildRemoteSession();
+          await pumpConsole(tester);
+
+          expect(imeButton, findsOneWidget);
+          expect(isImeEnabled(tester), isFalse);
+        });
+
+        testWidgets('the channel closed: disabled', (tester) async {
+          await pumpAssistance(tester);
+
+          peers.last.emitControlChannelState(WebRtcDataChannelState.closed);
+          await settleUi(tester);
+
+          expect(isImeEnabled(tester), isFalse);
+        });
+
+        testWidgets('a tap unanswered: disabled, and enabled by its answer', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+
+          await clickCentre(tester);
+          expect(sent().single, isA<RemoteTapCommand>());
+          expect(isImeEnabled(tester), isFalse);
+
+          peers.last.emitRemoteControlAck('tap-1');
+          await settleUi(tester);
+
+          expect(isImeEnabled(tester), isTrue);
+        });
+
+        testWidgets('a swipe unanswered: disabled, and enabled by its answer', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+
+          await dragUpwards(tester);
+          expect(sent().single, isA<RemoteSwipeCommand>());
+          expect(isImeEnabled(tester), isFalse);
+
+          peers.last.emitRemoteControlAck(sent().single.id);
+          await settleUi(tester);
+
+          expect(isImeEnabled(tester), isTrue);
+        });
+
+        testWidgets('a text unanswered: disabled, and enabled by its answer', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+
+          await press(tester, textButton);
+          await tester.enterText(
+            find.byKey(const Key('remote_text_field')),
+            'wifi',
+          );
+          await tester.pump();
+          await press(tester, find.byKey(const Key('remote_text_send_button')));
+          expect(sent().single, isA<RemoteSetTextCommand>());
+          expect(isImeEnabled(tester), isFalse);
+
+          peers.last.emitRemoteControlAck('text-1');
+          await tester.pump();
+
+          expect(isImeEnabled(tester), isTrue);
+        });
+
+        testWidgets('a global action settling: disabled', (tester) async {
+          await pumpAssistance(tester);
+
+          await press(tester, homeButton);
+          peers.last.emitRemoteControlAck('home-1');
+          await tester.pump();
+
+          expect(isImeEnabled(tester), isFalse);
+
+          await tester.pump(remoteSettleDuration);
+          await tester.pump();
+
+          expect(isImeEnabled(tester), isTrue);
+        });
+
+        testWidgets('the text dialog open: disabled', (tester) async {
+          await pumpAssistance(tester);
+
+          await press(tester, textButton);
+          expect(textDialog, findsOneWidget);
+
+          expect(isImeEnabled(tester), isFalse);
+        });
+      });
+
+      testWidgets('its frame, its answer, its words', (tester) async {
+        await pumpAssistance(tester);
+
+        await press(tester, imeButton);
+
+        expect(sent(), const [RemoteImeEnterCommand(id: 'enter-1')]);
+        expect(actionLine(tester), 'Ejecutando acción...');
+
+        peers.last.emitRemoteControlAck('enter-1');
+        await tester.pump(remoteSettleDuration);
+        await tester.pump();
+
+        expect(actionLine(tester), 'Acción enviada');
+        expect(statusLine(tester), 'Control remoto: listo');
+        expect(find.textContaining('Búsqueda'), findsNothing);
+        expect(find.textContaining('Enter'), findsNothing);
+      });
+
+      group('the guard', () {
+        testWidgets('an answer at 50 ms holds everything until 350 ms', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+
+          await press(tester, imeButton);
+          expectEverythingElseHeld(tester);
+
+          await tester.pump(const Duration(milliseconds: 50));
+          peers.last.emitRemoteControlAck('enter-1');
+          await tester.pump();
+
+          expect(actionLine(tester), 'Acción enviada');
+          expectEverythingElseHeld(tester);
+
+          await tester.pump(const Duration(milliseconds: 250));
+          expectEverythingElseHeld(tester);
+
+          await tester.pump(const Duration(milliseconds: 60));
+          await tester.pump();
+          expectEverythingElseOpen(tester);
+        });
+
+        testWidgets('an answer at 500 ms gives it back there and then', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+
+          await press(tester, imeButton);
+          await tester.pump(const Duration(milliseconds: 499));
+          expectEverythingElseHeld(tester);
+
+          peers.last.emitRemoteControlAck('enter-1');
+          await tester.pump();
+
+          expectEverythingElseOpen(tester);
+        });
+
+        testWidgets('nothing else can go out, and FINALIZAR can', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+
+          await press(tester, imeButton);
+
+          await tester.tapAt(tester.getCenter(surface));
+          await tester.tap(backButton, warnIfMissed: false);
+          await tester.tap(homeButton, warnIfMissed: false);
+          await tester.tap(recentsButton, warnIfMissed: false);
+          await tester.tap(textButton, warnIfMissed: false);
+          await tester.tap(imeButton, warnIfMissed: false);
+          await tester.pump();
+          expect(sent(), hasLength(1));
+          expect(textDialog, findsNothing);
+
+          peers.last.emitRemoteControlAck('enter-1');
+          await tester.pump(remoteSettleDuration);
+          await tester.pump();
+
+          await clickCentre(tester);
+          expect(sent(), hasLength(2));
+          expect(sent().last, isA<RemoteTapCommand>());
+        });
+
+        testWidgets('FINALIZAR is not held back, and clears it', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+          final session = peers.last;
+          final gate = Completer<void>();
+          remoteSessions.closeGate = gate.future;
+
+          await press(tester, imeButton);
+          await tester.tap(closeButton);
+          await tester.pump();
+          await tester.pump();
+          await tester.pump();
+
+          expect(remoteSessions.closedIds, hasLength(1));
+          expect(actionStatus, findsNothing);
+          expect(isImeEnabled(tester), isFalse);
+
+          session.emitRemoteControlAck('enter-1');
+          await settleUi(tester);
+          expect(actionStatus, findsNothing);
+          expect(session.sentRemoteControlCommands, hasLength(1));
+
+          gate.complete();
+          await settleUi(tester);
+          await tester.pump(const Duration(seconds: 10));
+          expect(session.sentRemoteControlCommands, hasLength(1));
+        });
+      });
+
+      group('the answer', () {
+        const refusals = {
+          RemoteControlError.textTargetUnavailable:
+              'No hay un campo de texto editable enfocado.',
+          RemoteControlError.imeActionUnavailable:
+              'El campo enfocado no ofrece una acción de teclado.',
+          RemoteControlError.imeActionRejected:
+              'El dispositivo rechazó la acción del campo.',
+          RemoteControlError.accessibilityUnavailable:
+              'El dispositivo no tiene habilitado el control remoto.',
+          RemoteControlError.invalidCommand: 'Control remoto no disponible',
+          RemoteControlError.unsupportedCommand: 'Control remoto no disponible',
+        };
+
+        refusals.forEach((error, message) {
+          testWidgets('${error.code} is explained, and gives control back '
+              'at once', (tester) async {
+            await pumpAssistance(tester);
+
+            await press(tester, imeButton);
+            await tester.pump(const Duration(milliseconds: 40));
+            peers.last.emitRemoteControlAck('enter-1', error: error);
+            await tester.pump();
+
+            expect(actionLine(tester), message);
+            // No settle time: Android did not take the action.
+            expectEverythingElseOpen(tester);
+            expect(peers.last.isClosed, isFalse);
+            expect(remoteSessions.closedIds, isEmpty);
+
+            await tester.pump(const Duration(seconds: 30));
+            expect(sent(), hasLength(1));
+          });
+        });
+
+        testWidgets('session_not_active asks REST, once, and sends nothing', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+          final readsBefore = remoteSessions.currentCount;
+
+          await press(tester, imeButton);
+          peers.last.emitRemoteControlAck(
+            'enter-1',
+            error: RemoteControlError.sessionNotActive,
+          );
+          await settleUi(tester);
+
+          expect(remoteSessions.currentCount, readsBefore + 1);
+          expect(sent(), hasLength(1));
+          expect(peers.last.isClosed, isFalse);
+        });
+
+        testWidgets('no answer: not before eight seconds, and not repeated', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+
+          await press(tester, imeButton);
+
+          await tester.pump(const Duration(milliseconds: 7999));
+          expect(actionLine(tester), 'Ejecutando acción...');
+          expectEverythingElseHeld(tester);
+
+          await tester.pump(const Duration(milliseconds: 1));
+          await tester.pump();
+          expect(actionLine(tester), 'El dispositivo no confirmó la acción.');
+          expectEverythingElseOpen(tester);
+
+          peers.last.emitRemoteControlAck('enter-1');
+          await tester.pump(const Duration(seconds: 30));
+          expect(actionLine(tester), 'El dispositivo no confirmó la acción.');
+          expect(sent(), hasLength(1));
+        });
+
+        testWidgets('a channel that refuses it says so, at once', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+          peers.last.acceptsRemoteControlCommands = false;
+
+          await press(tester, imeButton);
+          await tester.pump();
+
+          expect(actionLine(tester), 'No se pudo enviar la acción.');
+          expectEverythingElseOpen(tester);
+        });
+
+        testWidgets('a gesture after it speaks in the gesture line', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+
+          await press(tester, imeButton);
+          peers.last.emitRemoteControlAck('enter-1');
+          await tester.pump(remoteSettleDuration);
+          await tester.pump();
+          await clickCentre(tester);
+
+          expect(statusLine(tester), 'Enviando toque...');
+          expect(actionStatus, findsNothing);
+        });
+      });
+
+      group('only ever on purpose', () {
+        testWidgets('a tap on a field sends no action after it', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+
+          await clickCentre(tester);
+          peers.last.emitRemoteControlAck('tap-1');
+          await tester.pump(const Duration(seconds: 30));
+
+          expect(imeEnters(), isEmpty);
+          expect(sent(), hasLength(1));
+        });
+
+        testWidgets('a text that went out sends no action after it', (
+          tester,
+        ) async {
+          await pumpAssistance(tester);
+
+          await press(tester, textButton);
+          await tester.enterText(
+            find.byKey(const Key('remote_text_field')),
+            'wifi',
+          );
+          await tester.pump();
+          await press(tester, find.byKey(const Key('remote_text_send_button')));
+          peers.last.emitRemoteControlAck('text-1');
+          await tester.pump(const Duration(seconds: 30));
+
+          expect(imeEnters(), isEmpty);
+          expect(sent(), const [
+            RemoteSetTextCommand(id: 'text-1', text: 'wifi'),
+          ]);
+
+          await press(tester, imeButton);
+          expect(sent(), const [
+            RemoteSetTextCommand(id: 'text-1', text: 'wifi'),
+            RemoteImeEnterCommand(id: 'enter-2'),
+          ]);
+        });
+      });
+
+      testWidgets('the log says what it did, by id', (tester) async {
+        final printed = <String>[];
+        final previous = debugPrint;
+        debugPrint = (String? message, {int? wrapWidth}) {
+          printed.add(message ?? '');
+        };
+        try {
+          await pumpAssistance(tester);
+
+          await press(tester, imeButton);
+          peers.last.emitRemoteControlAck('enter-1');
+          await tester.pump(remoteSettleDuration);
+          await tester.pump();
+          await press(tester, imeButton);
+          peers.last.emitRemoteControlAck(
+            'enter-2',
+            error: RemoteControlError.imeActionUnavailable,
+          );
+          await tester.pump();
+        } finally {
+          debugPrint = previous;
+        }
+
+        expect(
+          printed,
+          containsAll([
+            contains('ime_enter command sent enter-1'),
+            contains('ime_enter confirmed enter-1'),
+            contains('ime_enter rejected enter-2: ime_action_unavailable'),
+          ]),
+        );
+      });
+    });
+
     group('Back and Home', () {
       final backButton = find.byKey(const Key('remote_back_button'));
       final homeButton = find.byKey(const Key('remote_home_button'));
@@ -2113,7 +2651,7 @@ void main() {
 
       /// Past what is left of the guard, once the answer has arrived.
       Future<void> outliveGuard(WidgetTester tester) =>
-          tester.pump(remoteNavigationSettleDuration);
+          tester.pump(remoteSettleDuration);
 
       testWidgets('both are there, by name, and enabled', (tester) async {
         await pumpAssistance(tester);
@@ -2336,7 +2874,7 @@ void main() {
         await tester.pump(const Duration(milliseconds: 150));
         expect(sent(), hasLength(1));
 
-        await tester.pump(remoteNavigationSettleDuration);
+        await tester.pump(remoteSettleDuration);
         await tester.pump();
         expect(gestureLayer, findsOneWidget);
         expect(isEnabled(tester, homeButton), isTrue);
@@ -2375,7 +2913,7 @@ void main() {
 
         final gesture = await tester.createGesture();
         await gesture.down(tester.getCenter(surface));
-        await tester.pump(remoteNavigationSettleDuration);
+        await tester.pump(remoteSettleDuration);
         await tester.pump();
         expect(gestureLayer, findsOneWidget);
         await gesture.up();
@@ -2609,7 +3147,7 @@ void main() {
             await tester.pump(const Duration(milliseconds: 150));
             expect(sent(), hasLength(1));
 
-            await tester.pump(remoteNavigationSettleDuration);
+            await tester.pump(remoteSettleDuration);
             await tester.pump();
             expect(isEnabled(tester, recentsButton), isTrue);
             expect(gestureLayer, findsOneWidget);
@@ -2692,6 +3230,7 @@ void main() {
             homeButton,
             recentsButton,
             find.byKey(const Key('remote_text_button')),
+            find.byKey(const Key('remote_ime_enter_button')),
             closeButton,
           ]) {
             final rect = tester.getRect(button);
@@ -2844,6 +3383,7 @@ void main() {
               expect(find.text('Inicio'), findsOneWidget);
               expect(find.text('Recientes'), findsOneWidget);
               expect(find.text('Texto'), findsOneWidget);
+              expect(find.text('Acción'), findsOneWidget);
               expect(find.text('FINALIZAR ASISTENCIA'), findsOneWidget);
               final picture = tester.getSize(surface);
               expect(

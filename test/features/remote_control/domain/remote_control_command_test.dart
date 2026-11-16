@@ -118,7 +118,7 @@ void main() {
     });
 
     test('the settle time is 350 ms', () {
-      expect(remoteNavigationSettleDuration, const Duration(milliseconds: 350));
+      expect(remoteSettleDuration, const Duration(milliseconds: 350));
     });
   });
 
@@ -265,9 +265,72 @@ void main() {
         ids.next(RemoteCommandKind.home),
         ids.next(RemoteCommandKind.recents),
         ids.next(RemoteCommandKind.setText),
+        ids.next(RemoteCommandKind.imeEnter),
         ids.next(RemoteCommandKind.tap),
       ],
-      ['tap-1', 'swipe-2', 'back-3', 'home-4', 'recents-5', 'text-6', 'tap-7'],
+      [
+        'tap-1',
+        'swipe-2',
+        'back-3',
+        'home-4',
+        'recents-5',
+        'text-6',
+        'enter-7',
+        'tap-8',
+      ],
     );
+  });
+
+  group('ime_enter', () {
+    test('an id is all it needs, and all that tells two apart', () {
+      const command = RemoteImeEnterCommand(id: 'enter-1');
+
+      expect(command.id, 'enter-1');
+      expect(command.kind, RemoteCommandKind.imeEnter);
+      expect(command.props, ['enter-1']);
+      expect(command, const RemoteImeEnterCommand(id: 'enter-1'));
+      expect(command, isNot(const RemoteImeEnterCommand(id: 'enter-2')));
+    });
+
+    test(
+      'it is a command of its own, not a text, a key or a global action',
+      () {
+        const command = RemoteImeEnterCommand(id: 'enter-1');
+
+        expect(command, isNot(isA<RemoteSetTextCommand>()));
+        expect(command, isNot(isA<RemoteNavigationCommand>()));
+        expect(RemoteCommandKind.imeEnter.isGesture, isFalse);
+        expect(RemoteCommandKind.imeEnter.isNavigation, isFalse);
+      },
+    );
+
+    test('its ids start with enter, and the log calls it ime_enter', () {
+      expect(RemoteCommandKind.imeEnter.idPrefix, 'enter');
+      expect(RemoteCommandKind.imeEnter.logName, 'ime_enter');
+    });
+
+    test('it counts as five seconds of work, like a text', () {
+      expect(remoteImeEnterEstimatedWork, const Duration(seconds: 5));
+      expect(
+        const RemoteImeEnterCommand(id: 'enter-1').estimatedWork,
+        remoteImeEnterEstimatedWork,
+      );
+    });
+
+    test('it settles like a global action, and nothing else does', () {
+      expect(RemoteCommandKind.values.where((kind) => kind.settlesScreen), [
+        RemoteCommandKind.back,
+        RemoteCommandKind.home,
+        RemoteCommandKind.recents,
+        RemoteCommandKind.imeEnter,
+      ]);
+    });
+
+    test('what gets printed is the id', () {
+      expect(
+        const RemoteImeEnterCommand(id: 'enter-1').toString(),
+        'RemoteImeEnterCommand(enter-1)',
+      );
+    });
   });
 }

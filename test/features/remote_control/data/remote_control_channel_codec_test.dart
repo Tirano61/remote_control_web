@@ -160,6 +160,60 @@ void main() {
     });
   });
 
+  group('ime_enter', () {
+    String encode() => RemoteControlChannelCodec.encode(
+      const RemoteImeEnterCommand(id: 'enter-1'),
+    );
+
+    test('produces exactly the fields of the protocol', () {
+      expect(encode(), '{"v":1,"type":"ime_enter","id":"enter-1"}');
+    });
+
+    test('nothing else goes on the wire: no text, key, action or position', () {
+      final frame = jsonDecode(encode()) as Map<String, dynamic>;
+
+      expect(frame.keys, unorderedEquals(['v', 'type', 'id']));
+      for (final key in const [
+        'text',
+        'keyCode',
+        'actionId',
+        'x',
+        'y',
+        'durationMs',
+      ]) {
+        expect(frame.containsKey(key), isFalse, reason: key);
+      }
+    });
+
+    test('its ack is read like any other', () {
+      expect(
+        RemoteControlChannelCodec.decodeAck(
+          '{"v":1,"type":"ack","id":"enter-1","ok":true}',
+        ),
+        const RemoteControlAck(commandId: 'enter-1'),
+      );
+    });
+
+    const refusals = {
+      'ime_action_unavailable': RemoteControlError.imeActionUnavailable,
+      'ime_action_rejected': RemoteControlError.imeActionRejected,
+      'text_target_unavailable': RemoteControlError.textTargetUnavailable,
+      'accessibility_unavailable': RemoteControlError.accessibilityUnavailable,
+      'session_not_active': RemoteControlError.sessionNotActive,
+    };
+
+    refusals.forEach((code, error) {
+      test('its refusal $code is a known one, never unknown', () {
+        final ack = RemoteControlChannelCodec.decodeAck(
+          '{"v":1,"type":"ack","id":"enter-1","ok":false,"error":"$code"}',
+        );
+
+        expect(ack, RemoteControlAck(commandId: 'enter-1', error: error));
+        expect(ack!.error, isNot(RemoteControlError.unknown));
+      });
+    });
+  });
+
   group('swipe', () {
     test('produces exactly the fields of the protocol', () {
       expect(
@@ -235,6 +289,8 @@ void main() {
       'unsupported_command': RemoteControlError.unsupportedCommand,
       'text_target_unavailable': RemoteControlError.textTargetUnavailable,
       'text_rejected': RemoteControlError.textRejected,
+      'ime_action_unavailable': RemoteControlError.imeActionUnavailable,
+      'ime_action_rejected': RemoteControlError.imeActionRejected,
     };
 
     errors.forEach((code, error) {
