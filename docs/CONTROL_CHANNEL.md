@@ -1078,6 +1078,59 @@ tests**: it suppresses the accessibility service, and a command would never reac
 `dispatchGesture`. Use `adb logcat`, `dumpsys` and `adb exec-out screencap -p`.
 The toggle and the *full control* dialog are the user's, by hand, always.
 
+### What has been observed of the long press on the physical tablet
+
+Chrome and the LUCKYSTAR T10A (**Android 16**, SDK 36, 1200x1920 portrait), with a debug
+`remote_control_device` built from `feature/device-remote-control-long-press` (66b62c8)
+against the LAN backend (`http://192.168.18.101:3000`) and installed with `adb install -r`
+(SHA-256 `ad48df5b...0db0`), which kept its enrolment (645-589-107). The web ran from
+`feature/web-remote-control-long-press`, served from `build/web`. PERMITIR, the
+screen-sharing dialog, the accessibility toggle and the rotation were done by hand. Frames
+were read by wrapping `RTCDataChannel` in the page (type and id, and the whole frame for
+`long_press` and its ack). Holds were driven with pointer events dispatched in the page on
+the real picture, because a hold of a set length is not something a click tool does; taps
+and the buttons were real clicks. Android's side from `dumpsys` and
+`adb exec-out screencap -p`.
+
+```text
+disclosure before PERMITIR          "Tocar, mantener pulsado y deslizar sobre la pantalla."
+                                    with the other four lines, buttons on screen
+hold 1.2 s on Settings (launcher)   {"v":1,"type":"long_press","id":"long-2",
+                                     "x":0.8922942206654991,"y":0.882661996497373}
+                                    sent 502 ms after pointer down, while still down;
+                                    {"v":1,"type":"ack","id":"long-2","ok":true} 525 ms
+                                    later; "Pulsación prolongada enviada"; the launcher's
+                                    menu (Información de app, Widgets, Wi-Fi, Batería) on
+                                    the tablet and, still, on the picture
+release at 1204 ms                  nothing sent; the launcher stayed on top: no tap
+short click on Settings             tap-4 only, ack ok in 69 ms, Settings opened
+drag up on the launcher             swipe-6 only, at the release; the app drawer opened
+hold on Chrome with 2-5 px of noise long-8 at 503 ms, at the point it went down; Chrome's
+                                    menu (Nueva pestaña, incógnito)
+10 holds in a row, Back between     10 long_press, 10 ack ok, sent at 501-503 ms and
+  (dock icons and Gemini)           answered 517-523 ms later; 0 tap, 0 swipe, no double;
+                                    the launcher on top at the end, no menu left open
+landscape, hold on Calendar         long-30 x 0.5, y 0.822 = (960, 987) of 1920x1200: the
+                                    icon's centre; Calendar's menu (Nuevo evento, Nueva
+                                    tarea); no tap after
+service disabled by hand, hold      accessibility_unavailable 16 ms after it was sent, the
+                                    message, no effect; session, picture, channel go on
+service enabled again, hold         long-33 ack ok, menu shown
+FINALIZAR 216 ms after long-35      the session closed and the channel with it; nothing
+  went out, before its ack          sent afterwards; no media projection left
+FINALIZAR 267 ms after pointer      nothing sent at all, before or after the release at
+  down, held until 2 s              2 s; the session closed, channel closed, no media
+                                    projection, the capture indicator gone
+```
+
+The recognition time on the web was `kLongPressTimeout`, 500 ms, plus a frame. Android's
+own duration (`getLongPressTimeout() + 100 ms`) is what the roughly 520 ms between the frame
+and its `ok` are made of: the device answers once `dispatchGesture` completed.
+
+`gesture_rejected` was **not reproduced on the device**: nothing natural and safe makes
+Android cancel a single-point gesture, and no hook was built for it. The automated tests
+cover it.
+
 ### What has been observed of the IME action on the physical tablet
 
 Chrome and a LUCKYSTAR T10A running **Android 16** (SDK 36, 1200x1920 portrait), with a
