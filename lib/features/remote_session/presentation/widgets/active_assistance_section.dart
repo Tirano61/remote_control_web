@@ -431,11 +431,12 @@ class _RemoteScreen extends StatelessWidget {
       builder: (context, state) {
         if (!_isShown(state)) return const SizedBox.shrink();
         final canSend = state.canSendRemoteControl;
-        // Not listening while a global action or an IME action settles: a press
-        // that starts on
-        // a picture on its way somewhere else is not picked up afterwards. The
-        // line below says nothing about it, because it lasts an instant. The
-        // same while a text is on its way, or being written.
+        // Not listening while a global action, an IME action or a long press
+        // settles: a press that starts on a picture on its way somewhere else is
+        // not picked up afterwards, and one held down when a long press goes out
+        // is over: its release is neither a tap nor a swipe. The line below says
+        // nothing about it, because it lasts an instant. The same while a text
+        // is on its way, or being written.
         final isListening =
             canSend &&
             !isHeldBack &&
@@ -468,6 +469,14 @@ class _RemoteScreen extends StatelessWidget {
                           durationMs: durationMs,
                         ),
                       )
+                : null,
+            onRemoteLongPress: isListening
+                ? (point) => context.read<WebRtcSessionBloc>().add(
+                    WebRtcRemoteLongPressRequested(
+                      remoteSessionId: remoteSessionId,
+                      point: point,
+                    ),
+                  )
                 : null,
             onPictureChanged: (isDisplayed) {
               if (sessions.isClosed) return;
@@ -578,6 +587,7 @@ class _RemoteControlLine extends StatelessWidget {
       // own words.
       RemoteCommandKind.tap ||
       RemoteCommandKind.swipe ||
+      RemoteCommandKind.longPress ||
       RemoteCommandKind.setText ||
       RemoteCommandKind.imeEnter => last.kind.name,
     };
@@ -649,8 +659,36 @@ class _RemoteControlLine extends StatelessWidget {
         RemoteCommandOutcome.incompatible => 'Control remoto no disponible',
       };
 
+  /// What became of a long press. `ok` says Android completed the gesture, not
+  /// that a menu opened or anything got selected: the web does not know.
+  static String _longPressLabel(RemoteCommandOutcome outcome) =>
+      switch (outcome) {
+        RemoteCommandOutcome.pending => 'Manteniendo pulsado...',
+        RemoteCommandOutcome.confirmed => 'Pulsación prolongada enviada',
+        RemoteCommandOutcome.accessibilityUnavailable =>
+          'El dispositivo no tiene habilitado el control remoto.',
+        RemoteCommandOutcome.sessionNotActive =>
+          'La asistencia no está activa en el dispositivo.',
+        RemoteCommandOutcome.gestureRejected =>
+          'El dispositivo rechazó la pulsación prolongada.',
+        // Never the answer to a gesture.
+        RemoteCommandOutcome.textTargetUnavailable ||
+        RemoteCommandOutcome.textRejected ||
+        RemoteCommandOutcome.imeActionUnavailable ||
+        RemoteCommandOutcome.imeActionRejected =>
+          'No se pudo ejecutar la pulsación prolongada.',
+        RemoteCommandOutcome.timedOut =>
+          'El dispositivo no confirmó la pulsación prolongada.',
+        RemoteCommandOutcome.incompatible ||
+        RemoteCommandOutcome.channelClosed ||
+        RemoteCommandOutcome.notSent => 'Control remoto no disponible',
+      };
+
   static String _label(RemoteCommandFeedback? last) {
     if (last == null) return 'Control remoto: listo';
+    if (last.kind == RemoteCommandKind.longPress) {
+      return _longPressLabel(last.outcome);
+    }
     final isSwipe = last.kind == RemoteCommandKind.swipe;
     // Only a tap or a swipe gets here: global actions have their own end of
     // the line.

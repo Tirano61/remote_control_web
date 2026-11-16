@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
@@ -14,14 +16,25 @@ typedef RemoteSwipeCallback =
     });
 
 /// Turns what the pointer does over the picture of the tablet into one gesture
-/// on the tablet, reported when the pointer goes up and never before.
+/// on the tablet: a tap, a swipe or a long press, never two of them.
 ///
 /// ```text
-/// down        on the picture, primary button: the press starts
-/// move        beyond the threshold it is a drag from then on
-/// up, no drag a tap
-/// up, drag    a swipe from where it was pressed to where it was released
+/// down          on the picture, primary button: the press starts, and so does
+///               the long press timeout
+/// move          beyond the threshold it is a drag from then on, and can no
+///               longer be a long press
+/// timeout,      still down, never a drag: a long press where it went down,
+///   no drag     reported there and then. Whatever that pointer does next,
+///               moving or going up, reports nothing else
+/// up, no drag   a tap
+/// up, drag      a swipe from where it was pressed to where it was released
 /// ```
+///
+/// A tap and a swipe are reported when the pointer goes up and never before. A
+/// long press cannot wait for it: the technician holds the pointer down to see
+/// the menu it opens. How long the technician has to hold still is
+/// [longPressTimeout], Flutter's own; how long Android holds the touch is the
+/// tablet's business, and nothing here says it.
 ///
 /// It covers the whole video surface and only reacts over the picture itself:
 /// a band left by `contain` is not anything on the tablet. A press that started
@@ -42,6 +55,7 @@ class RemoteControlGestureLayer extends StatefulWidget {
     required this.videoAspectRatio,
     required this.onTap,
     required this.onSwipe,
+    required this.onLongPress,
     super.key,
   });
 
@@ -49,6 +63,10 @@ class RemoteControlGestureLayer extends StatefulWidget {
   /// logical pixels of this surface: the tablet's resolution says nothing about
   /// what the technician meant. Exactly this far is already a drag.
   static const double dragThreshold = 6;
+
+  /// How long a press has to stay down, and closer than [dragThreshold] to where
+  /// it started, to be a long press: Flutter's standard timeout.
+  static const Duration longPressTimeout = kLongPressTimeout;
 
   /// The aspect ratio of the picture right now, or `null` while there is none.
   final double? Function() videoAspectRatio;
@@ -58,6 +76,12 @@ class RemoteControlGestureLayer extends StatefulWidget {
   /// Called with both ends of a drag and how long it took, within the range the
   /// tablet executes.
   final RemoteSwipeCallback onSwipe;
+
+  /// Called once with where a press started, as soon as it has been held still
+  /// for [longPressTimeout], while the pointer is still down. Whoever receives
+  /// it still decides whether it can go out: nothing here knows about sessions,
+  /// channels or pending commands.
+  final ValueChanged<NormalizedRemotePoint> onLongPress;
 
   @override
   State<RemoteControlGestureLayer> createState() =>
@@ -76,14 +100,21 @@ class _RemoteControlGestureLayerState extends State<RemoteControlGestureLayer> {
     super.didUpdateWidget(oldWidget);
     // Here too, and not only at the next pointer event: a pointer standing still
     // says nothing, and the ratio could be back by the time it moves again.
-    if (_press?.videoAspectRatio != widget.videoAspectRatio()) _press = null;
+    if (_press?.videoAspectRatio != widget.videoAspectRatio()) _drop();
   }
 
   @override
   void dispose() {
-    // A pointer already down keeps reporting to the callbacks of this state.
-    _press = null;
+    // A pointer already down keeps reporting to the callbacks of this state, and
+    // a long press timeout must not outlive it.
+    _drop();
     super.dispose();
+  }
+
+  /// Forgets the press, and whatever it was still about to report.
+  void _drop() {
+    _press?.cancelLongPress();
+    _press = null;
   }
 
   NormalizedRemotePoint? _pointAt(Offset position) {
@@ -123,14 +154,14 @@ class _RemoteControlGestureLayerState extends State<RemoteControlGestureLayer> {
   void _onPointerDown(PointerDownEvent event) {
     if (_press != null) {
       // A second finger. Several of them is not a gesture the tablet has.
-      _press = null;
+      _drop();
       return;
     }
     if (event.buttons != kPrimaryButton) return;
 
     final point = _pointAt(event.localPosition);
     if (point == null) return;
-    _press = _RemotePress(
+    final press = _RemotePress(
       pointer: event.pointer,
       position: event.localPosition,
       point: point,
@@ -138,15 +169,38 @@ class _RemoteControlGestureLayerState extends State<RemoteControlGestureLayer> {
       videoAspectRatio: widget.videoAspectRatio(),
       surfaceSize: context.size,
     );
+    press.longPressTimer = Timer(
+      RemoteControlGestureLayer.longPressTimeout,
+      () => _onLongPressTimeout(press),
+    );
+    _press = press;
+  }
+
+  /// [press] has been down for the whole long press timeout.
+  ///
+  /// Everything it depends on is read again now: the geometry it started with,
+  /// and where it started still being on the picture. The point sent is that
+  /// one, not wherever the pointer drifted by less than the threshold since.
+  void _onLongPressTimeout(_RemotePress press) {
+    press.longPressTimer = null;
+    if (!mounted || !identical(_press, press) || press.isDrag) return;
+    if (_pointOfPress(press, press.position) == null) {
+      _drop();
+      return;
+    }
+    press.isLongPress = true;
+    widget.onLongPress(press.point);
   }
 
   void _onPointerMove(PointerMoveEvent event) {
     final press = _press;
     if (press == null || press.pointer != event.pointer) return;
+    // Reported already: wherever it goes now, it is not a drag after a long press.
+    if (press.isLongPress) return;
 
     if (event.buttons != kPrimaryButton ||
         _pointOfPress(press, event.localPosition) == null) {
-      _press = null;
+      _drop();
       return;
     }
     press.follow(event.localPosition);
@@ -155,7 +209,9 @@ class _RemoteControlGestureLayerState extends State<RemoteControlGestureLayer> {
   void _onPointerUp(PointerUpEvent event) {
     final press = _press;
     if (press == null || press.pointer != event.pointer) return;
-    _press = null;
+    _drop();
+    // The long press was the gesture: going up is not a tap as well.
+    if (press.isLongPress) return;
 
     final end = _pointOfPress(press, event.localPosition);
     if (end == null) return;
@@ -181,12 +237,12 @@ class _RemoteControlGestureLayerState extends State<RemoteControlGestureLayer> {
   }
 
   void _onPointerCancel(PointerCancelEvent event) {
-    if (_press?.pointer == event.pointer) _press = null;
+    if (_press?.pointer == event.pointer) _drop();
   }
 
   /// The wheel scrolls the page under a pointer that is down, and the positions
   /// that follow would no longer be relative to where the press started.
-  void _onPointerSignal(PointerSignalEvent event) => _press = null;
+  void _onPointerSignal(PointerSignalEvent event) => _drop();
 
   /// Nothing to do with the drag itself: what it does is keep the arena, so that
   /// a finger on the picture moves the tablet and not the page around it.
@@ -243,11 +299,26 @@ final class _RemotePress {
   /// Whether it ever got as far as a drag. It stays one, wherever it goes next.
   bool isDrag = false;
 
+  /// Running from the moment it went down until it becomes a drag, goes up, is
+  /// dropped or fires.
+  Timer? longPressTimer;
+
+  /// Whether it was reported as a long press. Nothing else is reported for it.
+  bool isLongPress = false;
+
   double distanceTo(Offset other) => (other - position).distance;
 
+  /// Measured from where it went down, never added up move after move: a hand
+  /// that trembles is not travelling.
   void follow(Offset other) {
     if (distanceTo(other) >= RemoteControlGestureLayer.dragThreshold) {
       isDrag = true;
+      cancelLongPress();
     }
+  }
+
+  void cancelLongPress() {
+    longPressTimer?.cancel();
+    longPressTimer = null;
   }
 }

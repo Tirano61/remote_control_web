@@ -23,6 +23,84 @@ void main() {
     });
   });
 
+  group('long_press', () {
+    String encode(String id, double x, double y) =>
+        RemoteControlChannelCodec.encode(
+          RemoteLongPressCommand(id: id, point: NormalizedRemotePoint(x, y)),
+        );
+
+    test('produces exactly the fields of the protocol', () {
+      expect(
+        encode('long-1', 0.5, 0.25),
+        '{"v":1,"type":"long_press","id":"long-1","x":0.5,"y":0.25}',
+      );
+    });
+
+    test('nothing else goes on the wire: no duration, no end, no pointer', () {
+      final frame =
+          jsonDecode(encode('long-3', 0.5, 0.25)) as Map<String, dynamic>;
+
+      expect(frame.keys, unorderedEquals(['v', 'type', 'id', 'x', 'y']));
+      for (final key in const [
+        'durationMs',
+        'endX',
+        'endY',
+        'startX',
+        'startY',
+        'pointerType',
+        'button',
+        'text',
+      ]) {
+        expect(frame.containsKey(key), isFalse, reason: key);
+      }
+    });
+
+    test('the edges of the picture are valid points', () {
+      // Compared decoded: the VM writes 0.0 where a browser writes 0, and the
+      // tablet reads both as the same number.
+      for (final (x, y) in const [
+        (0.0, 0.0),
+        (1.0, 1.0),
+        (0.0, 1.0),
+        (0.125, 0.875),
+      ]) {
+        expect(jsonDecode(encode('long-1', x, y)), {
+          'v': 1,
+          'type': 'long_press',
+          'id': 'long-1',
+          'x': x,
+          'y': y,
+        });
+      }
+    });
+
+    test('its ack is read like any other', () {
+      expect(
+        RemoteControlChannelCodec.decodeAck(
+          '{"v":1,"type":"ack","id":"long-1","ok":true}',
+        ),
+        const RemoteControlAck(commandId: 'long-1'),
+      );
+    });
+
+    const refusals = {
+      'gesture_rejected': RemoteControlError.gestureRejected,
+      'accessibility_unavailable': RemoteControlError.accessibilityUnavailable,
+      'session_not_active': RemoteControlError.sessionNotActive,
+      'invalid_command': RemoteControlError.invalidCommand,
+    };
+
+    refusals.forEach((code, error) {
+      test('its refusal $code is a known one, never unknown', () {
+        final ack = RemoteControlChannelCodec.decodeAck(
+          '{"v":1,"type":"ack","id":"long-1","ok":false,"error":"$code"}',
+        );
+
+        expect(ack, RemoteControlAck(commandId: 'long-1', error: error));
+      });
+    });
+  });
+
   group('back', () {
     test('produces exactly the fields of the protocol', () {
       expect(

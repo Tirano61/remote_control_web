@@ -31,10 +31,10 @@ typedef RemoteControlStatusBuilder =
 /// mounted widget, and a parent that wants a fresh one — a different remote
 /// session, for instance — gives this widget a different key.
 ///
-/// The pointer is only listened to over a real picture and when [onRemoteTap]
-/// and [onRemoteSwipe] are given. The placeholder, the bands left by `contain`
-/// and anything outside the surface never produce a gesture. Keys are not
-/// listened to at all.
+/// The pointer is only listened to over a real picture and when [onRemoteTap],
+/// [onRemoteSwipe] and [onRemoteLongPress] are given. The placeholder, the bands
+/// left by `contain` and anything outside the surface never produce a gesture.
+/// Keys are not listened to at all.
 class RemoteScreenView extends StatefulWidget {
   const RemoteScreenView({
     required this.track,
@@ -42,11 +42,13 @@ class RemoteScreenView extends StatefulWidget {
     required this.maxHeight,
     this.onRemoteTap,
     this.onRemoteSwipe,
+    this.onRemoteLongPress,
     this.controlStatusBuilder,
     this.onPictureChanged,
     super.key,
   }) : assert(
-         (onRemoteTap == null) == (onRemoteSwipe == null),
+         (onRemoteTap == null) == (onRemoteSwipe == null) &&
+             (onRemoteTap == null) == (onRemoteLongPress == null),
          'Remote control is either available or not.',
        );
 
@@ -66,6 +68,10 @@ class RemoteScreenView extends StatefulWidget {
   /// Called with a drag across the picture once it is over. `null` exactly when
   /// [onRemoteTap] is.
   final RemoteSwipeCallback? onRemoteSwipe;
+
+  /// Called with where a press started once it has been held still long enough,
+  /// while the pointer is still down. `null` exactly when [onRemoteTap] is.
+  final ValueChanged<NormalizedRemotePoint>? onRemoteLongPress;
 
   /// Builds what is said about remote control under the surface. Only this
   /// widget knows whether a picture is really being displayed: a track exists
@@ -134,6 +140,7 @@ class _RemoteScreenViewState extends State<RemoteScreenView> {
         final isWaiting = !isDisplaying || videoAspectRatio == null;
         final onRemoteTap = widget.onRemoteTap;
         final onRemoteSwipe = widget.onRemoteSwipe;
+        final onRemoteLongPress = widget.onRemoteLongPress;
         final controlStatusBuilder = widget.controlStatusBuilder;
 
         return Column(
@@ -177,12 +184,14 @@ class _RemoteScreenViewState extends State<RemoteScreenView> {
                               if (isWaiting) const _WaitingForScreen(),
                               if (!isWaiting &&
                                   onRemoteTap != null &&
-                                  onRemoteSwipe != null)
+                                  onRemoteSwipe != null &&
+                                  onRemoteLongPress != null)
                                 RemoteControlGestureLayer(
                                   key: const Key('remote_screen_gesture_layer'),
                                   videoAspectRatio: () => _renderer.aspectRatio,
                                   onTap: onRemoteTap,
                                   onSwipe: onRemoteSwipe,
+                                  onLongPress: onRemoteLongPress,
                                 ),
                             ],
                           ),
