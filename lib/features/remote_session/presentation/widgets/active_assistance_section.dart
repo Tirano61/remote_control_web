@@ -424,21 +424,22 @@ class _RemoteScreen extends StatelessWidget {
           previous.canSendRemoteNavigation != current.canSendRemoteNavigation ||
           previous.remoteControl.lastCommand !=
               current.remoteControl.lastCommand ||
-          previous.remoteControl.isNavigationSettling !=
-              current.remoteControl.isNavigationSettling ||
+          previous.remoteControl.isSettling !=
+              current.remoteControl.isSettling ||
           previous.remoteControl.isTextPending !=
               current.remoteControl.isTextPending,
       builder: (context, state) {
         if (!_isShown(state)) return const SizedBox.shrink();
         final canSend = state.canSendRemoteControl;
-        // Not listening while a global action settles: a press that starts on
+        // Not listening while a global action or an IME action settles: a press
+        // that starts on
         // a picture on its way somewhere else is not picked up afterwards. The
         // line below says nothing about it, because it lasts an instant. The
         // same while a text is on its way, or being written.
         final isListening =
             canSend &&
             !isHeldBack &&
-            !state.remoteControl.isNavigationSettling &&
+            !state.remoteControl.isSettling &&
             !state.remoteControl.isTextPending;
         final lastCommand = state.remoteControl.lastCommand;
         final isGesture = lastCommand == null || lastCommand.kind.isGesture;
@@ -546,9 +547,11 @@ class _RemoteControlLine extends StatelessWidget {
           Flexible(
             child: Text(
               key: const Key('remote_navigation_status'),
-              action.kind == RemoteCommandKind.setText
-                  ? _textLabel(action.outcome)
-                  : _navigationLabel(action),
+              switch (action.kind) {
+                RemoteCommandKind.setText => _textLabel(action.outcome),
+                RemoteCommandKind.imeEnter => _imeEnterLabel(action.outcome),
+                _ => _navigationLabel(action),
+              },
               textAlign: TextAlign.end,
               style: theme.textTheme.bodySmall?.copyWith(
                 color: _isActionProblem(action.outcome)
@@ -575,7 +578,8 @@ class _RemoteControlLine extends StatelessWidget {
       // own words.
       RemoteCommandKind.tap ||
       RemoteCommandKind.swipe ||
-      RemoteCommandKind.setText => last.kind.name,
+      RemoteCommandKind.setText ||
+      RemoteCommandKind.imeEnter => last.kind.name,
     };
     return switch (last.outcome) {
       RemoteCommandOutcome.pending => 'Enviando $name...',
@@ -585,9 +589,13 @@ class _RemoteControlLine extends StatelessWidget {
       RemoteCommandOutcome.sessionNotActive =>
         'La asistencia no está activa en el dispositivo.',
       RemoteCommandOutcome.gestureRejected ||
-      // Never the answer to a global action: a text has its own words for these.
+      // Never the answer to a global action: a text and the IME action have
+      // their own words for these.
       RemoteCommandOutcome.textTargetUnavailable ||
-      RemoteCommandOutcome.textRejected => 'No se pudo ejecutar la acción.',
+      RemoteCommandOutcome.textRejected ||
+      RemoteCommandOutcome.imeActionUnavailable ||
+      RemoteCommandOutcome.imeActionRejected =>
+        'No se pudo ejecutar la acción.',
       RemoteCommandOutcome.timedOut => 'El dispositivo no confirmó la acción.',
       RemoteCommandOutcome.incompatible ||
       RemoteCommandOutcome.channelClosed ||
@@ -605,12 +613,41 @@ class _RemoteControlLine extends StatelessWidget {
       'El dispositivo no tiene habilitado el control remoto.',
     RemoteCommandOutcome.sessionNotActive =>
       'La asistencia no está activa en el dispositivo.',
-    RemoteCommandOutcome.gestureRejected => 'No se pudo ejecutar la acción.',
+    RemoteCommandOutcome.gestureRejected ||
+    // Never the answer to a text.
+    RemoteCommandOutcome.imeActionUnavailable ||
+    RemoteCommandOutcome.imeActionRejected => 'No se pudo ejecutar la acción.',
     RemoteCommandOutcome.timedOut => 'El dispositivo no confirmó el texto.',
     RemoteCommandOutcome.notSent ||
     RemoteCommandOutcome.channelClosed => 'No se pudo enviar el texto.',
     RemoteCommandOutcome.incompatible => 'Control remoto no disponible',
   };
+
+  /// What became of the IME action. Never which action it was, or what it did:
+  /// the web knows neither. `ok` only says Android accepted it.
+  static String _imeEnterLabel(RemoteCommandOutcome outcome) =>
+      switch (outcome) {
+        RemoteCommandOutcome.pending => 'Ejecutando acción...',
+        RemoteCommandOutcome.confirmed => 'Acción enviada',
+        RemoteCommandOutcome.textTargetUnavailable =>
+          'No hay un campo de texto editable enfocado.',
+        RemoteCommandOutcome.imeActionUnavailable =>
+          'El campo enfocado no ofrece una acción de teclado.',
+        RemoteCommandOutcome.imeActionRejected =>
+          'El dispositivo rechazó la acción del campo.',
+        RemoteCommandOutcome.accessibilityUnavailable =>
+          'El dispositivo no tiene habilitado el control remoto.',
+        RemoteCommandOutcome.sessionNotActive =>
+          'La asistencia no está activa en el dispositivo.',
+        // Never the answer to an IME action.
+        RemoteCommandOutcome.gestureRejected ||
+        RemoteCommandOutcome.textRejected => 'No se pudo ejecutar la acción.',
+        RemoteCommandOutcome.timedOut =>
+          'El dispositivo no confirmó la acción.',
+        RemoteCommandOutcome.notSent ||
+        RemoteCommandOutcome.channelClosed => 'No se pudo enviar la acción.',
+        RemoteCommandOutcome.incompatible => 'Control remoto no disponible',
+      };
 
   static String _label(RemoteCommandFeedback? last) {
     if (last == null) return 'Control remoto: listo';
@@ -627,9 +664,12 @@ class _RemoteControlLine extends StatelessWidget {
       RemoteCommandOutcome.sessionNotActive =>
         'La asistencia no está activa en el dispositivo.',
       RemoteCommandOutcome.gestureRejected ||
-      // Never the answer to a gesture: a text has its own end of the line.
+      // Never the answer to a gesture: a text and the IME action have their own
+      // end of the line.
       RemoteCommandOutcome.textTargetUnavailable ||
-      RemoteCommandOutcome.textRejected =>
+      RemoteCommandOutcome.textRejected ||
+      RemoteCommandOutcome.imeActionUnavailable ||
+      RemoteCommandOutcome.imeActionRejected =>
         isSwipe
             ? 'No se pudo ejecutar el desplazamiento.'
             : 'No se pudo ejecutar el toque.',
@@ -644,7 +684,8 @@ class _RemoteControlLine extends StatelessWidget {
   }
 }
 
-/// Android's Back, Home and Recents, and the button that opens the text dialog.
+/// Android's Back, Home and Recents, the button that opens the text dialog, and
+/// Acción, which runs the IME action of the focused field.
 ///
 /// They sit outside the picture and outside its pointer layer. Back, Home and
 /// Recents do not depend on the picture either: these are global actions, so they
@@ -656,7 +697,16 @@ class _RemoteControlLine extends StatelessWidget {
 /// what makes a double click one action.
 ///
 /// Texto asks for more, because the technician has to be able to see where the text
-/// lands: `WebRtcSessionState.canSendRemoteText`.
+/// lands: `WebRtcSessionState.canSendRemoteText`. Acción asks for exactly the same,
+/// for the same reason: `WebRtcSessionState.canSendRemoteImeEnter`. It is the only
+/// way an IME action ever goes out: a tap on a field or a text that went out never
+/// sends one.
+/// What the Acción button says it does. It names examples, never the action: the
+/// web does not know which one the focused field declares.
+const String kRemoteImeEnterHelp =
+    'Ejecuta la acción disponible del campo enfocado, por ejemplo Buscar, Ir, '
+    'Siguiente o Enviar.';
+
 class _RemoteNavigationControls extends StatelessWidget {
   const _RemoteNavigationControls({
     required this.remoteSessionId,
@@ -680,16 +730,16 @@ class _RemoteNavigationControls extends StatelessWidget {
         final isEnabled =
             isThisSession &&
             state.canSendRemoteNavigation &&
-            !state.remoteControl.isNavigationSettling &&
+            !state.remoteControl.isSettling &&
             !state.remoteControl.isTextPending;
         final bloc = context.read<WebRtcSessionBloc>();
 
-        // Four of these have to wrap into as few rows as they can: every row
+        // Five of these have to wrap into as few rows as they can: every row
         // they take is taken from the picture.
         return OutlinedButtonTheme(
           data: OutlinedButtonThemeData(
             style: OutlinedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
+              padding: const EdgeInsets.symmetric(horizontal: 10),
             ),
           ),
           child: Wrap(
@@ -739,6 +789,24 @@ class _RemoteNavigationControls extends StatelessWidget {
                     : null,
                 icon: const Icon(Icons.keyboard_outlined, size: 18),
                 label: const Text('Texto'),
+              ),
+              // Never called Enter: it is not a key, and which action the field
+              // runs is not known here.
+              Tooltip(
+                key: const Key('remote_ime_enter_tooltip'),
+                message: kRemoteImeEnterHelp,
+                child: OutlinedButton.icon(
+                  key: const Key('remote_ime_enter_button'),
+                  onPressed: isThisSession && state.canSendRemoteImeEnter
+                      ? () => bloc.add(
+                          WebRtcRemoteImeEnterRequested(
+                            remoteSessionId: remoteSessionId,
+                          ),
+                        )
+                      : null,
+                  icon: const Icon(Icons.keyboard_return, size: 18),
+                  label: const Text('Acción'),
+                ),
               ),
             ],
           ),

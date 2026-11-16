@@ -122,7 +122,7 @@ class _Harness {
   }
 
   RemoteControlStatus get status => bloc.state.remoteControl;
-  bool get isSettling => status.isNavigationSettling;
+  bool get isSettling => status.isSettling;
   RemoteCommandOutcome? get outcome => status.lastCommand?.outcome;
   List<String> get sent =>
       peers.last.sentRemoteControlCommands.map((c) => c.id).toList();

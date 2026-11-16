@@ -1784,7 +1784,7 @@ void main() {
         peerClient: peers,
         signalingClient: signaling,
         iceConfiguration: const WebRtcIceConfiguration(),
-        navigationSettleDuration: settleTime,
+        settleDuration: settleTime,
       );
       await connect();
       bloc.add(const WebRtcRemoteSessionActivityChanged(sessionId));
@@ -1795,7 +1795,7 @@ void main() {
       await ready();
       bloc.add(const WebRtcRemoteBackRequested(remoteSessionId: sessionId));
       await settle();
-      expect(bloc.state.remoteControl.isNavigationSettling, isTrue);
+      expect(bloc.state.remoteControl.isSettling, isTrue);
 
       bloc.add(const WebRtcSessionTerminated());
       await settle();
@@ -1816,7 +1816,7 @@ void main() {
       await settle();
 
       final next = bloc.state.remoteControl;
-      expect(next.isNavigationSettling, isFalse);
+      expect(next.isSettling, isFalse);
       expect(next.pendingCommands, 0);
       expect(next.lastCommand, isNull);
 
@@ -1833,7 +1833,7 @@ void main() {
       await negotiate(otherSessionId);
 
       expect(bloc.state.remoteSessionId, otherSessionId);
-      expect(bloc.state.remoteControl.isNavigationSettling, isFalse);
+      expect(bloc.state.remoteControl.isSettling, isFalse);
       expect(bloc.state.remoteControl.pendingCommands, 0);
     });
 

@@ -8,7 +8,7 @@ enum RemoteCommandOutcome {
   pending,
 
   /// The tablet reported the gesture completed, or Android accepted the global
-  /// action or the text.
+  /// action, the text or the IME action.
   confirmed,
 
   accessibilityUnavailable,
@@ -16,6 +16,8 @@ enum RemoteCommandOutcome {
   gestureRejected,
   textTargetUnavailable,
   textRejected,
+  imeActionUnavailable,
+  imeActionRejected,
 
   /// `invalid_command`, `unsupported_command` or a code this version does not
   /// know: a programming error or a version mismatch, nothing the technician
@@ -44,8 +46,8 @@ final class RemoteCommandFeedback extends Equatable {
 
   final String commandId;
 
-  /// Whether the technician should read about a touch, a stroke, Back, Home or a
-  /// text. Never the text itself: nothing here holds it.
+  /// Whether the technician should read about a touch, a stroke, Back, Home, a
+  /// text or the IME action. Never the text itself: nothing here holds it.
   final RemoteCommandKind kind;
 
   final RemoteCommandOutcome outcome;
@@ -60,7 +62,7 @@ final class RemoteControlStatus extends Equatable {
     this.isSessionActive = false,
     this.lastCommand,
     this.pendingCommands = 0,
-    this.isNavigationSettling = false,
+    this.isSettling = false,
     this.isTextPending = false,
     this.isPictureDisplayed = false,
   });
@@ -74,8 +76,9 @@ final class RemoteControlStatus extends Equatable {
   /// Commands sent and not yet settled.
   final int pendingCommands;
 
-  /// A Back or a Home is under way, and no new command of any kind is taken.
-  final bool isNavigationSettling;
+  /// A global action or an IME action is unanswered, or answered and still within
+  /// its settle time, and no new command of any kind is taken.
+  final bool isSettling;
 
   /// A text is unanswered, and no new command of any kind is taken.
   final bool isTextPending;
@@ -89,7 +92,7 @@ final class RemoteControlStatus extends Equatable {
     isSessionActive,
     lastCommand,
     pendingCommands,
-    isNavigationSettling,
+    isSettling,
     isTextPending,
     isPictureDisplayed,
   ];
