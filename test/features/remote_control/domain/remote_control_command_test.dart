@@ -184,6 +184,10 @@ void main() {
         RemoteCommandKind.tap,
         RemoteCommandKind.swipe,
         RemoteCommandKind.longPress,
+        RemoteCommandKind.touchHold,
+        RemoteCommandKind.touchMove,
+        RemoteCommandKind.touchRelease,
+        RemoteCommandKind.touchCancel,
       ]);
     });
 
@@ -326,6 +330,7 @@ void main() {
         RemoteCommandKind.home,
         RemoteCommandKind.recents,
         RemoteCommandKind.imeEnter,
+        RemoteCommandKind.touchRelease,
       ]);
     });
 

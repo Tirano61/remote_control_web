@@ -11,6 +11,7 @@ import '../../../../remote_control/domain/entities/remote_control_status.dart';
 import '../../../../remote_control/domain/services/pending_remote_commands.dart';
 import '../../../../remote_control/domain/services/remote_control_command_id_generator.dart';
 import '../../../../remote_control/domain/services/remote_settle_guard.dart';
+import '../../../../remote_control/domain/services/remote_touch_session.dart';
 import '../../../../signaling/domain/client/technician_signaling_client.dart';
 import '../../../../signaling/domain/entities/remote_signaling_message.dart';
 import '../../../../signaling/domain/entities/webrtc_ice_candidate.dart';
@@ -63,6 +64,12 @@ part 'webrtc_session_state.dart';
 /// likewise while a text is unanswered. An IME action only ever goes out because
 /// the technician pressed Acción: nothing sends one after a tap or a text.
 ///
+/// A press held still becomes a touch session ([RemoteTouchSession]): one remote
+/// finger that follows the pointer until it goes up or is cancelled. Its messages
+/// do not go through the pending commands, and nothing else goes out while it
+/// lasts. On a tablet that answers its hold `unsupported_command`, the legacy
+/// long press is sent instead, and from then on for that negotiation.
+///
 /// Security: SDP and ICE candidate contents never reach the log, and neither do
 /// the coordinates of a gesture or a text. What is logged is the lifecycle — created,
 /// relayed, applied, connected, failed — and the opaque id of a command. A text is
@@ -83,6 +90,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
            commandIdGenerator ?? SequentialRemoteControlCommandIdGenerator(),
        _pendingCommands = PendingRemoteCommands(margin: remoteCommandMargin),
        _settleGuard = RemoteSettleGuard(settleDuration: settleDuration),
+       _touchAnswerDeadline = remoteTouchEstimatedWork + remoteCommandMargin,
        super(const WebRtcIdle()) {
     on<WebRtcNegotiationRequested>(_onNegotiationRequested);
     on<WebRtcSignalingLost>(_onSignalingLost);
@@ -90,6 +98,11 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     on<WebRtcRemoteTapRequested>(_onRemoteTapRequested);
     on<WebRtcRemoteSwipeRequested>(_onRemoteSwipeRequested);
     on<WebRtcRemoteLongPressRequested>(_onRemoteLongPressRequested);
+    on<WebRtcRemoteTouchHoldRequested>(_onRemoteTouchHoldRequested);
+    on<WebRtcRemoteTouchMoved>(_onRemoteTouchMoved);
+    on<WebRtcRemoteTouchReleased>(_onRemoteTouchReleased);
+    on<WebRtcRemoteTouchCancelled>(_onRemoteTouchCancelled);
+    on<_WebRtcRemoteTouchTimerFired>(_onRemoteTouchTimerFired);
     on<WebRtcRemoteBackRequested>(_onRemoteBackRequested);
     on<WebRtcRemoteHomeRequested>(_onRemoteHomeRequested);
     on<WebRtcRemoteRecentsRequested>(_onRemoteRecentsRequested);
@@ -172,11 +185,30 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   /// current negotiation is under way.
   final RemoteSettleGuard _settleGuard;
 
+  /// The touch session of the current negotiation, from its hold to the answer
+  /// that ends it. There is never more than one: there is one remote finger.
+  RemoteTouchSession? _touch;
+
+  /// What the tablet of the current negotiation said about touch sessions.
+  RemoteTouchSupport _touchSupport = RemoteTouchSupport.unknown;
+
+  /// The last hold sent whose answer has not arrived, even if its touch is over:
+  /// that answer still says whether the tablet runs touch sessions.
+  String? _unansweredHoldId;
+
+  /// The last touch session of the current negotiation, for the technician.
+  RemoteTouchFeedback? _lastTouch;
+
+  /// How long the answer to a release or a cancel may take.
+  final Duration _touchAnswerDeadline;
+
   @override
   Future<void> close() async {
     // Before anything is awaited: a deadline must not outlive this call.
     _pendingCommands.clear();
     _settleGuard.clear();
+    _touch?.end();
+    _touch = null;
     await _incomingSubscription.cancel();
     _generation++;
     await _releaseNegotiation();
@@ -389,6 +421,490 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     );
   }
 
+  /// A press held still on the picture, the pointer still down: a touch session
+  /// starts, or the legacy long press goes out.
+  ///
+  /// What it asks of the state is what a long press asks, checked now and not
+  /// when the pointer went down, and it is dropped rather than kept when anything
+  /// is missing.
+  Future<void> _onRemoteTouchHoldRequested(
+    WebRtcRemoteTouchHoldRequested event,
+    Emitter<WebRtcSessionState> emit,
+  ) async {
+    final session = _sessionAcceptingCommands(
+      event.remoteSessionId,
+      isAvailable: state.canSendRemoteLongPress,
+    );
+    if (session == null) {
+      logDebug('remote hold ignored ${event.remoteSessionId}');
+      return;
+    }
+    if (_touchSupport == RemoteTouchSupport.unsupported) {
+      // This tablet said so already: no round trip is paid again.
+      await _sendRemoteCommand(
+        session,
+        RemoteLongPressCommand(
+          id: _commandIdGenerator.next(RemoteCommandKind.longPress),
+          point: event.point,
+        ),
+        emit,
+      );
+      return;
+    }
+
+    final generation = _generation;
+    final touchId = _commandIdGenerator.nextTouch();
+    final holdId = _commandIdGenerator.next(RemoteCommandKind.touchHold);
+    final touch = RemoteTouchSession(
+      touchId: touchId,
+      holdId: holdId,
+      pointer: event.pointer,
+      generation: generation,
+      remoteSessionId: event.remoteSessionId,
+      channel: session,
+      initialPoint: event.point,
+      support: _touchSupport,
+      answerDeadline: _touchAnswerDeadline,
+      onTimer: (timer) {
+        if (isClosed) return;
+        add(_WebRtcRemoteTouchTimerFired(touchId, generation, timer));
+      },
+    );
+    _touch = touch;
+    _unansweredHoldId = holdId;
+    _lastRemoteCommand = null;
+    _lastTouch = RemoteTouchFeedback(
+      touchId: touchId,
+      phase: RemoteTouchPhase.holding,
+    );
+    final sending = _sendTouchMessage(
+      session,
+      touch,
+      RemoteTouchHoldCommand(id: holdId, touch: touchId, point: event.point),
+      emit,
+    );
+    // From the moment the hold is handed over, and not from its answer: the
+    // tablet's watchdog runs from the moment the finger goes down.
+    touch.start();
+    emit(_withNegotiationFacts(state));
+    await sending;
+  }
+
+  /// The pointer of the touch moved. Whether that goes out now, later or never
+  /// is the touch session's decision: the latest position wins.
+  Future<void> _onRemoteTouchMoved(
+    WebRtcRemoteTouchMoved event,
+    Emitter<WebRtcSessionState> emit,
+  ) async {
+    final touch = _streamingTouch(event.remoteSessionId, event.pointer);
+    if (touch == null || !touch.observe(event.point)) return;
+    await _sendTouchMove(touch, isKeepalive: false, emit);
+  }
+
+  /// The pointer of the touch went up: the finger is lifted where it is now,
+  /// whether or not the hold was answered.
+  Future<void> _onRemoteTouchReleased(
+    WebRtcRemoteTouchReleased event,
+    Emitter<WebRtcSessionState> emit,
+  ) async {
+    final touch = _streamingTouch(event.remoteSessionId, event.pointer);
+    if (touch == null) return;
+    final session = _channelOf(touch);
+    if (session == null) return;
+
+    final generation = _generation;
+    final command = touch.release(
+      _commandIdGenerator.next(RemoteCommandKind.touchRelease),
+      event.point,
+    );
+    final sending = _sendTouchMessage(session, touch, command, emit);
+    // Lifting the finger may drop something or end a long press: the screen
+    // gets its settle time, from now, like after any such action.
+    _settleGuard.begin(
+      command.id,
+      onElapsed: (commandId) {
+        if (isClosed) return;
+        add(_WebRtcRemoteActionSettled(commandId, generation));
+      },
+    );
+    _reportTouch(touch);
+    emit(_withNegotiationFacts(state));
+    await sending;
+  }
+
+  /// The surface cannot go on with the touch.
+  Future<void> _onRemoteTouchCancelled(
+    WebRtcRemoteTouchCancelled event,
+    Emitter<WebRtcSessionState> emit,
+  ) async {
+    final touch = _streamingTouch(event.remoteSessionId, event.pointer);
+    if (touch == null) return;
+    await _cancelTouch(touch, emit);
+  }
+
+  Future<void> _onRemoteTouchTimerFired(
+    _WebRtcRemoteTouchTimerFired event,
+    Emitter<WebRtcSessionState> emit,
+  ) async {
+    final touch = _touch;
+    if (event.generation != _generation ||
+        touch == null ||
+        touch.touchId != event.touchId) {
+      return;
+    }
+    switch (event.timer) {
+      case RemoteTouchTimer.keepalive:
+        if (!touch.isStreaming) return;
+        await _sendTouchMove(touch, isKeepalive: true, emit);
+
+      case RemoteTouchTimer.throttle:
+        if (!touch.isMoveDue) return;
+        await _sendTouchMove(touch, isKeepalive: false, emit);
+
+      case RemoteTouchTimer.lifetime:
+        if (!touch.isStreaming) return;
+        logDebug('touch lifetime reached touch=${touch.touchId}');
+        await _cancelTouch(touch, emit);
+
+      case RemoteTouchTimer.deadline:
+        final releaseId = touch.releaseId;
+        if (releaseId != null) {
+          // Nothing known about the release: never sent again, only reported.
+          logDebug('touch_release timed out $releaseId');
+          _settleGuard.release(releaseId);
+          _finishTouch(touch, failure: RemoteCommandOutcome.timedOut);
+        } else {
+          // The tablet's watchdog ends a touch that hears nothing anyway.
+          logDebug('touch_cancel unanswered ${touch.cancelId}');
+          _finishTouch(touch, phase: RemoteTouchPhase.cancelled);
+        }
+        emit(_withNegotiationFacts(state));
+    }
+  }
+
+  /// The touch [pointer] follows, while it is still being followed.
+  RemoteTouchSession? _streamingTouch(String remoteSessionId, int pointer) {
+    final touch = _touch;
+    if (touch == null ||
+        !touch.isStreaming ||
+        touch.pointer != pointer ||
+        touch.remoteSessionId != remoteSessionId) {
+      return null;
+    }
+    return touch;
+  }
+
+  /// The channel [touch] travels on, while it is still the current one.
+  WebRtcPeerSession? _channelOf(RemoteTouchSession touch) {
+    final session = _session;
+    if (session == null ||
+        !identical(session, touch.channel) ||
+        touch.generation != _generation) {
+      return null;
+    }
+    return session;
+  }
+
+  /// The next move, or a keepalive, handed to the channel now.
+  Future<void> _sendTouchMove(
+    RemoteTouchSession touch,
+    Emitter<WebRtcSessionState> emit, {
+    required bool isKeepalive,
+  }) async {
+    final session = _channelOf(touch);
+    if (session == null) return;
+    final hadMoved = touch.hasMoved;
+    final command = touch.move(
+      _commandIdGenerator.next(RemoteCommandKind.touchMove),
+      isKeepalive: isKeepalive,
+    );
+    final sending = _sendTouchMessage(
+      session,
+      touch,
+      command,
+      emit,
+      isKeepalive: isKeepalive,
+    );
+    if (touch.hasMoved != hadMoved) {
+      // Once per touch, not once per move.
+      _reportTouch(touch);
+      emit(_withNegotiationFacts(state));
+    }
+    await sending;
+  }
+
+  /// Takes the finger away: a `touch_cancel` while the channel is open, and only
+  /// a local end when it is not, since nothing could carry it.
+  Future<void> _cancelTouch(
+    RemoteTouchSession touch,
+    Emitter<WebRtcSessionState> emit,
+  ) async {
+    final session = _channelOf(touch);
+    if (session == null ||
+        _controlChannelState != WebRtcDataChannelState.open) {
+      _finishTouch(touch, phase: RemoteTouchPhase.cancelled);
+      emit(_withNegotiationFacts(state));
+      return;
+    }
+    final command = touch.cancel(
+      _commandIdGenerator.next(RemoteCommandKind.touchCancel),
+    );
+    final sending = _sendTouchMessage(session, touch, command, emit);
+    _reportTouch(touch);
+    emit(_withNegotiationFacts(state));
+    await sending;
+  }
+
+  /// Hands one message of [touch] to the channel. Starting the send happens
+  /// before anything is awaited, so messages leave in the order they were made.
+  Future<void> _sendTouchMessage(
+    WebRtcPeerSession session,
+    RemoteTouchSession touch,
+    RemoteControlCommand command,
+    Emitter<WebRtcSessionState> emit, {
+    bool isKeepalive = false,
+  }) async {
+    final commandId = command.id;
+    final kind = command.kind;
+    final sentAt = touch.lastSentAt.inMilliseconds;
+    final isSent = await session.sendRemoteControlCommand(command);
+    if (isSent) {
+      // Ids, seq and times only: never a coordinate.
+      logDebug(switch (command) {
+        RemoteTouchHoldCommand(:final touch) =>
+          'touch_hold sent $commandId touch=$touch',
+        RemoteTouchMoveCommand(:final seq) =>
+          'touch_move sent $commandId seq=$seq'
+              '${isKeepalive ? ' keepalive' : ''} +${sentAt}ms',
+        RemoteTouchReleaseCommand(:final seq) =>
+          'touch_release sent $commandId seq=$seq +${sentAt}ms',
+        RemoteTouchCancelCommand(:final seq) =>
+          'touch_cancel sent $commandId seq=$seq +${sentAt}ms',
+        _ => '${kind.logName} sent $commandId',
+      });
+      return;
+    }
+    if (!identical(_touch, touch) || touch.generation != _generation) return;
+    // The channel refused it: the touch cannot go on, and nothing is resent.
+    logDebug('${kind.logName} not sent $commandId');
+    _releaseTouchSettle(touch);
+    _finishTouch(touch, failure: RemoteCommandOutcome.notSent);
+    emit(_withNegotiationFacts(state));
+  }
+
+  /// What the tablet answered about [touch]. Returns whether [ack] was about a
+  /// touch at all.
+  Future<bool> _applyTouchAck(
+    RemoteControlAck ack,
+    Emitter<WebRtcSessionState> emit,
+  ) async {
+    final touch = _touch;
+    final message = touch?.messageOf(ack.commandId);
+    if (touch == null || message == null) {
+      if (ack.commandId != _unansweredHoldId) return false;
+      // The answer to a hold whose touch is already over. Too late to do
+      // anything with it, never too late to learn what the tablet runs.
+      _unansweredHoldId = null;
+      _learnTouchSupport(ack);
+      logDebug('touch_hold answered after its touch ${ack.commandId}');
+      return true;
+    }
+
+    final error = ack.error;
+    switch (message) {
+      case RemoteTouchMessage.hold:
+        _unansweredHoldId = null;
+        _learnTouchSupport(ack);
+        if (error == null) {
+          // The finger is down past the long press timeout. Nothing more.
+          logDebug('touch_hold confirmed ${ack.commandId}');
+          touch.confirmHold();
+          _reportTouch(touch);
+        } else if (error == RemoteControlError.unsupportedCommand) {
+          touch.refuseHold();
+          await _fallBackToLongPress(touch, emit);
+          return true;
+        } else if (touch.stage == RemoteTouchStage.cancelling) {
+          // A cancel during the hold is answered this way too: the cancel's
+          // own answer is the one that ends the touch.
+          touch.refuseHold();
+        } else {
+          logDebug('touch_hold rejected ${ack.commandId}: ${error.code}');
+          touch.refuseHold();
+          _releaseTouchSettle(touch);
+          _finishTouch(touch, failure: _outcomeOf(error));
+        }
+
+      case RemoteTouchMessage.move:
+        // A move that is taken is never answered. One refusal is enough to
+        // know the touch is gone, and the ones after it change nothing.
+        if (error == null || touch.stage == RemoteTouchStage.cancelling) {
+          return true;
+        }
+        logDebug('touch_move rejected ${ack.commandId}: ${error.code}');
+        _releaseTouchSettle(touch);
+        _finishTouch(touch, failure: _outcomeOf(error));
+
+      case RemoteTouchMessage.release:
+        if (error == null) {
+          // The contact ended on the tablet: not that anything was dropped.
+          logDebug('touch_release confirmed ${ack.commandId}');
+          _settleGuard.accept(ack.commandId);
+          _finishTouch(touch, phase: RemoteTouchPhase.released);
+        } else {
+          logDebug('touch_release rejected ${ack.commandId}: ${error.code}');
+          _settleGuard.release(ack.commandId);
+          _finishTouch(touch, failure: _outcomeOf(error));
+        }
+
+      case RemoteTouchMessage.cancel:
+        // Whatever the answer, the touch is over on the tablet.
+        _finishTouch(touch, phase: RemoteTouchPhase.cancelled);
+    }
+    emit(_withNegotiationFacts(state));
+    return true;
+  }
+
+  /// The tablet does not run touch sessions: the touch ends here, and if the
+  /// technician really held the press, the legacy long press goes out where it
+  /// started. Nothing tries to reproduce the moves: a long press is all an older
+  /// tablet can do with a hold.
+  ///
+  /// The touch_hold never ran there, so this never makes two long presses.
+  Future<void> _fallBackToLongPress(
+    RemoteTouchSession touch,
+    Emitter<WebRtcSessionState> emit,
+  ) async {
+    final wasCancelled = touch.stage == RemoteTouchStage.cancelling;
+    logDebug(
+      'touch_hold unsupported ${touch.holdId}'
+      '${wasCancelled ? '' : ', long_press instead'}',
+    );
+    _releaseTouchSettle(touch);
+    if (wasCancelled) {
+      _finishTouch(touch, phase: RemoteTouchPhase.cancelled);
+      emit(_withNegotiationFacts(state));
+      return;
+    }
+    // No word about the touch: the long press speaks for itself.
+    _finishTouch(touch);
+    _lastTouch = null;
+    emit(_withNegotiationFacts(state));
+
+    final session = _sessionAcceptingCommands(
+      touch.remoteSessionId,
+      isAvailable: state.canSendRemoteLongPress,
+    );
+    if (session == null || !identical(session, touch.channel)) {
+      logDebug('long_press fallback not possible ${touch.remoteSessionId}');
+      return;
+    }
+    await _sendRemoteCommand(
+      session,
+      RemoteLongPressCommand(
+        id: _commandIdGenerator.next(RemoteCommandKind.longPress),
+        point: touch.initialPoint,
+      ),
+      emit,
+    );
+  }
+
+  /// Only `ok` and `unsupported_command` to a hold say anything about it.
+  void _learnTouchSupport(RemoteControlAck ack) {
+    final error = ack.error;
+    if (error == null) {
+      _touchSupport = RemoteTouchSupport.supported;
+    } else if (error == RemoteControlError.unsupportedCommand) {
+      _touchSupport = RemoteTouchSupport.unsupported;
+    }
+  }
+
+  /// Forgotten with the negotiation, the session or the channel it was learned on.
+  void _resetTouchSupport() {
+    _touchSupport = RemoteTouchSupport.unknown;
+    _unansweredHoldId = null;
+  }
+
+  /// The release of [touch] will not be answered in a way that lets the screen
+  /// settle on its own: whatever it holds back goes.
+  void _releaseTouchSettle(RemoteTouchSession touch) {
+    final releaseId = touch.releaseId;
+    if (releaseId != null) _settleGuard.release(releaseId);
+  }
+
+  /// What the technician is told about [touch] while it lasts.
+  void _reportTouch(RemoteTouchSession touch) {
+    final phase = switch (touch.stage) {
+      RemoteTouchStage.starting =>
+        touch.hasMoved ? RemoteTouchPhase.dragging : RemoteTouchPhase.holding,
+      RemoteTouchStage.active =>
+        touch.hasMoved ? RemoteTouchPhase.dragging : RemoteTouchPhase.held,
+      RemoteTouchStage.releasing => RemoteTouchPhase.releasing,
+      RemoteTouchStage.cancelling => RemoteTouchPhase.cancelling,
+      RemoteTouchStage.dead => null,
+    };
+    if (phase == null) return;
+    _lastTouch = RemoteTouchFeedback(
+      touchId: touch.touchId,
+      phase: phase,
+      hasMoved: touch.hasMoved,
+    );
+  }
+
+  /// Ends [touch]: its timers stop, its ids are forgotten, and nothing else is
+  /// sent for it. Says how it ended when [phase] or [failure] is given.
+  void _finishTouch(
+    RemoteTouchSession touch, {
+    RemoteTouchPhase? phase,
+    RemoteCommandOutcome? failure,
+  }) {
+    touch.end();
+    if (identical(_touch, touch)) _touch = null;
+    if (failure == RemoteCommandOutcome.touchEnded) {
+      logDebug('touch ended touch=${touch.touchId}');
+    } else if (phase == RemoteTouchPhase.cancelled) {
+      logDebug('touch cancelled touch=${touch.touchId}');
+    }
+    if (phase == null && failure == null) return;
+    _lastTouch = RemoteTouchFeedback(
+      touchId: touch.touchId,
+      phase: failure == null ? phase! : RemoteTouchPhase.failed,
+      hasMoved: touch.hasMoved,
+      failure: failure,
+    );
+  }
+
+  /// The touch cannot be spoken about any more: its channel, its negotiation or
+  /// its session is going away.
+  ///
+  /// With [tryCancel], and a channel still open, a `touch_cancel` goes out first,
+  /// as a courtesy: nothing waits for its answer, and the tablet abandons the
+  /// touch on its own when the channel, the peer connection or the session goes.
+  void _abandonTouch({required bool tryCancel, RemoteCommandOutcome? failure}) {
+    final touch = _touch;
+    if (touch == null) return;
+    final session = _session;
+    if (tryCancel &&
+        touch.isStreaming &&
+        session != null &&
+        identical(session, touch.channel) &&
+        _controlChannelState == WebRtcDataChannelState.open) {
+      final command = touch.cancel(
+        _commandIdGenerator.next(RemoteCommandKind.touchCancel),
+      );
+      unawaited(session.sendRemoteControlCommand(command));
+      logDebug(
+        'touch_cancel sent ${command.id} seq=${command.seq} best effort',
+      );
+    }
+    _releaseTouchSettle(touch);
+    _finishTouch(
+      touch,
+      phase: failure == null ? RemoteTouchPhase.cancelled : null,
+      failure: failure,
+    );
+  }
+
   /// The Atrás button.
   Future<void> _onRemoteBackRequested(
     WebRtcRemoteBackRequested event,
@@ -473,6 +989,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         kind: RemoteCommandKind.setText,
         outcome: RemoteCommandOutcome.notSent,
       );
+      _lastTouch = null;
       emit(_withNegotiationFacts(state));
       return;
     }
@@ -512,12 +1029,21 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   }
 
   /// What the surface says about the picture of this negotiation.
-  void _onRemotePictureChanged(
+  ///
+  /// A touch that loses its picture is cancelled: the technician can no longer
+  /// see where the finger is. The surface going away cancels it too; this is the
+  /// same rule seen from here.
+  Future<void> _onRemotePictureChanged(
     WebRtcRemotePictureChanged event,
     Emitter<WebRtcSessionState> emit,
-  ) {
+  ) async {
     if (_session?.remoteSessionId != event.remoteSessionId) return;
     _isPictureDisplayed = event.isDisplayed;
+    final touch = _touch;
+    if (!event.isDisplayed && touch != null && touch.isStreaming) {
+      await _cancelTouch(touch, emit);
+      return;
+    }
     final next = _withNegotiationFacts(state);
     if (next != state) emit(next);
   }
@@ -536,7 +1062,9 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         session.remoteSessionId != remoteSessionId ||
         !isAvailable ||
         _settleGuard.isActive ||
-        _isTextPending) {
+        _isTextPending ||
+        // One interaction pending, whatever its stage: there is one finger.
+        _touch != null) {
       return null;
     }
     return session;
@@ -582,6 +1110,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
       kind: kind,
       outcome: RemoteCommandOutcome.pending,
     );
+    _lastTouch = null;
     emit(_withNegotiationFacts(state));
 
     final isSent = await session.sendRemoteControlCommand(command);
@@ -604,6 +1133,13 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   ) {
     if (event.activeRemoteSessionId == _activeRemoteSessionId) return;
     _activeRemoteSessionId = event.activeRemoteSessionId;
+
+    // A finger still down is taken away first, while the channel may still carry
+    // a cancel: FINALIZAR never waits for a touch, and neither does any other
+    // way out of ACTIVE. The tablet abandons the touch on its own as well.
+    _abandonTouch(tryCancel: true);
+    _resetTouchSupport();
+    _lastTouch = null;
 
     // Nothing sent for the previous answer can be spoken about any more.
     _pendingCommands.clear();
@@ -640,10 +1176,13 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     if (next != state) emit(next);
   }
 
-  void _applyRemoteControlAck(
+  Future<void> _applyRemoteControlAck(
     RemoteControlAck ack,
     Emitter<WebRtcSessionState> emit,
-  ) {
+  ) async {
+    // A touch is not a pending command: its answers are recognised by the touch.
+    if (await _applyTouchAck(ack, emit)) return;
+
     // Unknown, or answered already: only the first answer to a command counts,
     // and an answer that arrives after the timeout changes nothing.
     final command = _pendingCommands.settle(ack.commandId);
@@ -686,6 +1225,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
           RemoteCommandOutcome.imeActionUnavailable,
         RemoteControlError.imeActionRejected =>
           RemoteCommandOutcome.imeActionRejected,
+        RemoteControlError.touchEnded => RemoteCommandOutcome.touchEnded,
         RemoteControlError.invalidCommand ||
         RemoteControlError.unsupportedCommand ||
         RemoteControlError.unknown => RemoteCommandOutcome.incompatible,
@@ -737,6 +1277,13 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
       case ControlChannelStateChanged(state: final channelState):
         _controlChannelState = channelState;
         if (channelState != WebRtcDataChannelState.open) {
+          // Nothing can carry a cancel any more: the touch ends here, and the
+          // tablet abandons it on its own when its channel goes.
+          _abandonTouch(
+            tryCancel: false,
+            failure: _touch == null ? null : RemoteCommandOutcome.channelClosed,
+          );
+          _resetTouchSupport();
           _abandonPendingCommands();
           _settleGuard.clear();
         }
@@ -744,7 +1291,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         if (next != state) emit(next);
 
       case RemoteControlAckReceived(:final ack):
-        _applyRemoteControlAck(ack, emit);
+        await _applyRemoteControlAck(ack, emit);
 
       case RemoteVideoTrackAvailable(:final track):
         // The screen of *this* peer connection: the generation guard above
@@ -802,7 +1349,8 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
 
       case WebRtcPeerConnectionState.failed:
         _generation++;
-        unawaited(_releaseNegotiation());
+        // Nothing can carry a cancel on a peer connection that failed.
+        unawaited(_releaseNegotiation(tryCancelTouch: false));
         emit(
           WebRtcFailed(
             remoteSessionId: remoteSessionId,
@@ -812,7 +1360,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
 
       case WebRtcPeerConnectionState.closed:
         _generation++;
-        unawaited(_releaseNegotiation());
+        unawaited(_releaseNegotiation(tryCancelTouch: false));
         emit(WebRtcClosed(remoteSessionId));
     }
   }
@@ -929,7 +1477,13 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   /// Called from every ending: a new negotiation, a lost signaling room, a
   /// closed assistance, a failure and `close()`. It is safe to call twice, and
   /// it is the only place that releases these resources.
-  Future<void> _releaseNegotiation() async {
+  Future<void> _releaseNegotiation({bool tryCancelTouch = true}) async {
+    // While the session and its channel are still known: a finger still down
+    // gets a cancel if the channel can carry one, and is forgotten either way.
+    _abandonTouch(tryCancel: tryCancelTouch);
+    _resetTouchSupport();
+    _lastTouch = null;
+
     final subscription = _peerSubscription;
     final session = _session;
     _peerSubscription = null;
@@ -997,5 +1551,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         isSettling: _settleGuard.isActive,
         isTextPending: _isTextPending,
         isPictureDisplayed: _isPictureDisplayed,
+        isTouchActive: _touch != null,
+        lastTouch: _lastTouch,
       );
 }

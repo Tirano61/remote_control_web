@@ -26,6 +26,9 @@ class _FixedCommandIds implements RemoteControlCommandIdGenerator {
     _ids.moveNext();
     return _ids.current;
   }
+
+  @override
+  String nextTouch() => throw UnimplementedError('no touch here');
 }
 
 /// A BLoC on a clock the test moves, because when the guard ends is the point.
