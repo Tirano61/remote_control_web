@@ -928,6 +928,80 @@ tests**: it suppresses the accessibility service, and a command would never reac
 `dispatchGesture`. Use `adb logcat`, `dumpsys` and `adb exec-out screencap -p`.
 The toggle and the *full control* dialog are the user's, by hand, always.
 
+### What has been observed of the IME action on the physical tablet
+
+Chrome and a LUCKYSTAR T10A running **Android 16** (SDK 36, 1200x1920 portrait), with a
+debug `remote_control_device` built from its `main` (cf23d85, which merges
+`feature/device-remote-control-ime-enter` and then `feature/device-ime-enter-disclosure`)
+against the LAN backend and installed with `adb install -r` (SHA-256 `2888bc8f...917d2d`).
+The tablet had never been enrolled: a new Device was created with `POST /devices` and
+`POST /devices/:id/enrollment`, and activated on the tablet with its `publicId` and code.
+The accessibility toggle, PERMITIR and the screen-sharing dialog were done by hand. The web
+ran from `feature/web-remote-control-ime-enter`. One `RemoteSession` for the commands, with
+no F5. Frames were read by wrapping `RTCDataChannel` in the page (type and id only, and the
+whole frame for `ime_enter` and its ack); Android's side from `dumpsys` and
+`adb exec-out screencap -p`. The buttons were clicked with the mouse, except where noted.
+
+```text
+disclosure before PERMITIR (second request)   five lines, the fifth "Usar la acción disponible
+                                              del teclado en el campo seleccionado, por ejemplo
+                                              Buscar, Ir, Siguiente o Enviar.", all of it and
+                                              both buttons on screen without scrolling
+regressions, same session: Home, swipe up on
+  the launcher, Back, tap on Settings         the real effect, ack ok (28 to 461 ms)
+tap on "Buscar en Configuración", 6 s         field focused, keyboard up with its search key;
+                                              no ime_enter sent
+set_text "wifi", then 7 s                     "wifi" in the field, results listed, ack ok in
+                                              103 ms; no ime_enter sent
+Acción                                        {"v":1,"type":"ime_enter","id":"enter-7"}
+                                              {"v":1,"type":"ack","id":"enter-7","ok":true}
+                                              in 62 ms, "Acción enviada"; Settings ran its
+                                              search action: the keyboard closed
+                                              (mInputShown=false) and the results took the
+                                              whole screen, on the tablet and on the picture
+Acción again on the same field                text_target_unavailable: the search action had
+                                              taken the input focus away from the field
+Acción on the launcher                        text_target_unavailable in 36 ms, "No hay un
+                                              campo de texto editable enfocado.", nothing else
+service disabled by hand, Acción              accessibility_unavailable in 25 ms, the message,
+                                              no effect; session, picture and channel go on
+service enabled again                         Home, tap, Back work, same session
+Acción on an empty search field               ack ok, nothing visible: Settings does nothing
+                                              with an empty query
+```
+
+The settle guard, driven with pointer events dispatched in the page on the real buttons and
+picture, because the answer is faster than a hand:
+
+```text
+ack ok at 50 ms     Inicio 111, Atrás 162, Recientes 211, tap 245, drag 266, Texto 305,
+                    Acción 337 ms: nothing sent; Acción at 475 ms sent
+ime_enter frame held 500 ms in the page, ack ok at 549 ms
+                    Atrás at 405 ms: nothing sent; Atrás at 591 ms sent, ack ok
+refused at 52 ms    (text_target_unavailable) Inicio at 105 ms sent: no settle time
+FINALIZAR 89 ms after an Acción answered ok
+                    nothing sent afterwards, the request COMPLETED, the control channel
+                    closed, no media projection left on the tablet and its capture
+                    indicator gone
+```
+
+What Android 16 on this tablet showed:
+
+```text
+FOCUS_INPUT             as expected: the focused search field was found, and lost its
+                        focus once its own search action ran
+ACTION_IME_ENTER        exposed by the Settings search field; accepted
+AccessibilityService    enabled by hand, bound with capabilities 33 (window content +
+                        gestures) and no event types; no shortcut assigned
+MediaProjection         the system dialog offers "Compartir pantalla completa" by default
+log level               log.tag=E on this build drops every Log.i, so the tablet's own
+                        RemoteControlInput lines never reach logcat. Its side was read from
+                        the acks, dumpsys and the screen. Not a bug of either project
+```
+
+`ime_action_unavailable` was **not reproduced on the device**: no natural, safe field without
+`ACTION_IME_ENTER` was at hand, and none was built for it. The automated tests cover it.
+
 ### What has been observed of text on the physical tablet
 
 Chrome and a tablet running Android 14 (800x1280), with a debug `remote_control_device`
