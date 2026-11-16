@@ -1344,6 +1344,101 @@ tests**: it suppresses the accessibility service, and a command would never reac
 `dispatchGesture`. Use `adb logcat`, `dumpsys` and `adb exec-out screencap -p`.
 The toggle and the *full control* dialog are the user's, by hand, always.
 
+### What has been observed of touch sessions on the physical tablet
+
+Chrome and the LUCKYSTAR T10A (**Android 16**, SDK 36, 1200x1920), with a debug
+`remote_control_device` built from `feature/device-remote-control-drag` (4a1f34f) against
+the LAN backend (`http://192.168.18.101:3000`) and installed with `adb install -r` (SHA-256
+`8b6751e3...75b2`), which kept its enrolment (645-589-107). The web ran from
+`feature/web-remote-control-drag`, release build served from `build/web`. PERMITIR, the
+screen-sharing dialog, the accessibility toggle and the rotation were done by hand; no
+mobile-mcp and nothing holding a `UiAutomation`. Frames were read by wrapping
+`RTCDataChannel` in the page (type, id, `touch`, `seq`, coordinates rounded to 3 decimals,
+and the ack). Holds and drags were driven with pointer events dispatched in the page on
+the real picture, through the production gesture layer; taps, swipes and the buttons were
+real clicks. Android's side from `adb exec-out screencap -p` and `dumpsys`.
+
+```text
+disclosure before PERMITIR      "Tocar, mantener pulsado, deslizar y arrastrar elementos
+                                 sobre la pantalla." with the other four lines
+tap on Settings (dock)          tap-9 only, ack ok 67 ms later, Settings opened
+drag up on the launcher         swipe-11 only, at the release; the app drawer opened
+hold 1.5 s still, wallpaper     touch_hold hold-3 502 ms after pointer down; keepalives
+                                seq 1, 2 at 753, 1004 ms; hold ok at 1052 ms; seq 3; release
+                                seq 4 at pointer up, ok 66 ms later; the launcher's
+                                wallpaper menu; "Pulsación finalizada"; 0 tap, 0 long_press
+drag Gemini two columns right   hold 503 ms, first real move 1003 ms, BEFORE the hold's ok
+  (page 1, row of Gemini)       (1029 ms); 47 touch_move; touch_release 1 ms after pointer
+                                up, ok 34 ms later; the icon followed the pointer while it
+                                was down (launcher in drag mode, "Quitar" on top) and was
+                                dropped two columns right
+progressive movement            frames at ~1.4 / 2.0 / 2.7 / 3.4 s of another drag: the
+                                icon moves with the pointer, before any release
+cancel during a drag (Meet)     the launcher showed Meet over the free cell 5; pointercancel
+                                -> touch_cancel cxl-333 seq 37, no coordinates, ok 47 ms
+                                later; Meet went back to cell 2: NOTHING DROPPED;
+                                "Contacto remoto cancelado"
+after the cancel                tap-334 (Settings opened), home-335, a long press
+                                (hold-337 / rel-341, both ok) and further drags: all normal,
+                                same session, no finger left down
+cancel while held still         touch_cancel cxl-375 seq 4, ok 18 ms; no tap, no drop
+keepalive 3.5 s still, then     11 keepalives in the 3.5 s, at most 252 ms apart, no
+  drag                          touch_ended; the drag that followed still moved the icon
+10 short drags (central icon)   10 touch_hold, 170 touch_move, 10 touch_release; 10/10
+                                hold ok, 10/10 release ok; 0 touch_ended, 0 tap, 0 swipe,
+                                0 long_press; the icon stayed in its cell
+final frame                     the picture showed exactly the T10A's layout
+rotation during a still hold    the tablet answered keepalive mv-704 touch_ended (display
+                                changed); nothing else sent for it; the picture turned
+                                1920x1200; 0 drop; the line said "El contacto remoto
+                                terminó antes de completar la acción."; a hold in landscape
+                                worked (hold-706 / rel-709 ok)
+accessibility off by hand       touch_hold hold-712 answered accessibility_unavailable in
+                                15 ms; no touch created, nothing else sent; the message;
+                                session and picture went on; on again: holds ok
+FINALIZAR during a drag         "Arrastrando...", Atrás..Acción disabled, FINALIZAR enabled;
+                                the click -> touch_cancel cxl-794 seq 21 1 ms later, ok
+                                17 ms later; session closed, channel closed, no media
+                                projection, the capture indicator gone; no drop; the
+                                later pointer up sent nothing; touched by hand afterwards,
+                                the tablet responded normally
+```
+
+The cancel by mismatch, the device's workaround for a pointer kept down by
+`willContinue`, is what these frames and pictures show working: `touch_cancel` never
+dropped anything and never left the pointer held.
+
+What the launcher, not the protocol, did, and what the technician will meet on it:
+
+```text
+drop cell        while dragging, Launcher3 shrinks the workspace around its centre and
+                 draws the icon off the finger; the cell it drops on is its own reading,
+                 so a drag of one column from a side column can fall back in place, and
+                 releasing at the starting point of a side icon moved it one column
+page change      holding an icon near an edge for about a second turns the page; holding
+                 longer turns two; a drop then lands on that page, or goes back
+widget           a long press released on the clock widget leaves it in resize mode
+```
+
+Those drags reorganised the tablet's home screen (Gemini and Play Store ended up in other
+rows); the owner chose to leave it that way. Nothing was removed, uninstalled or sent to
+the top drop targets.
+
+Not reproduced on the device: the fallback to `long_press` (no tablet without touch
+sessions is available, and the T10A was not downgraded), the 30 s limit, a peer
+connection or channel failing during a touch. The automated tests cover them.
+
+Two things seen that are about the test, not the product. A pointer event dispatched with
+`pointerType: 'mouse'` shares Flutter web's single mouse device with the real mouse: the
+real mouse moving with no button while the dispatched one was "down" made the engine
+synthesize an up, which the surface rightly sent as a release where the real mouse was
+(clamped to `1, 0`). With a real mouse that cannot happen; the rest of the holds were
+dispatched as `touch`. And a page resize in the middle of a hold dropped the press before
+its timeout, which is the geometry rule doing its job.
+
+Also seen, outside this stage: after PERMITIR the console did not show the request as
+accepted until ACTUALIZAR was pressed.
+
 ### What has been observed of the long press on the physical tablet
 
 Chrome and the LUCKYSTAR T10A (**Android 16**, SDK 36, 1200x1920 portrait), with a debug
