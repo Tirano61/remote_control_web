@@ -33,6 +33,12 @@ enum RemoteControlError {
   /// The focused field declares an IME action, and Android did not run it.
   imeActionRejected('ime_action_rejected'),
 
+  /// The touch a `touch_*` message names cannot go on, or does not exist: it was
+  /// cancelled, timed out, saw the display change, was cancelled by Android, lost
+  /// its session, or was never there. Why is in the tablet's log and nowhere else:
+  /// the sender stops sending for that touch, whatever the reason.
+  touchEnded('touch_ended'),
+
   /// A code this version does not know. The tablet did answer that the command
   /// failed, which is all that can be said about it.
   unknown('unknown');

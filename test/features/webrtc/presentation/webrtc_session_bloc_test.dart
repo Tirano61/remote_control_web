@@ -33,6 +33,9 @@ class _FixedCommandIds implements RemoteControlCommandIdGenerator {
     _ids.moveNext();
     return _ids.current;
   }
+
+  @override
+  String nextTouch() => throw UnimplementedError('no touch here');
 }
 
 void main() {

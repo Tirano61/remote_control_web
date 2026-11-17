@@ -93,6 +93,81 @@ final class WebRtcRemoteLongPressRequested extends WebRtcSessionEvent {
   List<Object?> get props => [remoteSessionId, point];
 }
 
+/// The technician held the pointer still on the picture for as long as a long
+/// press takes to be recognised, and it is still down: the start of a remote
+/// touch that the same [pointer] goes on with.
+///
+/// What it becomes is decided here, not by the surface: a `touch_hold`, or the
+/// legacy `long_press` on a tablet that said it does not run touch sessions.
+/// [point] is where the press started.
+final class WebRtcRemoteTouchHoldRequested extends WebRtcSessionEvent {
+  const WebRtcRemoteTouchHoldRequested({
+    required this.remoteSessionId,
+    required this.pointer,
+    required this.point,
+  });
+
+  final String remoteSessionId;
+
+  /// The console's pointer, which every later event of this touch names.
+  final int pointer;
+  final NormalizedRemotePoint point;
+
+  @override
+  List<Object?> get props => [remoteSessionId, pointer, point];
+}
+
+/// The pointer of a held touch is at [point] now, clamped to the picture.
+///
+/// Raised for every move of the pointer: which of them reach the tablet, and
+/// when, is the touch session's decision.
+final class WebRtcRemoteTouchMoved extends WebRtcSessionEvent {
+  const WebRtcRemoteTouchMoved({
+    required this.remoteSessionId,
+    required this.pointer,
+    required this.point,
+  });
+
+  final String remoteSessionId;
+  final int pointer;
+  final NormalizedRemotePoint point;
+
+  @override
+  List<Object?> get props => [remoteSessionId, pointer, point];
+}
+
+/// The pointer of a held touch went up at [point], clamped to the picture.
+final class WebRtcRemoteTouchReleased extends WebRtcSessionEvent {
+  const WebRtcRemoteTouchReleased({
+    required this.remoteSessionId,
+    required this.pointer,
+    required this.point,
+  });
+
+  final String remoteSessionId;
+  final int pointer;
+  final NormalizedRemotePoint point;
+
+  @override
+  List<Object?> get props => [remoteSessionId, pointer, point];
+}
+
+/// The held touch of [pointer] can no longer go on: the browser cancelled the
+/// pointer, a second one went down, the wheel turned, the geometry changed or
+/// the surface went away. Nothing is dropped: the finger is taken away.
+final class WebRtcRemoteTouchCancelled extends WebRtcSessionEvent {
+  const WebRtcRemoteTouchCancelled({
+    required this.remoteSessionId,
+    required this.pointer,
+  });
+
+  final String remoteSessionId;
+  final int pointer;
+
+  @override
+  List<Object?> get props => [remoteSessionId, pointer];
+}
+
 /// The technician pressed Atrás.
 ///
 /// Like a click, it carries the session it was aimed at. Unlike a click, it needs
@@ -200,6 +275,18 @@ final class _WebRtcRemoteCommandTimedOut extends WebRtcSessionEvent {
 
   @override
   List<Object?> get props => [commandId, generation];
+}
+
+/// A timer of a touch session went off. Internal.
+final class _WebRtcRemoteTouchTimerFired extends WebRtcSessionEvent {
+  const _WebRtcRemoteTouchTimerFired(this.touchId, this.generation, this.timer);
+
+  final String touchId;
+  final int generation;
+  final RemoteTouchTimer timer;
+
+  @override
+  List<Object?> get props => [touchId, generation, timer];
 }
 
 /// The settle time of a global action or an IME action has passed. Internal.

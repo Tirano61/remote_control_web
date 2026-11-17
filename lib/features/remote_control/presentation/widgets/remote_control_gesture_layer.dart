@@ -15,6 +15,36 @@ typedef RemoteSwipeCallback =
       required int durationMs,
     });
 
+/// A position of the pointer that a held touch follows.
+typedef RemoteTouchPointCallback =
+    void Function(int pointer, NormalizedRemotePoint point);
+
+/// What a press held still becomes when its receiver follows it to the end: a
+/// remote touch. See [RemoteControlGestureLayer.onTouch].
+///
+/// Every call names the console's pointer, so that whoever receives them can
+/// tell one press from the next.
+final class RemoteTouchCallbacks {
+  const RemoteTouchCallbacks({
+    required this.onHold,
+    required this.onMove,
+    required this.onRelease,
+    required this.onCancel,
+  });
+
+  /// Held still for the long press timeout, where it started. Once.
+  final RemoteTouchPointCallback onHold;
+
+  /// Every move after that, clamped to the picture.
+  final RemoteTouchPointCallback onMove;
+
+  /// Went up there, clamped to the picture. Nothing follows.
+  final RemoteTouchPointCallback onRelease;
+
+  /// Can no longer go on. Nothing follows.
+  final void Function(int pointer) onCancel;
+}
+
 /// Turns what the pointer does over the picture of the tablet into one gesture
 /// on the tablet: a tap, a swipe or a long press, never two of them.
 ///
@@ -25,10 +55,27 @@ typedef RemoteSwipeCallback =
 ///               longer be a long press
 /// timeout,      still down, never a drag: a long press where it went down,
 ///   no drag     reported there and then. Whatever that pointer does next,
-///               moving or going up, reports nothing else
+///               moving or going up, reports nothing else, unless [onTouch]
+///               follows it (below)
 /// up, no drag   a tap
 /// up, drag      a swipe from where it was pressed to where it was released
 /// ```
+///
+/// With [onTouch], a press held still is not over when it is reported: it is a
+/// remote touch, and the pointer is followed until it goes up.
+///
+/// ```text
+/// timeout       onTouch.onHold where it went down, instead of onLongPress
+/// move          onTouch.onMove, clamped to the picture: a held finger may be
+///               pushed to the edge, and a band is the edge, never a cancel
+/// up            onTouch.onRelease, clamped the same way
+/// cancelled     onTouch.onCancel: the browser cancelled the pointer, a second
+///               one went down, the wheel turned, another button was pressed,
+///               the geometry changed, or this surface went away
+/// ```
+///
+/// Nothing of that applies before the timeout: a press that has not been held
+/// yet is a tap or a swipe exactly as above, dropped on a band and never clamped.
 ///
 /// A tap and a swipe are reported when the pointer goes up and never before. A
 /// long press cannot wait for it: the technician holds the pointer down to see
@@ -56,6 +103,7 @@ class RemoteControlGestureLayer extends StatefulWidget {
     required this.onTap,
     required this.onSwipe,
     required this.onLongPress,
+    this.onTouch,
     super.key,
   });
 
@@ -83,6 +131,10 @@ class RemoteControlGestureLayer extends StatefulWidget {
   /// channels or pending commands.
   final ValueChanged<NormalizedRemotePoint> onLongPress;
 
+  /// When given, a press held still is followed as a remote touch rather than
+  /// reported once: see the table above. [onLongPress] is then never called.
+  final RemoteTouchCallbacks? onTouch;
+
   @override
   State<RemoteControlGestureLayer> createState() =>
       _RemoteControlGestureLayerState();
@@ -100,21 +152,61 @@ class _RemoteControlGestureLayerState extends State<RemoteControlGestureLayer> {
     super.didUpdateWidget(oldWidget);
     // Here too, and not only at the next pointer event: a pointer standing still
     // says nothing, and the ratio could be back by the time it moves again.
-    if (_press?.videoAspectRatio != widget.videoAspectRatio()) _drop();
+    if (_press?.videoAspectRatio != widget.videoAspectRatio()) {
+      _drop();
+      return;
+    }
+    // A held touch keeps the tablet's finger down while the pointer stands
+    // still, so a new size cannot wait for the next move to be noticed. It is
+    // only known once this frame is laid out.
+    if (_press?.isTouch ?? false) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _checkTouchSize());
+    }
+  }
+
+  void _checkTouchSize() {
+    final press = _press;
+    if (!mounted || press == null || !press.isTouch) return;
+    if (context.size != press.surfaceSize) _drop();
   }
 
   @override
   void dispose() {
     // A pointer already down keeps reporting to the callbacks of this state, and
-    // a long press timeout must not outlive it.
+    // a long press timeout must not outlive it. A held touch is cancelled: its
+    // finger must not stay down on the tablet behind a surface that is gone.
     _drop();
     super.dispose();
   }
 
-  /// Forgets the press, and whatever it was still about to report.
+  /// Forgets the press, and whatever it was still about to report. A held touch
+  /// is cancelled: nothing is dropped where the pointer happens to be.
   void _drop() {
-    _press?.cancelLongPress();
+    final press = _press;
     _press = null;
+    if (press == null) return;
+    press.cancelLongPress();
+    if (press.isTouch) widget.onTouch?.onCancel(press.pointer);
+  }
+
+  /// Where [position] is on the tablet for the held touch [press]: clamped to
+  /// the picture, as long as the geometry is still the one it started with.
+  NormalizedRemotePoint? _touchPointOf(_RemotePress press, Offset position) {
+    final videoAspectRatio = widget.videoAspectRatio();
+    final size = context.size;
+    if (videoAspectRatio == null ||
+        size == null ||
+        videoAspectRatio != press.videoAspectRatio ||
+        size != press.surfaceSize) {
+      return null;
+    }
+    return RemoteVideoGeometry.clampToPicture(
+      pointerX: position.dx,
+      pointerY: position.dy,
+      containerWidth: size.width,
+      containerHeight: size.height,
+      videoAspectRatio: videoAspectRatio,
+    );
   }
 
   NormalizedRemotePoint? _pointAt(Offset position) {
@@ -153,7 +245,8 @@ class _RemoteControlGestureLayerState extends State<RemoteControlGestureLayer> {
 
   void _onPointerDown(PointerDownEvent event) {
     if (_press != null) {
-      // A second finger. Several of them is not a gesture the tablet has.
+      // A second finger. Several of them is not a gesture the tablet has, and a
+      // held touch is cancelled rather than turned into a pinch.
       _drop();
       return;
     }
@@ -189,12 +282,23 @@ class _RemoteControlGestureLayerState extends State<RemoteControlGestureLayer> {
       return;
     }
     press.isLongPress = true;
-    widget.onLongPress(press.point);
+    final onTouch = widget.onTouch;
+    if (onTouch == null) {
+      widget.onLongPress(press.point);
+      return;
+    }
+    // Where it started, and not where it drifted by less than the threshold.
+    press.isTouch = true;
+    onTouch.onHold(press.pointer, press.point);
   }
 
   void _onPointerMove(PointerMoveEvent event) {
     final press = _press;
     if (press == null || press.pointer != event.pointer) return;
+    if (press.isTouch) {
+      _followTouch(press, event);
+      return;
+    }
     // Reported already: wherever it goes now, it is not a drag after a long press.
     if (press.isLongPress) return;
 
@@ -206,9 +310,33 @@ class _RemoteControlGestureLayerState extends State<RemoteControlGestureLayer> {
     press.follow(event.localPosition);
   }
 
+  /// The held touch moved: wherever the pointer is, even off the picture.
+  void _followTouch(_RemotePress press, PointerMoveEvent event) {
+    final point = event.buttons == kPrimaryButton
+        ? _touchPointOf(press, event.localPosition)
+        : null;
+    if (point == null) {
+      // Another button, or another geometry: not the touch it started as.
+      _drop();
+      return;
+    }
+    widget.onTouch?.onMove(press.pointer, point);
+  }
+
   void _onPointerUp(PointerUpEvent event) {
     final press = _press;
     if (press == null || press.pointer != event.pointer) return;
+    if (press.isTouch) {
+      final point = _touchPointOf(press, event.localPosition);
+      if (point == null) {
+        _drop();
+        return;
+      }
+      _press = null;
+      press.cancelLongPress();
+      widget.onTouch?.onRelease(press.pointer, point);
+      return;
+    }
     _drop();
     // The long press was the gesture: going up is not a tap as well.
     if (press.isLongPress) return;
@@ -241,7 +369,8 @@ class _RemoteControlGestureLayerState extends State<RemoteControlGestureLayer> {
   }
 
   /// The wheel scrolls the page under a pointer that is down, and the positions
-  /// that follow would no longer be relative to where the press started.
+  /// that follow would no longer be relative to where the press started. A held
+  /// touch is cancelled for the same reason.
   void _onPointerSignal(PointerSignalEvent event) => _drop();
 
   /// Nothing to do with the drag itself: what it does is keep the arena, so that
@@ -303,8 +432,13 @@ final class _RemotePress {
   /// dropped or fires.
   Timer? longPressTimer;
 
-  /// Whether it was reported as a long press. Nothing else is reported for it.
+  /// Whether it was reported as a long press. Nothing else is reported for it,
+  /// unless it [isTouch].
   bool isLongPress = false;
+
+  /// Whether it was reported as the hold of a remote touch, which this press
+  /// goes on with until it goes up or is cancelled.
+  bool isTouch = false;
 
   double distanceTo(Offset other) => (other - position).distance;
 

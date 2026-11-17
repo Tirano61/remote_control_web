@@ -93,7 +93,8 @@ sealed class WebRtcSessionState extends Equatable {
   bool get canSendRemoteText =>
       canOfferRemoteText &&
       remoteControl.pendingCommands == 0 &&
-      !remoteControl.isSettling;
+      !remoteControl.isSettling &&
+      !remoteControl.isTouchActive;
 
   /// Whether the IME action of the focused field can go out right now.
   ///
@@ -106,7 +107,8 @@ sealed class WebRtcSessionState extends Equatable {
   bool get canSendRemoteImeEnter =>
       canOfferRemoteText &&
       remoteControl.pendingCommands == 0 &&
-      !remoteControl.isSettling;
+      !remoteControl.isSettling &&
+      !remoteControl.isTouchActive;
 
   /// Whether a long press can go out right now.
   ///
@@ -115,10 +117,14 @@ sealed class WebRtcSessionState extends Equatable {
   /// swipe still running could have moved that elsewhere by the time it lands.
   /// Once sent, the settle guard holds every other command back until it is
   /// answered.
+  ///
+  /// The same for the hold that starts a touch session: whichever of the two the
+  /// tablet runs, it is recognised on the same picture.
   bool get canSendRemoteLongPress =>
       canOfferRemoteText &&
       remoteControl.pendingCommands == 0 &&
-      !remoteControl.isSettling;
+      !remoteControl.isSettling &&
+      !remoteControl.isTouchActive;
 
   /// Whether losing the signaling socket must leave the peer connection alone.
   ///

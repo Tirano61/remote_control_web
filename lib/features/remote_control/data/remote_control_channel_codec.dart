@@ -23,6 +23,8 @@ class RemoteControlChannelCodec {
   static const String _endYKey = 'endY';
   static const String _durationMsKey = 'durationMs';
   static const String _textKey = 'text';
+  static const String _touchKey = 'touch';
+  static const String _seqKey = 'seq';
   static const String _okKey = 'ok';
   static const String _errorKey = 'error';
 
@@ -34,6 +36,10 @@ class RemoteControlChannelCodec {
   static const String _recentsType = 'recents';
   static const String _setTextType = 'set_text';
   static const String _imeEnterType = 'ime_enter';
+  static const String _touchHoldType = 'touch_hold';
+  static const String _touchMoveType = 'touch_move';
+  static const String _touchReleaseType = 'touch_release';
+  static const String _touchCancelType = 'touch_cancel';
   static const String _ackType = 'ack';
 
   /// The frame for [command], with exactly the fields of the protocol. It may hold
@@ -95,6 +101,50 @@ class RemoteControlChannelCodec {
       _typeKey: _imeEnterType,
       _idKey: id,
     }),
+    // The hold is the touch's seq 0, and carries none.
+    RemoteTouchHoldCommand(:final id, :final touch, :final point) =>
+      jsonEncode({
+        _versionKey: _version,
+        _typeKey: _touchHoldType,
+        _idKey: id,
+        _touchKey: touch,
+        _xKey: point.x,
+        _yKey: point.y,
+      }),
+    RemoteTouchMoveCommand(:final id, :final touch, :final seq, :final point) =>
+      jsonEncode({
+        _versionKey: _version,
+        _typeKey: _touchMoveType,
+        _idKey: id,
+        _touchKey: touch,
+        _seqKey: seq,
+        _xKey: point.x,
+        _yKey: point.y,
+      }),
+    RemoteTouchReleaseCommand(
+      :final id,
+      :final touch,
+      :final seq,
+      :final point,
+    ) =>
+      jsonEncode({
+        _versionKey: _version,
+        _typeKey: _touchReleaseType,
+        _idKey: id,
+        _touchKey: touch,
+        _seqKey: seq,
+        _xKey: point.x,
+        _yKey: point.y,
+      }),
+    // No coordinates: the finger is taken away wherever it is.
+    RemoteTouchCancelCommand(:final id, :final touch, :final seq) =>
+      jsonEncode({
+        _versionKey: _version,
+        _typeKey: _touchCancelType,
+        _idKey: id,
+        _touchKey: touch,
+        _seqKey: seq,
+      }),
   };
 
   /// The acknowledgement in [frame], or `null` when it is not a valid one.
