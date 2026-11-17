@@ -111,5 +111,38 @@ class RemoteVideoGeometry {
     );
   }
 
+  /// The position on the tablet nearest to a pointer, wherever the pointer is:
+  /// the point under it when it is on the picture, and otherwise the nearest
+  /// point of the picture's edge. `null` only when the values describe no
+  /// picture or no position.
+  ///
+  /// Only for a touch that is already held down on the tablet: its finger has to
+  /// be somewhere, and the edge is where the technician is pushing it, to drag
+  /// something to a border for instance. Clamped to the rectangle `contain` draws
+  /// the picture in, never to the container: a band is not part of the tablet's
+  /// screen. A press that has not been recognised as held yet goes through
+  /// [normalize], which never moves a band to an edge.
+  static NormalizedRemotePoint? clampToPicture({
+    required double pointerX,
+    required double pointerY,
+    required double containerWidth,
+    required double containerHeight,
+    required double videoAspectRatio,
+  }) {
+    if (!pointerX.isFinite || !pointerY.isFinite) return null;
+
+    final rect = containRect(
+      containerWidth: containerWidth,
+      containerHeight: containerHeight,
+      videoAspectRatio: videoAspectRatio,
+    );
+    if (rect == null) return null;
+
+    return NormalizedRemotePoint(
+      ((pointerX - rect.left) / rect.width).clamp(0.0, 1.0),
+      ((pointerY - rect.top) / rect.height).clamp(0.0, 1.0),
+    );
+  }
+
   static bool _isPositiveAndFinite(double value) => value.isFinite && value > 0;
 }

@@ -1,7 +1,7 @@
 # Control channel — `remote_control_web`
 
 How what the technician does on the picture becomes a gesture on the tablet (a tap, a
-swipe or a long press), and
+swipe, or a held touch that can drag, which an older tablet gets as a long press), and
 what the Atrás, Inicio and Recientes buttons, the Texto dialog and the Acción button
 become, seen from the web.
 
@@ -82,14 +82,34 @@ técnico sees the field focused on the picture -> Acción
   -> RemoteCommandFeedback           the end of the line above the buttons
 ```
 
+A press held still takes its own path, because it does not end when it is recognised:
+
+```text
+held still for kLongPressTimeout, pointer still down
+  -> RemoteControlGestureLayer       onTouch.onHold, then every move, then the release
+  -> WebRtcRemoteTouchHoldRequested  the BLoC checks the long press gate
+     WebRtcRemoteTouchMoved          one event per pointer move, clamped to the picture
+     WebRtcRemoteTouchReleased
+     WebRtcRemoteTouchCancelled
+  -> RemoteTouchSession              seq, ids, throttling, keepalive, 30 s, deadlines:
+                                     not PendingRemoteCommands
+  -> RemoteTouchHoldCommand ...      touch_hold, touch_move, touch_release, touch_cancel
+  -> RemoteControlChannelCodec
+  -> `control` data channel
+  -> Android dispatchGesture, willContinue / continueStroke
+  -> acks for the hold, a refused move, the release, the cancel
+  -> RemoteTouchFeedback             the line under the picture
+```
+
 Presentation knows normalized coordinates, gesture intents and a status. It does
 not know `RTCDataChannel`, `RTCDataChannelMessage`, `jsonEncode` or `flutter_webrtc`.
 
 ## Protocol v1
 
-`tap`, `swipe`, `long_press`, `back`, `home`, `recents`, `set_text` and `ime_enter`. One
-text frame holding one JSON object, on the existing `control` channel. No other channel is
-created.
+`tap`, `swipe`, `long_press`, `back`, `home`, `recents`, `set_text`, `ime_enter`, and
+the four messages of a touch session, `touch_hold`, `touch_move`, `touch_release` and
+`touch_cancel` (see [Hold and drag](#hold-and-drag-touch-sessions)). One text frame holding
+one JSON object, on the existing `control` channel. No other channel is created.
 
 ```json
 {"v":1,"type":"tap","id":"tap-1","x":0.5,"y":0.25}
@@ -121,6 +141,13 @@ created.
 
 ```json
 {"v":1,"type":"ime_enter","id":"enter-7"}
+```
+
+```json
+{"v":1,"type":"touch_hold","id":"hold-9","touch":"t-8","x":0.41,"y":0.52}
+{"v":1,"type":"touch_move","id":"mv-10","touch":"t-8","seq":1,"x":0.43,"y":0.55}
+{"v":1,"type":"touch_release","id":"rel-14","touch":"t-8","seq":5,"x":0.6,"y":0.7}
+{"v":1,"type":"touch_cancel","id":"cxl-14","touch":"t-8","seq":5}
 ```
 
 ```json
@@ -157,6 +184,12 @@ back, home, recents  Android accepted the global action
 set_text             the focused node accepted ACTION_SET_TEXT
 ime_enter            the focused node accepted ACTION_IME_ENTER, and nothing about
                      what the application then did
+touch_hold           the finger is still down, past Android's long press timeout, and
+                     the touch goes on: nothing about what is under it
+touch_move           never answered when it is taken
+touch_release        the final stroke completed: Android received the end of the
+                     contact, not that anything was dropped
+touch_cancel         the touch is over on the tablet, cancelled or already ended
 ```
 
 `performGlobalAction` returns a boolean and has no callback. A global action that was
@@ -258,7 +291,10 @@ pointer down
    |
    +-- moved >= 6 px before the timeout               -> SWIPE, at the release
    |
-   +-- held still for kLongPressTimeout               -> LONG_PRESS, at once
+   +-- held still for kLongPressTimeout               -> touch_hold, at once, and the
+                                                         pointer is followed until it
+                                                         goes up (LONG_PRESS on a tablet
+                                                         that does not run touches)
 ```
 
 Flutter keeps delivering a pointer that is down to the widget it went down on,
@@ -349,6 +385,11 @@ otherwise empty `GestureDetector` inside the layer holds the gesture arena, so t
 page stays put and only the tablet moves. A mouse never scrolled the page this way.
 
 ### Long press
+
+Since the [touch sessions](#hold-and-drag-touch-sessions), this is what a hold becomes on
+a tablet that answered `touch_hold` with `unsupported_command`, and only there: the
+legacy path, kept whole, model, codec, gate, settle guard and messages. What follows
+describes it as it always worked, and the recognition is shared by both.
 
 There is no button for it. Holding the pointer still on the picture is a long press,
 with a mouse or a finger:
@@ -447,6 +488,223 @@ Never `Menú abierto` or `Elemento seleccionado`: the acknowledgement does not s
 It carries `x` and `y` and nothing else, and its answer carries no content, node, text,
 cursor, selection, package or accessibility metadata. The log has its id and, on a
 refusal, the public error code.
+
+## Hold and drag: touch sessions
+
+A press held still is not over when it is recognised. It is one remote finger, put down
+by `touch_hold`, that follows the pointer for as long as the pointer stays down, and is
+lifted by `touch_release` or taken away by `touch_cancel`:
+
+```text
+web hold recognition          -> touch_hold     the finger goes down where the press started
+move after the hold           -> touch_move     a stream, at most ~30 a second
+up                            -> touch_release  the finger is lifted where the pointer is
+cancel                        -> touch_cancel   the finger is taken away: never a release
+```
+
+```text
+the web decides    WHEN there is a hold or a drag: the pointer stayed down, closer than
+                   6 px, for kLongPressTimeout; it moved afterwards; it went up
+the device keeps   ONE continuous Android pointer: one ACTION_DOWN, moves, one ACTION_UP
+                   or ACTION_CANCEL, however many strokes it takes
+```
+
+Held still and released, it is what a long press always was on the tablet, with the
+finger kept down until the technician lets go. Held and moved, it drags: a launcher icon
+follows the pointer while it is down, and is dropped where it is released. There is no
+Drag button, and recognition is exactly the [long press's](#long-press): the same timeout,
+the same 6 px, the same point (where the press went down, not where it drifted). Before
+the timeout a press is a tap or a swipe, unchanged.
+
+### No waiting for the hold's answer
+
+```text
+touch_hold sent
+   |-- keepalive starts now, not at the ack
+   |-- moves go out as the pointer moves, before the ack if need be
+   |-- the release goes out the moment the pointer goes up, before the ack if need be
+   '-- the cancel too
+```
+
+The tablet keeps what arrives while it is still holding: the latest position and the
+release. A move before the ack makes the finger move once the hold is over; a release
+before the ack gives a complete long press, then the release. The acks of the hold and
+of the release can therefore arrive close together, and each is matched by its own id.
+
+### RemoteTouchSession
+
+Not a `PendingRemoteCommand`: a touch is not one command waiting for one answer. It keeps
+
+```text
+touchId, holdId, the console pointer, generation, RemoteSession, channel identity
+next seq, the initial point, the last observed point, the last sent point and when
+the stage, what the hold's answer was, the support known when it started
+the ids of its moves (bounded at 1024: 30 s at 30 Hz is ~900), its release, its cancel
+its timers: keepalive, throttle, lifetime, answer deadline
+```
+
+and nothing else: no frame, no command after it was handed over, nothing of the screen.
+Its timers only report, as `PendingRemoteCommands`'s deadlines do: what they cause
+happens in its own BLoC event, guarded by generation and touch.
+
+```text
+starting     touch_hold sent, not answered        moves and keepalives go out
+active       touch_hold answered ok               moves and keepalives go out
+releasing    touch_release sent                   nothing goes out; its answer ends it
+cancelling   touch_cancel sent                    nothing goes out; its answer ends it
+dead         over, whichever way                  no timer, no id, nothing goes out
+```
+
+### Moves, keepalive and seq
+
+```text
+a move goes out      >= 33 ms after the last message sent AND >= 0.002 away from the
+                     last position sent (normalized, straight distance)
+otherwise            kept locally: the latest position replaces it, nothing piles up,
+                     and it goes out when the 33 ms are over if it is still far enough
+keepalive            the last position again, 250 ms after the last message sent,
+                     from the touch_hold on, held still or not, answered or not
+seq                  1, 2, 3... for every move, keepalive, release and cancel;
+                     touch_hold is 0 and carries none; never reused, never lower
+ids                  one per message from the usual generator: hold-N, mv-N, rel-N,
+                     cxl-N; the touch is named apart, t-N, from the same counter
+```
+
+The tablet cancels a touch after 1 s without a valid message; a keepalive every 250 ms
+keeps a finger held still alive. A keepalive to the pixel the finger is on moves nothing
+there. The keepalive is one timer, restarted at each message, never a periodic timer
+per move. It stops with the release or the cancel.
+
+A browser sends far more than 30 pointer moves a second; at most about 30 messages a
+second leave, the last of them always the latest position.
+
+### Off the picture during a touch
+
+Once the hold went out, a pointer that leaves the picture is **clamped** to the nearest
+edge of the picture's own rectangle (`RemoteVideoGeometry.clampToPicture`), then
+normalized: `x` and `y` never leave `0..1`, and a band of `contain` is the edge, never
+part of the tablet's screen. That is what lets an icon be dragged to the border. It
+does not cancel the touch, unlike a swipe.
+
+Before the hold nothing changes: a press that leaves the picture is dropped, never
+clamped, exactly as in [What drops a press](#what-drops-a-press).
+
+### What cancels it
+
+```text
+PointerCancel from the browser            touch_cancel
+a second pointer                          touch_cancel; one finger, never a pinch
+the wheel                                 touch_cancel
+another button pressed                    touch_cancel
+the aspect ratio or the surface size      touch_cancel; the drag is never re-projected
+  changes (a rotation)                      onto the new geometry
+the surface goes away                     touch_cancel, if the channel can carry it
+the picture stops being displayed         touch_cancel
+30 s since the touch_hold                 touch_cancel; never a longer touch than the
+                                            tablet's own limit
+```
+
+`touch_cancel` carries the next `seq` and no coordinates. Its answer ends the touch, and
+nothing settles after it: nothing was dropped. Unanswered, the touch ends locally after
+the same deadline as a release; the tablet's watchdog ends it on its side.
+
+### When the channel, the peer or the session goes
+
+```text
+FINALIZAR ASISTENCIA        a touch_cancel if the channel is open, best effort and never
+  (or the session leaves       awaited; the touch is gone locally at once; the close goes
+   ACTIVE in any way)          on as usual
+assistance terminated,      the same best-effort cancel, then the negotiation is released
+  new negotiation
+channel closing/closed      gone at once, nothing sent: nothing could carry it
+peer failed or closed       idem
+```
+
+The tablet abandons the touch on its own in every one of these. No timer of a touch
+survives its generation.
+
+### Nothing else while it lasts
+
+From the `touch_hold` to the answer that ends the touch, nothing else goes out: no tap,
+swipe, legacy long press, Back, Home, Recents, text, `ime_enter`, and no second touch.
+Back, Home and Recents are disabled, and so are Texto and Acción
+(`RemoteControlStatus.isTouchActive`); the BLoC refuses them anyway. FINALIZAR is not
+held back. The surface keeps listening, because it is what follows the touch's pointer.
+
+The touch is not counted in `pendingCommands`, and none of its messages is a pending
+command: it is its own kind of pending.
+
+### Acks
+
+| Answer | What the web does |
+| --- | --- |
+| `touch_hold` ok | support = supported; `Pulsación mantenida`, or `Arrastrando...` if it already moved. No settle guard: the finger is still down |
+| `touch_hold` `unsupported_command` | see [the fallback](#an-older-tablet-the-legacy-long-press) |
+| `touch_hold` any other error | the touch is over, its message; never retried |
+| `touch_move` refused (`touch_ended`, ...) | the touch is over: timers stop, nothing more is sent, later moves of that pointer are ignored until it goes up, the controls come back; never retried |
+| `touch_release` ok | the touch is over; `Arrastre finalizado` (or `Pulsación finalizada` if it never moved). Settle guard as below |
+| `touch_release` error | the touch is over, its message, the settle guard released |
+| `touch_cancel`, any | the touch is over; `Contacto remoto cancelado` |
+| no answer to a release or a cancel in 8 s | the touch is over; a release that timed out says so |
+
+`touch_ended` is the one code for every reason a touch can end on the tablet; the web
+says *El contacto remoto terminó antes de completar la acción.* and does nothing else.
+After a cancel, a refusal of the hold or of a move is expected and ignored: the cancel's
+own answer ends it.
+
+### The settle guard
+
+Not at the hold: the touch goes on. The release `settlesScreen`, exactly like a long press
+did: the guard starts when the release is sent and ends at
+`max(its ack, release sent + 350 ms)`. A cancel does not settle. Keepalives and moves are
+never held back by anything while the touch lasts.
+
+### An older tablet: the legacy long press
+
+```text
+unknown       the first hold of a negotiation goes out as touch_hold
+supported     a touch_hold was answered ok
+unsupported   a touch_hold was answered unsupported_command
+```
+
+Per negotiation, and forgotten with the peer connection, the generation, the
+`RemoteSession` and the channel. Nothing but those two answers teaches it: not a timeout,
+`accessibility_unavailable`, `session_not_active`, `gesture_rejected`, `touch_ended` or a
+closed channel. No `capabilities` message exists or was added.
+
+On `unsupported_command`:
+
+```text
+1  support = unsupported for this negotiation
+2  the touch ends here; nothing is cancelled on the tablet, where it never ran
+3  if the hold was real (not cancelled): exactly one long_press, where the press started
+4  every later hold of the negotiation is a long_press straight away, without a touch_hold
+```
+
+The older tablet did not run the `touch_hold`, so this never produces two long presses.
+A hold that moved while the answer was on its way still gets the long press where it
+started: **an older tablet cannot drag**, and nothing simulates a drag with a swipe. The
+moves and the release it was sent are answered too, and ignored. From then on a hold is
+the [legacy long press](#long-press), and moving after it sends nothing.
+
+### What it says
+
+| Situation | Line under the picture |
+| --- | --- |
+| `touch_hold` sent | `Manteniendo pulsado...` |
+| `touch_hold` ok, not moved | `Pulsación mantenida` |
+| moves went out | `Arrastrando...` |
+| `touch_release` sent | `Soltando...` |
+| `touch_release` ok | `Arrastre finalizado`, or `Pulsación finalizada` if it never moved |
+| `touch_cancel` sent / answered | `Cancelando contacto remoto...` / `Contacto remoto cancelado` |
+| `touch_ended` | `El contacto remoto terminó antes de completar la acción.` |
+| `accessibility_unavailable` | `El dispositivo no tiene habilitado el control remoto.` |
+| `session_not_active` | `La asistencia no está activa en el dispositivo.` |
+| `gesture_rejected` | `El dispositivo rechazó el contacto remoto.` |
+| release unanswered | `El dispositivo no confirmó el final del contacto remoto.` |
+
+Never `Objeto tomado`, `Elemento seleccionado`, `Objeto movido correctamente` or
+`Drop aceptado`: no acknowledgement says that, only the picture does.
 
 ## When a gesture is accepted
 
@@ -1022,6 +1280,8 @@ text_target_unavailable     a message; never sent again: the technician focuses 
 text_rejected               idem
 ime_action_unavailable      a message; never sent again, nothing stands in for it
 ime_action_rejected         idem
+touch_ended                 the touch is over, a message; never retried, no new touch
+                            started on its own
 ```
 
 The same for a long press, Back, Home, Recents and `ime_enter`, and each of them also ends the
@@ -1051,6 +1311,11 @@ The pointer layer exists only while control is available. A pointer already down
 when it goes away keeps reporting to the old layer, which ignores it, and a layer
 that comes back does not pick it up: only a new press starts a gesture.
 
+A touch session goes with its channel, its peer connection, its session and its
+generation, every timer included, with a best-effort `touch_cancel` when the channel is
+still open: see [When the channel, the peer or the session goes](#when-the-channel-the-peer-or-the-session-goes).
+The support learned for touches goes with them.
+
 The long press timer belongs to the press, and goes with it: at the release, a cancel,
 anything that drops the press, and when the layer is disposed. The layer is disposed when
 the session leaves `ACTIVE`, FINALIZAR is pressed, the peer connection fails, `control`
@@ -1067,7 +1332,8 @@ generation it was started in, and so does the settle time of a global action. An
 id, and an old `back-1`, `recents-1` or `enter-1` cannot end the guard of a new one.
 
 The default generator counts `tap-1`, `swipe-2`, `long-3`, `back-4`, `home-5`,
-`recents-6`, `text-7`, `enter-8`, ... on one counter for as long as the page lives, and does not restart with a negotiation. It is injectable
+`recents-6`, `text-7`, `enter-8`, `t-9`, `hold-10`, `mv-11`, `rel-12`, `cxl-13`, ... on one
+counter for as long as the page lives, and does not restart with a negotiation. It is injectable
 (`RemoteControlCommandIdGenerator`), and never derives an id from coordinates or
 screen content.
 
@@ -1077,6 +1343,101 @@ screen content.
 tests**: it suppresses the accessibility service, and a command would never reach
 `dispatchGesture`. Use `adb logcat`, `dumpsys` and `adb exec-out screencap -p`.
 The toggle and the *full control* dialog are the user's, by hand, always.
+
+### What has been observed of touch sessions on the physical tablet
+
+Chrome and the LUCKYSTAR T10A (**Android 16**, SDK 36, 1200x1920), with a debug
+`remote_control_device` built from `feature/device-remote-control-drag` (4a1f34f) against
+the LAN backend (`http://192.168.18.101:3000`) and installed with `adb install -r` (SHA-256
+`8b6751e3...75b2`), which kept its enrolment (645-589-107). The web ran from
+`feature/web-remote-control-drag`, release build served from `build/web`. PERMITIR, the
+screen-sharing dialog, the accessibility toggle and the rotation were done by hand; no
+mobile-mcp and nothing holding a `UiAutomation`. Frames were read by wrapping
+`RTCDataChannel` in the page (type, id, `touch`, `seq`, coordinates rounded to 3 decimals,
+and the ack). Holds and drags were driven with pointer events dispatched in the page on
+the real picture, through the production gesture layer; taps, swipes and the buttons were
+real clicks. Android's side from `adb exec-out screencap -p` and `dumpsys`.
+
+```text
+disclosure before PERMITIR      "Tocar, mantener pulsado, deslizar y arrastrar elementos
+                                 sobre la pantalla." with the other four lines
+tap on Settings (dock)          tap-9 only, ack ok 67 ms later, Settings opened
+drag up on the launcher         swipe-11 only, at the release; the app drawer opened
+hold 1.5 s still, wallpaper     touch_hold hold-3 502 ms after pointer down; keepalives
+                                seq 1, 2 at 753, 1004 ms; hold ok at 1052 ms; seq 3; release
+                                seq 4 at pointer up, ok 66 ms later; the launcher's
+                                wallpaper menu; "Pulsación finalizada"; 0 tap, 0 long_press
+drag Gemini two columns right   hold 503 ms, first real move 1003 ms, BEFORE the hold's ok
+  (page 1, row of Gemini)       (1029 ms); 47 touch_move; touch_release 1 ms after pointer
+                                up, ok 34 ms later; the icon followed the pointer while it
+                                was down (launcher in drag mode, "Quitar" on top) and was
+                                dropped two columns right
+progressive movement            frames at ~1.4 / 2.0 / 2.7 / 3.4 s of another drag: the
+                                icon moves with the pointer, before any release
+cancel during a drag (Meet)     the launcher showed Meet over the free cell 5; pointercancel
+                                -> touch_cancel cxl-333 seq 37, no coordinates, ok 47 ms
+                                later; Meet went back to cell 2: NOTHING DROPPED;
+                                "Contacto remoto cancelado"
+after the cancel                tap-334 (Settings opened), home-335, a long press
+                                (hold-337 / rel-341, both ok) and further drags: all normal,
+                                same session, no finger left down
+cancel while held still         touch_cancel cxl-375 seq 4, ok 18 ms; no tap, no drop
+keepalive 3.5 s still, then     11 keepalives in the 3.5 s, at most 252 ms apart, no
+  drag                          touch_ended; the drag that followed still moved the icon
+10 short drags (central icon)   10 touch_hold, 170 touch_move, 10 touch_release; 10/10
+                                hold ok, 10/10 release ok; 0 touch_ended, 0 tap, 0 swipe,
+                                0 long_press; the icon stayed in its cell
+final frame                     the picture showed exactly the T10A's layout
+rotation during a still hold    the tablet answered keepalive mv-704 touch_ended (display
+                                changed); nothing else sent for it; the picture turned
+                                1920x1200; 0 drop; the line said "El contacto remoto
+                                terminó antes de completar la acción."; a hold in landscape
+                                worked (hold-706 / rel-709 ok)
+accessibility off by hand       touch_hold hold-712 answered accessibility_unavailable in
+                                15 ms; no touch created, nothing else sent; the message;
+                                session and picture went on; on again: holds ok
+FINALIZAR during a drag         "Arrastrando...", Atrás..Acción disabled, FINALIZAR enabled;
+                                the click -> touch_cancel cxl-794 seq 21 1 ms later, ok
+                                17 ms later; session closed, channel closed, no media
+                                projection, the capture indicator gone; no drop; the
+                                later pointer up sent nothing; touched by hand afterwards,
+                                the tablet responded normally
+```
+
+The cancel by mismatch, the device's workaround for a pointer kept down by
+`willContinue`, is what these frames and pictures show working: `touch_cancel` never
+dropped anything and never left the pointer held.
+
+What the launcher, not the protocol, did, and what the technician will meet on it:
+
+```text
+drop cell        while dragging, Launcher3 shrinks the workspace around its centre and
+                 draws the icon off the finger; the cell it drops on is its own reading,
+                 so a drag of one column from a side column can fall back in place, and
+                 releasing at the starting point of a side icon moved it one column
+page change      holding an icon near an edge for about a second turns the page; holding
+                 longer turns two; a drop then lands on that page, or goes back
+widget           a long press released on the clock widget leaves it in resize mode
+```
+
+Those drags reorganised the tablet's home screen (Gemini and Play Store ended up in other
+rows); the owner chose to leave it that way. Nothing was removed, uninstalled or sent to
+the top drop targets.
+
+Not reproduced on the device: the fallback to `long_press` (no tablet without touch
+sessions is available, and the T10A was not downgraded), the 30 s limit, a peer
+connection or channel failing during a touch. The automated tests cover them.
+
+Two things seen that are about the test, not the product. A pointer event dispatched with
+`pointerType: 'mouse'` shares Flutter web's single mouse device with the real mouse: the
+real mouse moving with no button while the dispatched one was "down" made the engine
+synthesize an up, which the surface rightly sent as a release where the real mouse was
+(clamped to `1, 0`). With a real mouse that cannot happen; the rest of the holds were
+dispatched as `touch`. And a page resize in the middle of a hold dropped the press before
+its timeout, which is the geometry rule doing its job.
+
+Also seen, outside this stage: after PERMITIR the console did not show the request as
+accepted until ACTUALIZAR was pressed.
 
 ### What has been observed of the long press on the physical tablet
 
@@ -1490,9 +1851,19 @@ remote ime_enter ignored <session>
 long_press command sent <id>     long_press confirmed <id>
 long_press timed out <id>        long_press rejected <id>: <code>
 remote long_press ignored <session>
+touch_hold sent hold-7 touch=t-6         touch_hold confirmed hold-7
+touch_move sent mv-8 seq=1 [keepalive] +250ms
+touch_release sent rel-15 seq=8 +1200ms  touch_release confirmed rel-15
+touch_cancel sent cxl-9 seq=3 +600ms     touch_cancel sent cxl-9 seq=3 best effort
+touch_hold rejected <id>: <code>         touch_move rejected <id>: <code>
+touch_hold unsupported hold-7, long_press instead
+touch cancelled touch=t-6                touch ended touch=t-6
+touch lifetime reached touch=t-6         touch_release timed out <id>
+remote hold ignored <session>
 remote control command rejected: <code>
 control message ignored <remoteSessionId>
 control ack ignored <id>
 ```
 
 Coordinates, frames and the text of a `set_text` are not logged, here or on the tablet.
+A touch logs ids, `seq` and milliseconds since its hold, never a position.

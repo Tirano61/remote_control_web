@@ -10,6 +10,7 @@ import '../../../../core/presentation/widgets/console_section.dart';
 import '../../../../core/presentation/widgets/presence_indicator.dart';
 import '../../../remote_control/domain/entities/remote_control_command.dart';
 import '../../../remote_control/domain/entities/remote_control_status.dart';
+import '../../../remote_control/presentation/widgets/remote_control_gesture_layer.dart';
 import '../../../remote_control/presentation/widgets/remote_text_dialog.dart';
 import '../../../technician_realtime/presentation/bloc/signaling_join/signaling_join_bloc.dart';
 import '../../../technician_realtime/presentation/bloc/technician_realtime/technician_realtime_bloc.dart';
@@ -427,7 +428,8 @@ class _RemoteScreen extends StatelessWidget {
           previous.remoteControl.isSettling !=
               current.remoteControl.isSettling ||
           previous.remoteControl.isTextPending !=
-              current.remoteControl.isTextPending,
+              current.remoteControl.isTextPending ||
+          previous.remoteControl.lastTouch != current.remoteControl.lastTouch,
       builder: (context, state) {
         if (!_isShown(state)) return const SizedBox.shrink();
         final canSend = state.canSendRemoteControl;
@@ -437,6 +439,10 @@ class _RemoteScreen extends StatelessWidget {
         // is over: its release is neither a tap nor a swipe. The line below says
         // nothing about it, because it lasts an instant. The same while a text
         // is on its way, or being written.
+        //
+        // A touch session does not stop it: the surface is what follows the
+        // pointer of that touch, and it must stay to report its moves and its
+        // release. What else the pointer tries meanwhile is refused by the BLoC.
         final isListening =
             canSend &&
             !isHeldBack &&
@@ -478,6 +484,45 @@ class _RemoteScreen extends StatelessWidget {
                     ),
                   )
                 : null,
+            // Whether a hold becomes a touch_hold or the legacy long_press is
+            // the BLoC's decision: the surface only reports the pointer. These
+            // may run while the surface is being disposed, so they do not look
+            // anything up in the tree.
+            onRemoteTouch: isListening
+                ? RemoteTouchCallbacks(
+                    onHold: (pointer, point) => _addIfOpen(
+                      sessions,
+                      WebRtcRemoteTouchHoldRequested(
+                        remoteSessionId: remoteSessionId,
+                        pointer: pointer,
+                        point: point,
+                      ),
+                    ),
+                    onMove: (pointer, point) => _addIfOpen(
+                      sessions,
+                      WebRtcRemoteTouchMoved(
+                        remoteSessionId: remoteSessionId,
+                        pointer: pointer,
+                        point: point,
+                      ),
+                    ),
+                    onRelease: (pointer, point) => _addIfOpen(
+                      sessions,
+                      WebRtcRemoteTouchReleased(
+                        remoteSessionId: remoteSessionId,
+                        pointer: pointer,
+                        point: point,
+                      ),
+                    ),
+                    onCancel: (pointer) => _addIfOpen(
+                      sessions,
+                      WebRtcRemoteTouchCancelled(
+                        remoteSessionId: remoteSessionId,
+                        pointer: pointer,
+                      ),
+                    ),
+                  )
+                : null,
             onPictureChanged: (isDisplayed) {
               if (sessions.isClosed) return;
               sessions.add(
@@ -489,6 +534,7 @@ class _RemoteScreen extends StatelessWidget {
             },
             controlStatusBuilder: (context, hasPicture) => _RemoteControlLine(
               isAvailable: canSend && hasPicture,
+              lastTouch: state.remoteControl.lastTouch,
               lastCommand: isGesture ? lastCommand : null,
               lastAction: !isGesture && state.canSendRemoteNavigation
                   ? lastCommand
@@ -504,6 +550,10 @@ class _RemoteScreen extends StatelessWidget {
   /// other session is never displayed under this one.
   bool _isShown(WebRtcSessionState state) =>
       state.hasNegotiation && state.remoteSessionId == remoteSessionId;
+
+  static void _addIfOpen(WebRtcSessionBloc bloc, WebRtcSessionEvent event) {
+    if (!bloc.isClosed) bloc.add(event);
+  }
 }
 
 /// One discreet line under the picture: whether gestures reach the tablet, what
@@ -518,11 +568,15 @@ class _RemoteScreen extends StatelessWidget {
 class _RemoteControlLine extends StatelessWidget {
   const _RemoteControlLine({
     required this.isAvailable,
+    required this.lastTouch,
     required this.lastCommand,
     required this.lastAction,
   });
 
   final bool isAvailable;
+
+  /// The last touch session, when it is more recent than any gesture.
+  final RemoteTouchFeedback? lastTouch;
   final RemoteCommandFeedback? lastCommand;
   final RemoteCommandFeedback? lastAction;
 
@@ -530,11 +584,14 @@ class _RemoteControlLine extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final outcome = lastCommand?.outcome;
+    final touch = lastTouch;
     final isProblem =
         isAvailable &&
-        outcome != null &&
-        outcome != RemoteCommandOutcome.pending &&
-        outcome != RemoteCommandOutcome.confirmed;
+        (touch != null
+            ? touch.phase == RemoteTouchPhase.failed
+            : outcome != null &&
+                  outcome != RemoteCommandOutcome.pending &&
+                  outcome != RemoteCommandOutcome.confirmed);
     final color = isProblem
         ? theme.colorScheme.error
         : theme.colorScheme.onSurfaceVariant;
@@ -547,7 +604,11 @@ class _RemoteControlLine extends StatelessWidget {
         Expanded(
           child: Text(
             key: const Key('remote_control_status'),
-            isAvailable ? _label(lastCommand) : 'Control remoto: no disponible',
+            !isAvailable
+                ? 'Control remoto: no disponible'
+                : touch != null
+                ? _touchLabel(touch)
+                : _label(lastCommand),
             style: theme.textTheme.bodySmall?.copyWith(color: color),
           ),
         ),
@@ -589,7 +650,11 @@ class _RemoteControlLine extends StatelessWidget {
       RemoteCommandKind.swipe ||
       RemoteCommandKind.longPress ||
       RemoteCommandKind.setText ||
-      RemoteCommandKind.imeEnter => last.kind.name,
+      RemoteCommandKind.imeEnter ||
+      RemoteCommandKind.touchHold ||
+      RemoteCommandKind.touchMove ||
+      RemoteCommandKind.touchRelease ||
+      RemoteCommandKind.touchCancel => last.kind.name,
     };
     return switch (last.outcome) {
       RemoteCommandOutcome.pending => 'Enviando $name...',
@@ -604,8 +669,8 @@ class _RemoteControlLine extends StatelessWidget {
       RemoteCommandOutcome.textTargetUnavailable ||
       RemoteCommandOutcome.textRejected ||
       RemoteCommandOutcome.imeActionUnavailable ||
-      RemoteCommandOutcome.imeActionRejected =>
-        'No se pudo ejecutar la acción.',
+      RemoteCommandOutcome.imeActionRejected ||
+      RemoteCommandOutcome.touchEnded => 'No se pudo ejecutar la acción.',
       RemoteCommandOutcome.timedOut => 'El dispositivo no confirmó la acción.',
       RemoteCommandOutcome.incompatible ||
       RemoteCommandOutcome.channelClosed ||
@@ -626,7 +691,8 @@ class _RemoteControlLine extends StatelessWidget {
     RemoteCommandOutcome.gestureRejected ||
     // Never the answer to a text.
     RemoteCommandOutcome.imeActionUnavailable ||
-    RemoteCommandOutcome.imeActionRejected => 'No se pudo ejecutar la acción.',
+    RemoteCommandOutcome.imeActionRejected ||
+    RemoteCommandOutcome.touchEnded => 'No se pudo ejecutar la acción.',
     RemoteCommandOutcome.timedOut => 'El dispositivo no confirmó el texto.',
     RemoteCommandOutcome.notSent ||
     RemoteCommandOutcome.channelClosed => 'No se pudo enviar el texto.',
@@ -651,7 +717,8 @@ class _RemoteControlLine extends StatelessWidget {
           'La asistencia no está activa en el dispositivo.',
         // Never the answer to an IME action.
         RemoteCommandOutcome.gestureRejected ||
-        RemoteCommandOutcome.textRejected => 'No se pudo ejecutar la acción.',
+        RemoteCommandOutcome.textRejected ||
+        RemoteCommandOutcome.touchEnded => 'No se pudo ejecutar la acción.',
         RemoteCommandOutcome.timedOut =>
           'El dispositivo no confirmó la acción.',
         RemoteCommandOutcome.notSent ||
@@ -675,7 +742,8 @@ class _RemoteControlLine extends StatelessWidget {
         RemoteCommandOutcome.textTargetUnavailable ||
         RemoteCommandOutcome.textRejected ||
         RemoteCommandOutcome.imeActionUnavailable ||
-        RemoteCommandOutcome.imeActionRejected =>
+        RemoteCommandOutcome.imeActionRejected ||
+        RemoteCommandOutcome.touchEnded =>
           'No se pudo ejecutar la pulsación prolongada.',
         RemoteCommandOutcome.timedOut =>
           'El dispositivo no confirmó la pulsación prolongada.',
@@ -683,6 +751,37 @@ class _RemoteControlLine extends StatelessWidget {
         RemoteCommandOutcome.channelClosed ||
         RemoteCommandOutcome.notSent => 'Control remoto no disponible',
       };
+
+  /// Where the last touch session is. An `ok` to its hold only says the finger
+  /// is down past the long press timeout, and an `ok` to its release that the
+  /// contact ended: never that anything was picked up, moved or dropped. That is
+  /// only on the picture.
+  static String _touchLabel(RemoteTouchFeedback touch) => switch (touch.phase) {
+    RemoteTouchPhase.holding => 'Manteniendo pulsado...',
+    RemoteTouchPhase.held => 'Pulsación mantenida',
+    RemoteTouchPhase.dragging => 'Arrastrando...',
+    RemoteTouchPhase.releasing => 'Soltando...',
+    RemoteTouchPhase.released =>
+      touch.hasMoved ? 'Arrastre finalizado' : 'Pulsación finalizada',
+    RemoteTouchPhase.cancelling => 'Cancelando contacto remoto...',
+    RemoteTouchPhase.cancelled => 'Contacto remoto cancelado',
+    RemoteTouchPhase.failed => switch (touch.failure) {
+      RemoteCommandOutcome.touchEnded =>
+        'El contacto remoto terminó antes de completar la acción.',
+      RemoteCommandOutcome.accessibilityUnavailable =>
+        'El dispositivo no tiene habilitado el control remoto.',
+      RemoteCommandOutcome.sessionNotActive =>
+        'La asistencia no está activa en el dispositivo.',
+      RemoteCommandOutcome.gestureRejected =>
+        'El dispositivo rechazó el contacto remoto.',
+      RemoteCommandOutcome.timedOut =>
+        'El dispositivo no confirmó el final del contacto remoto.',
+      RemoteCommandOutcome.incompatible ||
+      RemoteCommandOutcome.channelClosed ||
+      RemoteCommandOutcome.notSent => 'Control remoto no disponible',
+      _ => 'No se pudo completar el contacto remoto.',
+    },
+  };
 
   static String _label(RemoteCommandFeedback? last) {
     if (last == null) return 'Control remoto: listo';
@@ -707,7 +806,8 @@ class _RemoteControlLine extends StatelessWidget {
       RemoteCommandOutcome.textTargetUnavailable ||
       RemoteCommandOutcome.textRejected ||
       RemoteCommandOutcome.imeActionUnavailable ||
-      RemoteCommandOutcome.imeActionRejected =>
+      RemoteCommandOutcome.imeActionRejected ||
+      RemoteCommandOutcome.touchEnded =>
         isSwipe
             ? 'No se pudo ejecutar el desplazamiento.'
             : 'No se pudo ejecutar el toque.',
@@ -769,7 +869,10 @@ class _RemoteNavigationControls extends StatelessWidget {
             isThisSession &&
             state.canSendRemoteNavigation &&
             !state.remoteControl.isSettling &&
-            !state.remoteControl.isTextPending;
+            !state.remoteControl.isTextPending &&
+            // A finger is down on the tablet: Back, Home or Recents would act
+            // under it. FINALIZAR is not one of these and stays available.
+            !state.remoteControl.isTouchActive;
         final bloc = context.read<WebRtcSessionBloc>();
 
         // Five of these have to wrap into as few rows as they can: every row

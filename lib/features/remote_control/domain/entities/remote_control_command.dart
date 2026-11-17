@@ -28,6 +28,15 @@ const Duration remoteImeEnterEstimatedWork = Duration(seconds: 5);
 /// may legitimately take.
 const Duration remoteLongPressEstimatedWork = Duration(seconds: 5);
 
+/// How long the tablet may take to answer a `touch_hold`, a `touch_release` or a
+/// `touch_cancel`. The hold is answered once Android's long press timeout has
+/// passed, and a release or a cancel sent during the hold waits for it: the same
+/// five seconds as a long press.
+const Duration remoteTouchEstimatedWork = Duration(seconds: 5);
+
+/// What one moving stroke of a touch lasts at most on the tablet.
+const Duration remoteTouchMoveEstimatedWork = Duration(milliseconds: 100);
+
 /// The kinds of command the protocol defines.
 enum RemoteCommandKind {
   tap,
@@ -37,25 +46,46 @@ enum RemoteCommandKind {
   home,
   recents,
   setText,
-  imeEnter;
+  imeEnter,
+  touchHold,
+  touchMove,
+  touchRelease,
+  touchCancel;
 
   /// A touch on the picture.
-  bool get isGesture => this == tap || this == swipe || this == longPress;
+  bool get isGesture =>
+      this == tap || this == swipe || this == longPress || isTouchMessage;
+
+  /// One message of a touch session: see `RemoteTouchSession`.
+  bool get isTouchMessage =>
+      this == touchHold ||
+      this == touchMove ||
+      this == touchRelease ||
+      this == touchCancel;
 
   /// A global action of Android.
   bool get isNavigation => this == back || this == home || this == recents;
 
   /// What may move the screen somewhere else after Android accepted it, so that
   /// nothing else goes out until it had time to: see `RemoteSettleGuard`. A long
-  /// press may open a menu, a selection or a popup.
+  /// press may open a menu, a selection or a popup, and so may lifting the finger
+  /// of a touch: a drop, or the end of a long press. A `touch_hold` does not: the
+  /// finger is still down, and the touch goes on.
   bool get settlesScreen =>
-      isNavigation || this == imeEnter || this == longPress;
+      isNavigation ||
+      this == imeEnter ||
+      this == longPress ||
+      this == touchRelease;
 
   /// How the ids of this kind start.
   String get idPrefix => switch (this) {
     longPress => 'long',
     setText => 'text',
     imeEnter => 'enter',
+    touchHold => 'hold',
+    touchMove => 'mv',
+    touchRelease => 'rel',
+    touchCancel => 'cxl',
     _ => name,
   };
 
@@ -64,6 +94,10 @@ enum RemoteCommandKind {
     longPress => 'long_press',
     setText => 'set_text',
     imeEnter => 'ime_enter',
+    touchHold => 'touch_hold',
+    touchMove => 'touch_move',
+    touchRelease => 'touch_release',
+    touchCancel => 'touch_cancel',
     _ => name,
   };
 }
@@ -72,8 +106,8 @@ enum RemoteCommandKind {
 ///
 /// Sealed on purpose: the protocol is an agreement with `remote_control_device`,
 /// and a command exists here only once both sides implement it. Today that is
-/// the tap, the swipe, the long press, Back, Home, Recents, the text and the IME
-/// action, and nothing else.
+/// the tap, the swipe, the long press, Back, Home, Recents, the text, the IME
+/// action and the four messages of a touch session, and nothing else.
 sealed class RemoteControlCommand extends Equatable {
   const RemoteControlCommand({required this.id});
 
@@ -277,4 +311,126 @@ final class RemoteImeEnterCommand extends RemoteControlCommand {
 
   @override
   String toString() => 'RemoteImeEnterCommand($id)';
+}
+
+/// Puts a finger down at [point] on the tablet and keeps it down past Android's
+/// long press timeout: the start of a touch session named [touch].
+///
+/// It is the touch's `seq` 0, and carries none. Its `ok` only says the finger is
+/// still down, has been down long enough for Android to read a long press, and
+/// the touch goes on: never that anything was picked up.
+final class RemoteTouchHoldCommand extends RemoteControlCommand {
+  const RemoteTouchHoldCommand({
+    required super.id,
+    required this.touch,
+    required this.point,
+  });
+
+  /// Names the finger, and is shared by every message about it. Opaque to the
+  /// tablet, and meaningless outside this peer connection.
+  final String touch;
+
+  /// Where the press started, as it was recognised: not wherever the pointer
+  /// drifted, by less than the drag threshold, while it was being held.
+  final NormalizedRemotePoint point;
+
+  @override
+  RemoteCommandKind get kind => RemoteCommandKind.touchHold;
+
+  @override
+  Duration get estimatedWork => remoteTouchEstimatedWork;
+
+  @override
+  List<Object?> get props => [id, touch, point];
+
+  /// The ids only: coordinates are not logged.
+  @override
+  String toString() => 'RemoteTouchHoldCommand($id, $touch)';
+}
+
+/// Moves the finger of [touch] to [point] without lifting it.
+///
+/// Also what a keepalive is: the same position again, which moves nothing on the
+/// tablet and tells it the sender is still there. A move that is taken is never
+/// answered; one that is not is answered with its own [id].
+final class RemoteTouchMoveCommand extends RemoteControlCommand {
+  const RemoteTouchMoveCommand({
+    required super.id,
+    required this.touch,
+    required this.seq,
+    required this.point,
+  }) : assert(seq >= 1);
+
+  final String touch;
+
+  /// Greater than any `seq` sent before for [touch].
+  final int seq;
+
+  final NormalizedRemotePoint point;
+
+  @override
+  RemoteCommandKind get kind => RemoteCommandKind.touchMove;
+
+  @override
+  Duration get estimatedWork => remoteTouchMoveEstimatedWork;
+
+  @override
+  List<Object?> get props => [id, touch, seq, point];
+
+  /// The ids only: coordinates are not logged.
+  @override
+  String toString() => 'RemoteTouchMoveCommand($id, $touch, seq $seq)';
+}
+
+/// Lifts the finger of [touch] at [point]. Its `ok` says Android received the end
+/// of the contact: not that anything was dropped, or dropped where it was aimed.
+final class RemoteTouchReleaseCommand extends RemoteControlCommand {
+  const RemoteTouchReleaseCommand({
+    required super.id,
+    required this.touch,
+    required this.seq,
+    required this.point,
+  }) : assert(seq >= 1);
+
+  final String touch;
+  final int seq;
+  final NormalizedRemotePoint point;
+
+  @override
+  RemoteCommandKind get kind => RemoteCommandKind.touchRelease;
+
+  @override
+  Duration get estimatedWork => remoteTouchEstimatedWork;
+
+  @override
+  List<Object?> get props => [id, touch, seq, point];
+
+  /// The ids only: coordinates are not logged.
+  @override
+  String toString() => 'RemoteTouchReleaseCommand($id, $touch, seq $seq)';
+}
+
+/// Takes the finger of [touch] away without lifting it: Android sees a cancel,
+/// never an up, so nothing being dragged is dropped. No coordinates.
+final class RemoteTouchCancelCommand extends RemoteControlCommand {
+  const RemoteTouchCancelCommand({
+    required super.id,
+    required this.touch,
+    required this.seq,
+  }) : assert(seq >= 1);
+
+  final String touch;
+  final int seq;
+
+  @override
+  RemoteCommandKind get kind => RemoteCommandKind.touchCancel;
+
+  @override
+  Duration get estimatedWork => remoteTouchEstimatedWork;
+
+  @override
+  List<Object?> get props => [id, touch, seq];
+
+  @override
+  String toString() => 'RemoteTouchCancelCommand($id, $touch, seq $seq)';
 }

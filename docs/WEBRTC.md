@@ -1,7 +1,8 @@
 # WebRTC on the technician console — decisions
 
-Stage: Prompt 18 (the tablet's screen is displayed, a click sends a tap, a drag
-sends a swipe, holding the pointer still sends a long press, three buttons send Back,
+Stage: Prompt 19 (the tablet's screen is displayed, a click sends a tap, a drag
+sends a swipe, holding the pointer still puts a remote finger down that follows the
+pointer until it goes up, a long press on an older tablet, three buttons send Back,
 Home and Recents, a dialog sends a text to the focused field and Acción runs its IME
 action; see [CONTROL_CHANNEL.md](CONTROL_CHANNEL.md)).
 
@@ -118,7 +119,8 @@ Its state (`connecting`, `open`, `closing`, `closed`) is tracked apart from the
 peer connection state: `connected` does not imply the channel is already open.
 
 It carries eight commands, the tap, the swipe, the long press, Back, Home, Recents,
-`set_text` and `ime_enter`, and their acknowledgements. The protocol and what each side does with it are
+`set_text` and `ime_enter`, the four messages of a touch session, `touch_hold`,
+`touch_move`, `touch_release` and `touch_cancel`, and their acknowledgements. The protocol and what each side does with it are
 in [CONTROL_CHANNEL.md](CONTROL_CHANNEL.md). `set_text` is the only one whose content is
 sensitive: it crosses this channel because that is the operation, and is not logged or
 kept ([Remote text privacy](CONTROL_CHANNEL.md#remote-text-privacy)). Keys, a cursor,
@@ -148,6 +150,23 @@ The web decides **when** the technician means a long press (Flutter's
 (`getLongPressTimeout() + 100 ms`), and no duration crosses the channel. It asks for the
 picture really displayed and nothing pending, like Acción, and settles like a global
 action. See [CONTROL_CHANNEL.md](CONTROL_CHANNEL.md#long-press).
+
+Since Prompt 19 that `long_press` is the fallback. A hold is first a **touch session**:
+
+```text
+web hold recognition   -> touch_hold     {"v":1,"type":"touch_hold","id":"hold-9","touch":"t-8","x":0.41,"y":0.52}
+move after the hold    -> touch_move     a stream: <= ~30/s, latest point wins, keepalive every 250 ms
+up                     -> touch_release  the finger is lifted there
+cancel                 -> touch_cancel   the finger is taken away, never a release
+```
+
+The web decides when there is a hold or a drag; the device keeps one continuous Android
+pointer across `dispatchGesture` calls (`willContinue` / `continueStroke`). Moves, the
+release and the cancel never wait for the hold's acknowledgement, and keepalives start
+when the hold is sent. Support is learned per negotiation from the first hold's answer:
+`ok` means touch sessions, `unsupported_command` means `long_press` from then on. Nothing
+else is negotiated, and no `capabilities` message exists. See
+[CONTROL_CHANNEL.md](CONTROL_CHANNEL.md#hold-and-drag-touch-sessions).
 
 ## The screen: one `recvonly` video section
 
@@ -337,12 +356,16 @@ attached, the surface shows **"Esperando pantalla del dispositivo..."**. That
 is decided by the renderer reporting a size, never by a timer.
 
 Over a real picture, and only while remote control can be used, a layer on top
-of the view turns clicks into taps, drags into swipes and holds into long presses.
+of the view turns clicks into taps, drags into swipes and holds into a remote touch
+that follows the pointer until it goes up (a long press on an older tablet). While that
+touch lasts the layer stays, because it is what follows the pointer, and a pointer that
+leaves the picture is clamped to the picture's edge instead of dropped.
 The view itself is not touched, and the keyboard is not listened to. The wheel sends
 nothing. See
 [CONTROL_CHANNEL.md](CONTROL_CHANNEL.md#tap-swipe-or-long-press).
 
-For the 350 ms after a global action, an IME action or a long press is sent, or until
+For the 350 ms after a global action, an IME action, a long press or the release of a
+touch is sent, or until
 it is answered if that takes longer, the layer is not there: the transition is still
 running, so a click would land somewhere the technician did not aim at. The picture itself keeps arriving and
 the renderer is left alone. See
@@ -360,6 +383,8 @@ signals it, it will have to be a contract between both apps first.
 
 ```text
 peer connection failed / closed   negotiation released  -> surface removed
+                                  (a touch still down is forgotten at once; the
+                                  tablet abandons it on its side)
 WebRtcSessionTerminated           (FINALIZAR, closed, sign out) -> idem
 RemoteSession CLOSED / gone       assistance block removed      -> idem
 RemoteSession id changes          surface keyed by id           -> new renderer

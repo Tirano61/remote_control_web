@@ -43,6 +43,7 @@ class RemoteScreenView extends StatefulWidget {
     this.onRemoteTap,
     this.onRemoteSwipe,
     this.onRemoteLongPress,
+    this.onRemoteTouch,
     this.controlStatusBuilder,
     this.onPictureChanged,
     super.key,
@@ -72,6 +73,11 @@ class RemoteScreenView extends StatefulWidget {
   /// Called with where a press started once it has been held still long enough,
   /// while the pointer is still down. `null` exactly when [onRemoteTap] is.
   final ValueChanged<NormalizedRemotePoint>? onRemoteLongPress;
+
+  /// When given together with the others, a press held still is followed as a
+  /// remote touch until it goes up, instead of [onRemoteLongPress]: see
+  /// [RemoteControlGestureLayer.onTouch].
+  final RemoteTouchCallbacks? onRemoteTouch;
 
   /// Builds what is said about remote control under the surface. Only this
   /// widget knows whether a picture is really being displayed: a track exists
@@ -141,6 +147,7 @@ class _RemoteScreenViewState extends State<RemoteScreenView> {
         final onRemoteTap = widget.onRemoteTap;
         final onRemoteSwipe = widget.onRemoteSwipe;
         final onRemoteLongPress = widget.onRemoteLongPress;
+        final onRemoteTouch = widget.onRemoteTouch;
         final controlStatusBuilder = widget.controlStatusBuilder;
 
         return Column(
@@ -192,6 +199,7 @@ class _RemoteScreenViewState extends State<RemoteScreenView> {
                                   onTap: onRemoteTap,
                                   onSwipe: onRemoteSwipe,
                                   onLongPress: onRemoteLongPress,
+                                  onTouch: onRemoteTouch,
                                 ),
                             ],
                           ),

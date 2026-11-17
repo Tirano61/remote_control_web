@@ -33,6 +33,10 @@ class FakeWebRtcPeerClient implements WebRtcPeerClient {
   /// Keeps a creation in flight so the test can interleave something with it.
   Future<void>? createGate;
 
+  /// Every session created from now on behaves like a tablet whose application
+  /// predates touch sessions: see [FakeWebRtcPeerSession.refusesTouchSessions].
+  bool tabletRefusesTouchSessions = false;
+
   FakeWebRtcPeerSession get last => sessions.last;
 
   @override
@@ -45,7 +49,8 @@ class FakeWebRtcPeerClient implements WebRtcPeerClient {
     if (gate != null) await gate;
     final error = createError;
     if (error != null) throw error;
-    final session = FakeWebRtcPeerSession(remoteSessionId);
+    final session = FakeWebRtcPeerSession(remoteSessionId)
+      ..refusesTouchSessions = tabletRefusesTouchSessions;
     sessions.add(session);
     return session;
   }
@@ -84,6 +89,15 @@ class FakeWebRtcPeerSession implements WebRtcPeerSession {
 
   /// What the channel answers when asked to send.
   bool acceptsRemoteControlCommands = true;
+
+  /// A tablet that does not know `touch_*`: it answers each of them
+  /// `unsupported_command` and runs none. They are kept apart, in
+  /// [refusedTouchMessages], so that [sentRemoteControlCommands] holds what such
+  /// a tablet would actually run.
+  bool refusesTouchSessions = false;
+
+  /// The touch messages a tablet that [refusesTouchSessions] answered.
+  final List<RemoteControlCommand> refusedTouchMessages = [];
 
   bool get isClosed => closeCount > 0;
 
@@ -130,6 +144,16 @@ class FakeWebRtcPeerSession implements WebRtcPeerSession {
   @override
   Future<bool> sendRemoteControlCommand(RemoteControlCommand command) async {
     if (!acceptsRemoteControlCommands) return false;
+    if (refusesTouchSessions && command.kind.isTouchMessage) {
+      refusedTouchMessages.add(command);
+      scheduleMicrotask(
+        () => emitRemoteControlAck(
+          command.id,
+          error: RemoteControlError.unsupportedCommand,
+        ),
+      );
+      return true;
+    }
     sentRemoteControlCommands.add(command);
     return true;
   }

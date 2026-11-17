@@ -1254,7 +1254,14 @@ void main() {
       expect(renderers.created, hasLength(1));
     });
 
+    // The legacy long press, as a tablet whose application predates touch
+    // sessions gets it: the hold goes out as a touch_hold, is answered
+    // unsupported_command, and the long press goes out instead. That first
+    // round trip uses the ids t-1 and hold-2. A tablet that runs touch sessions
+    // is in 'Mantener pulsado y arrastrar'.
     group('Mantener pulsado', () {
+      setUp(() => peers.tabletRefusesTouchSessions = true);
+
       const holdTime = RemoteControlGestureLayer.longPressTimeout;
       final closeButton = find.byKey(const Key('close_remote_session_button'));
       final backButton = find.byKey(const Key('remote_back_button'));
@@ -1285,24 +1292,25 @@ void main() {
 
         expect(sent(), const [
           RemoteLongPressCommand(
-            id: 'long-1',
+            id: 'long-3',
             point: NormalizedRemotePoint(0.5, 0.5),
           ),
         ]);
+        expect(peers.last.refusedTouchMessages.map((c) => c.id), ['hold-2']);
         expect(statusLine(tester), 'Manteniendo pulsado...');
 
         await gesture.up();
         await settleUi(tester);
         expect(sent(), hasLength(1));
 
-        peers.last.emitRemoteControlAck('long-1');
+        peers.last.emitRemoteControlAck('long-3');
         await settleUi(tester);
         expect(statusLine(tester), 'Pulsación prolongada enviada');
         expect(sent(), hasLength(1));
 
         // The next click is a tap again.
         await clickCentre(tester);
-        expect(sent().map((c) => c.id), ['long-1', 'tap-2']);
+        expect(sent().map((c) => c.id), ['long-3', 'tap-4']);
       });
 
       testWidgets('a short click is still a tap and nothing else', (
@@ -1381,7 +1389,7 @@ void main() {
         expect(remoteSessions.closedIds, hasLength(1));
         expect(statusLine(tester), 'Control remoto: no disponible');
 
-        session.emitRemoteControlAck('long-1');
+        session.emitRemoteControlAck('long-3');
         await settleUi(tester);
         expect(statusLine(tester), 'Control remoto: no disponible');
 
@@ -1483,14 +1491,14 @@ void main() {
             await gesture.up();
             await settleUi(tester);
 
-            peers.last.emitRemoteControlAck('long-1', error: error);
+            peers.last.emitRemoteControlAck('long-3', error: error);
             await settleUi(tester);
 
             expect(statusLine(tester), message);
             expect(sent(), hasLength(1));
             // Nothing is animating: the next gesture can go out at once.
             await clickCentre(tester);
-            expect(sent().map((c) => c.id), ['long-1', 'tap-2']);
+            expect(sent().map((c) => c.id), ['long-3', 'tap-4']);
           });
         });
 
@@ -1512,6 +1520,221 @@ void main() {
           await tester.pump(const Duration(seconds: 30));
           expect(sent(), hasLength(1));
         });
+      });
+    });
+
+    // A tablet that runs touch sessions: a hold is a touch_hold, the pointer is
+    // followed while it stays down, and letting go is a touch_release.
+    group('Mantener pulsado y arrastrar', () {
+      const holdTime = RemoteControlGestureLayer.longPressTimeout;
+      final closeButton = find.byKey(const Key('close_remote_session_button'));
+      final backButton = find.byKey(const Key('remote_back_button'));
+      final homeButton = find.byKey(const Key('remote_home_button'));
+      final recentsButton = find.byKey(const Key('remote_recents_button'));
+      final textButton = find.byKey(const Key('remote_text_button'));
+      final imeButton = find.byKey(const Key('remote_ime_enter_button'));
+
+      List<RemoteControlCommand> sent() => peers.last.sentRemoteControlCommands;
+      List<String> types() => sent().map((c) => c.kind.logName).toList();
+
+      bool isEnabled(WidgetTester tester, Finder button) =>
+          tester.widget<OutlinedButton>(button).onPressed != null;
+
+      Future<TestGesture> holdCentre(WidgetTester tester) async {
+        final gesture = await tester.startGesture(tester.getCenter(surface));
+        await tester.pump(holdTime);
+        await tester.pump();
+        await tester.pump();
+        return gesture;
+      }
+
+      testWidgets('hold, drag and drop: one touch, and nothing else', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+        final box = tester.getRect(surface);
+
+        final gesture = await holdCentre(tester);
+        expect(sent().single, isA<RemoteTouchHoldCommand>());
+        expect(statusLine(tester), 'Manteniendo pulsado...');
+
+        final hold = sent().single as RemoteTouchHoldCommand;
+        expect(hold.point, const NormalizedRemotePoint(0.5, 0.5));
+        peers.last.emitRemoteControlAck(hold.id);
+        await tester.pump();
+        await tester.pump();
+        expect(statusLine(tester), 'Pulsación mantenida');
+
+        for (var i = 1; i <= 5; i++) {
+          await gesture.moveTo(Offset(box.center.dx + i * 20, box.center.dy));
+          await tester.pump(const Duration(milliseconds: 50));
+        }
+        expect(statusLine(tester), 'Arrastrando...');
+
+        await gesture.up();
+        await tester.pump();
+        await tester.pump();
+        expect(statusLine(tester), 'Soltando...');
+        final release = sent().last as RemoteTouchReleaseCommand;
+        expect(release.point.x, closeTo(0.5 + 100 / box.width, 1e-9));
+
+        peers.last.emitRemoteControlAck(release.id);
+        await settleUi(tester);
+        expect(statusLine(tester), 'Arrastre finalizado');
+
+        expect(types().first, 'touch_hold');
+        expect(types().last, 'touch_release');
+        expect(types().where((t) => t == 'touch_move'), isNotEmpty);
+        expect(
+          types().where((t) => t == 'tap' || t == 'swipe' || t == 'long_press'),
+          isEmpty,
+        );
+
+        // The next click is a tap again, once the drop had its settle time.
+        await tester.pump(const Duration(milliseconds: 100));
+        final before = sent().length;
+        await clickCentre(tester);
+        expect(sent().length, before + 1);
+        expect(sent().last, isA<RemoteTapCommand>());
+      });
+
+      testWidgets('held still: keepalives, then the release', (tester) async {
+        await pumpAssistance(tester);
+        final gesture = await holdCentre(tester);
+        peers.last.emitRemoteControlAck(sent().single.id);
+
+        await tester.pump(const Duration(milliseconds: 600));
+        final keepalives = sent().whereType<RemoteTouchMoveCommand>().toList();
+        expect(keepalives, hasLength(2));
+        expect(
+          keepalives.every(
+            (m) => m.point == const NormalizedRemotePoint(0.5, 0.5),
+          ),
+          isTrue,
+        );
+
+        await gesture.up();
+        await tester.pump();
+        peers.last.emitRemoteControlAck(sent().last.id);
+        await settleUi(tester);
+
+        expect(statusLine(tester), 'Pulsación finalizada');
+        expect(types().where((t) => t == 'tap'), isEmpty);
+      });
+
+      testWidgets('while it lasts: no other control, FINALIZAR still', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+        final gesture = await holdCentre(tester);
+
+        expect(isEnabled(tester, backButton), isFalse);
+        expect(isEnabled(tester, homeButton), isFalse);
+        expect(isEnabled(tester, recentsButton), isFalse);
+        expect(isEnabled(tester, textButton), isFalse);
+        expect(isEnabled(tester, imeButton), isFalse);
+        expect(
+          tester.widget<ButtonStyleButton>(closeButton).onPressed,
+          isNotNull,
+        );
+        // The surface is still following the pointer.
+        expect(gestureLayer, findsOneWidget);
+
+        await gesture.up();
+        await tester.pump();
+        peers.last.emitRemoteControlAck(sent().last.id);
+        await settleUi(tester);
+        // The release settles like any action that may move the screen.
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(isEnabled(tester, backButton), isTrue);
+      });
+
+      testWidgets('FINALIZAR during a drag: a cancel, never a drop', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+        final session = peers.last;
+        final gate = Completer<void>();
+        remoteSessions.closeGate = gate.future;
+        final box = tester.getRect(surface);
+
+        final gesture = await holdCentre(tester);
+        await gesture.moveTo(box.center + const Offset(40, 0));
+        await tester.pump(const Duration(milliseconds: 50));
+
+        await tester.tap(closeButton);
+        await settleUi(tester);
+
+        expect(remoteSessions.closedIds, hasLength(1));
+        expect(
+          session.sentRemoteControlCommands.last,
+          isA<RemoteTouchCancelCommand>(),
+        );
+        expect(
+          session.sentRemoteControlCommands
+              .whereType<RemoteTouchReleaseCommand>(),
+          isEmpty,
+        );
+
+        await gesture.up();
+        gate.complete();
+        await settleUi(tester);
+        await tester.pump(const Duration(seconds: 40));
+        expect(
+          session.sentRemoteControlCommands.last,
+          isA<RemoteTouchCancelCommand>(),
+        );
+      });
+
+      testWidgets('the browser cancels the pointer: a cancel, never a drop', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+        final gesture = await holdCentre(tester);
+        await gesture.moveBy(const Offset(40, 0));
+        await tester.pump(const Duration(milliseconds: 50));
+
+        await gesture.cancel();
+        await tester.pump();
+        await tester.pump();
+
+        expect(sent().last, isA<RemoteTouchCancelCommand>());
+        expect(sent().whereType<RemoteTouchReleaseCommand>(), isEmpty);
+        peers.last.emitRemoteControlAck(sent().last.id);
+        await settleUi(tester);
+        expect(statusLine(tester), 'Contacto remoto cancelado');
+
+        // Nothing settles after a cancel: a click is a tap at once.
+        await clickCentre(tester);
+        expect(sent().last, isA<RemoteTapCommand>());
+      });
+
+      testWidgets('touch_ended: the technician is told, nothing is retried', (
+        tester,
+      ) async {
+        await pumpAssistance(tester);
+        final gesture = await holdCentre(tester);
+        await gesture.moveBy(const Offset(40, 0));
+        await tester.pump(const Duration(milliseconds: 50));
+        final move = sent().whereType<RemoteTouchMoveCommand>().first;
+
+        peers.last.emitRemoteControlAck(
+          move.id,
+          error: RemoteControlError.touchEnded,
+        );
+        await tester.pump();
+        await tester.pump();
+        expect(
+          statusLine(tester),
+          'El contacto remoto terminó antes de completar la acción.',
+        );
+        final count = sent().length;
+        await gesture.moveBy(const Offset(40, 0));
+        await tester.pump(const Duration(seconds: 2));
+        await gesture.up();
+        await settleUi(tester);
+
+        expect(sent(), hasLength(count));
       });
     });
 
