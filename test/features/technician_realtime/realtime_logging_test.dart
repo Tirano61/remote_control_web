@@ -14,6 +14,7 @@ const String secretToken = 'eyJhbGciOiJIUzI1NiJ9.SUPER-SECRET-JWT.signature';
 void main() {
   const sessionId = '3d1b9e64-9a0f-4c88-9d0a-6f2a5c7e8b10';
   const supportRequestId = '8f14e45f-ceea-4d3c-b4e2-2f4b3c9a1d77';
+  const deviceId = '550e8400-e29b-41d4-a716-446655440000';
 
   test('a full realtime lifecycle never prints the User JWT', () async {
     final factory = RecordingGatewayFactory();
@@ -60,6 +61,10 @@ void main() {
           TechnicianRealtimeContract.supportRequestQueueUpdatedEvent,
           {'supportRequestId': supportRequestId},
         );
+        gateway.emitServerEvent(
+          TechnicianRealtimeContract.devicePresenceUpdatedEvent,
+          {'deviceId': deviceId},
+        );
         gateway.dropConnection();
         gateway.reportConnectError({'message': 'Unauthorized'});
         await client.disconnect();
@@ -96,5 +101,6 @@ void main() {
       output,
       contains('support-request:queue-updated received $supportRequestId'),
     );
+    expect(output, contains('device:presence-updated received $deviceId'));
   });
 }

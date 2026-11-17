@@ -6,6 +6,7 @@ import '../../../core/logging/debug_log.dart';
 import '../../signaling/data/signaling_contract.dart';
 import '../../signaling/data/signaling_transport.dart';
 import '../domain/client/technician_realtime_client.dart';
+import '../domain/entities/device_presence_updated_notice.dart';
 import '../domain/entities/join_remote_session_result.dart';
 import '../domain/entities/remote_session_active_notice.dart';
 import '../domain/entities/remote_session_closed_notice.dart';
@@ -17,6 +18,7 @@ import '../domain/entities/technician_realtime_status.dart';
 import 'gateway/realtime_connect_error.dart';
 import 'gateway/realtime_socket_gateway.dart';
 import 'gateway/socket_io_realtime_socket_gateway.dart';
+import 'models/device_presence_updated_notice_dto.dart';
 import 'models/join_remote_session_ack_dto.dart';
 import 'models/remote_session_active_notice_dto.dart';
 import 'models/remote_session_closed_notice_dto.dart';
@@ -85,6 +87,9 @@ class TechnicianRealtimeClientImpl
   final StreamController<SupportRequestQueueUpdatedNotice>
   _supportRequestQueueUpdatedController =
       StreamController<SupportRequestQueueUpdatedNotice>.broadcast();
+  final StreamController<DevicePresenceUpdatedNotice>
+  _devicePresenceUpdatedController =
+      StreamController<DevicePresenceUpdatedNotice>.broadcast();
 
   /// Relayed `webrtc:*` events, forwarded raw to the signaling client.
   final StreamController<SignalingWireEvent> _signalingController =
@@ -128,6 +133,10 @@ class TechnicianRealtimeClientImpl
   @override
   Stream<SupportRequestQueueUpdatedNotice> get supportRequestQueueUpdated =>
       _supportRequestQueueUpdatedController.stream;
+
+  @override
+  Stream<DevicePresenceUpdatedNotice> get devicePresenceUpdated =>
+      _devicePresenceUpdatedController.stream;
 
   @override
   Stream<RemoteSessionPeerJoinedNotice> get peerJoined =>
@@ -272,6 +281,21 @@ class TechnicianRealtimeClientImpl
       },
     );
 
+    // Registered once per gateway, like every listener above: a Socket.IO
+    // reconnection reuses the gateway, and a replaced one is disposed with its
+    // handlers, which the identity check makes inert in the meantime.
+    gateway.onEvent(TechnicianRealtimeContract.devicePresenceUpdatedEvent, (
+      data,
+    ) {
+      if (!identical(_gateway, gateway)) return;
+      final notice = DevicePresenceUpdatedNoticeDto.fromEvent(data);
+      if (notice == null) return;
+      logDebug('device:presence-updated received ${notice.deviceId}');
+      if (!_devicePresenceUpdatedController.isClosed) {
+        _devicePresenceUpdatedController.add(notice);
+      }
+    });
+
     _emit(const TechnicianRealtimeConnecting());
     gateway.connect();
   }
@@ -350,6 +374,7 @@ class TechnicianRealtimeClientImpl
     await _peerJoinedController.close();
     await _supportRequestUpdatedController.close();
     await _supportRequestQueueUpdatedController.close();
+    await _devicePresenceUpdatedController.close();
     await _signalingController.close();
   }
 

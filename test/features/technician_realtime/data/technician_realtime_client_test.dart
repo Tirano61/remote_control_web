@@ -855,6 +855,183 @@ void main() {
     });
   });
 
+  group('device:presence-updated', () {
+    const deviceId = '550e8400-e29b-41d4-a716-446655440000';
+    const otherDeviceId = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+    const event = TechnicianRealtimeContract.devicePresenceUpdatedEvent;
+
+    test('a valid payload is published as a typed notice, without a join', () async {
+      await client.connect();
+      final gateway = factory.last;
+      gateway.completeHandshake();
+
+      final received = client.devicePresenceUpdated.first;
+      gateway.emitServerEvent(event, {'deviceId': deviceId});
+
+      expect((await received).deviceId, deviceId);
+      // Broadcast to every console: nothing is emitted back, nothing joined.
+      expect(gateway.emitted, isEmpty);
+      expect(client.joinedRemoteSessionId, isNull);
+      expect(factory.gateways, hasLength(1));
+    });
+
+    test('an invalid payload produces no notice and does not throw', () async {
+      await client.connect();
+      final gateway = factory.last;
+      gateway.completeHandshake();
+
+      var received = 0;
+      client.devicePresenceUpdated.listen((_) => received++);
+      for (final data in <Object?>[
+        null,
+        'presence-updated',
+        <Object?>[deviceId],
+        <String, Object?>{},
+        {'deviceId': null},
+        {'deviceId': 42},
+        {'deviceId': ''},
+        {'publicId': '132-491-092'},
+      ]) {
+        gateway.emitServerEvent(event, data);
+      }
+      await Future<void>.delayed(Duration.zero);
+
+      expect(received, 0);
+    });
+
+    test('the listener is registered exactly once per socket', () async {
+      await client.connect();
+      final gateway = factory.last;
+      // A second connect while one is up must not add a second handler.
+      await client.connect();
+
+      expect(factory.gateways, hasLength(1));
+      expect(gateway.eventRegistrations[event], 1);
+    });
+
+    test('a dropped connection keeps a single listener', () async {
+      await client.connect();
+      final gateway = factory.last;
+      gateway.completeHandshake();
+      var received = 0;
+      client.devicePresenceUpdated.listen((_) => received++);
+
+      // Socket.IO reconnects the same socket: no new gateway, no new listener.
+      gateway.dropConnection();
+      gateway.completeHandshake();
+      gateway.emitServerEvent(event, {'deviceId': deviceId});
+      await Future<void>.delayed(Duration.zero);
+
+      expect(factory.gateways, hasLength(1));
+      expect(gateway.eventRegistrations[event], 1);
+      expect(received, 1);
+    });
+
+    test('a replaced socket is ignored and the new one listens once', () async {
+      await client.connect();
+      final first = factory.last;
+      first.completeHandshake();
+      var received = 0;
+      client.devicePresenceUpdated.listen((_) => received++);
+
+      await client.disconnect();
+      await client.connect();
+      final second = factory.last;
+      second.completeHandshake();
+      expect(second, isNot(same(first)));
+      // The old socket and its handlers are released.
+      expect(first.disposeCount, 1);
+
+      first.emitServerEvent(event, {'deviceId': deviceId});
+      second.emitServerEvent(event, {'deviceId': deviceId});
+      await Future<void>.delayed(Duration.zero);
+
+      expect(received, 1);
+      for (final gateway in [first, second]) {
+        expect(gateway.eventRegistrations[event], 1);
+      }
+    });
+
+    test('nothing is delivered after disconnect or dispose', () async {
+      await client.connect();
+      final gateway = factory.last;
+      gateway.completeHandshake();
+      var received = 0;
+      client.devicePresenceUpdated.listen((_) => received++);
+
+      await client.disconnect();
+      gateway.emitServerEvent(event, {'deviceId': deviceId});
+      await Future<void>.delayed(Duration.zero);
+      expect(received, 0);
+      expect(gateway.disposeCount, 1);
+
+      await client.dispose();
+      // A late callback on a closed stream must not throw either.
+      gateway.emitServerEvent(event, {'deviceId': deviceId});
+      await Future<void>.delayed(Duration.zero);
+      expect(received, 0);
+    });
+
+    test('each event is one notice: no duplicates, no merging', () async {
+      await client.connect();
+      final gateway = factory.last;
+      gateway.completeHandshake();
+      final received = <String>[];
+      client.devicePresenceUpdated.listen((n) => received.add(n.deviceId));
+
+      gateway
+        ..emitServerEvent(event, {'deviceId': deviceId})
+        ..emitServerEvent(event, {'deviceId': otherDeviceId})
+        ..emitServerEvent(event, {'deviceId': deviceId});
+      await Future<void>.delayed(Duration.zero);
+
+      // The client neither drops nor multiplies: coalescing GETs is the
+      // BLoCs' job, and it must not hide that two devices changed.
+      expect(received, [deviceId, otherDeviceId, deviceId]);
+    });
+
+    test('it does not interfere with the other notifications', () async {
+      await client.connect();
+      final gateway = factory.last;
+      gateway.completeHandshake();
+
+      var presence = 0;
+      var queue = 0;
+      var updated = 0;
+      var active = 0;
+      var closed = 0;
+      client.devicePresenceUpdated.listen((_) => presence++);
+      client.supportRequestQueueUpdated.listen((_) => queue++);
+      client.supportRequestUpdated.listen((_) => updated++);
+      client.remoteSessionActivated.listen((_) => active++);
+      client.remoteSessionClosed.listen((_) => closed++);
+
+      gateway.emitServerEvent(event, {'deviceId': deviceId});
+      await Future<void>.delayed(Duration.zero);
+      expect((presence, queue, updated, active, closed), (1, 0, 0, 0, 0));
+
+      gateway
+        ..emitServerEvent(
+          TechnicianRealtimeContract.supportRequestQueueUpdatedEvent,
+          {'supportRequestId': deviceId},
+        )
+        ..emitServerEvent(
+          TechnicianRealtimeContract.supportRequestUpdatedEvent,
+          {'supportRequestId': deviceId},
+        )
+        ..emitServerEvent(
+          TechnicianRealtimeContract.remoteSessionActiveEvent,
+          {'remoteSessionId': sessionId},
+        )
+        ..emitServerEvent(
+          TechnicianRealtimeContract.remoteSessionClosedEvent,
+          {'remoteSessionId': sessionId, 'endedBy': 'DEVICE'},
+        );
+      await Future<void>.delayed(Duration.zero);
+      expect((presence, queue, updated, active, closed), (1, 1, 1, 1, 1));
+    });
+  });
+
   group('remote-session:closed', () {
     test('is delivered without having joined anything', () async {
       await client.connect();
