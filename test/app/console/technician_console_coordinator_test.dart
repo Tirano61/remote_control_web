@@ -7,6 +7,9 @@ import 'package:remote_control_web/features/auth/domain/usecases/log_out.dart';
 import 'package:remote_control_web/features/auth/domain/usecases/restore_session.dart';
 import 'package:remote_control_web/features/auth/data/repositories/auth_repository_impl.dart';
 import 'package:remote_control_web/features/auth/presentation/bloc/user_session/user_session_bloc.dart';
+import 'package:remote_control_web/features/devices/domain/entities/device.dart';
+import 'package:remote_control_web/features/devices/domain/usecases/load_devices.dart';
+import 'package:remote_control_web/features/devices/presentation/bloc/devices/devices_bloc.dart';
 import 'package:remote_control_web/features/remote_control/domain/entities/normalized_remote_point.dart';
 import 'package:remote_control_web/features/remote_control/domain/entities/remote_control_ack.dart';
 import 'package:remote_control_web/features/remote_session/data/repositories/remote_session_repository_impl.dart';
@@ -49,6 +52,7 @@ void main() {
   late InMemoryUserTokenStorage storage;
   late FakeRemoteSessionRepository remoteSessions;
   late FakeSupportRequestRepository supportRequests;
+  late FakeDeviceRepository devices;
   late FakeTechnicianRealtimeClient realtime;
   late TechnicianSignalingClientImpl signaling;
   late FakeWebRtcPeerClient peers;
@@ -58,6 +62,7 @@ void main() {
   late TechnicianRealtimeBloc realtimeBloc;
   late SignalingJoinBloc signalingJoinBloc;
   late SupportRequestsBloc supportRequestsBloc;
+  late DevicesBloc devicesBloc;
   late WebRtcSessionBloc webRtcSessionBloc;
   late TechnicianConsoleCoordinator coordinator;
 
@@ -66,6 +71,7 @@ void main() {
     storage = InMemoryUserTokenStorage()..token = 'stored-user-jwt';
     remoteSessions = FakeRemoteSessionRepository();
     supportRequests = FakeSupportRequestRepository();
+    devices = FakeDeviceRepository();
     realtime = FakeTechnicianRealtimeClient();
     // The real signaling client over the fake transport: the coordinator rules
     // are exercised through actual relay acknowledgements, not a script.
@@ -98,6 +104,7 @@ void main() {
       loadSupportRequests: LoadSupportRequests(repository: supportRequests),
       assignSupportRequest: AssignSupportRequest(repository: supportRequests),
     );
+    devicesBloc = DevicesBloc(loadDevices: LoadDevices(repository: devices));
     // The real negotiation logic over a fake peer client: no browser, but the
     // readiness rules are exercised exactly as they run in production.
     webRtcSessionBloc = WebRtcSessionBloc(
@@ -112,6 +119,7 @@ void main() {
       technicianRealtimeBloc: realtimeBloc,
       signalingJoinBloc: signalingJoinBloc,
       supportRequestsBloc: supportRequestsBloc,
+      devicesBloc: devicesBloc,
       webRtcSessionBloc: webRtcSessionBloc,
       realtimeClient: realtime,
       signalingClient: signaling,
@@ -126,6 +134,7 @@ void main() {
       realtimeBloc.close(),
       signalingJoinBloc.close(),
       supportRequestsBloc.close(),
+      devicesBloc.close(),
       webRtcSessionBloc.close(),
     ]);
     await signaling.dispose();
@@ -1595,6 +1604,329 @@ void main() {
 
       expect(queue().waiting, isEmpty);
       expect(queue().failure, isNull);
+    });
+  });
+
+  group('device:presence-updated', () {
+    const otherDeviceId = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+
+    /// The T10A as both sections see it, each from its own GET.
+    Device tablet({required bool isOnline}) => buildDevice(isOnline: isOnline);
+    SupportRequest request({required bool isOnline}) =>
+        buildSupportRequest(isDeviceOnline: isOnline);
+
+    /// Makes the backend answer [isOnline] for the tablet from now on, in
+    /// both collections, exactly like a change in its presence registry.
+    void backendPresence({required bool isOnline}) {
+      devices.devices = [tablet(isOnline: isOnline)];
+      supportRequests.requests = [request(isOnline: isOnline)];
+    }
+
+    /// The console with both collections loaded and the socket up.
+    Future<void> signInWithPresence({required bool isOnline}) async {
+      remoteSessions.current = null;
+      backendPresence(isOnline: isOnline);
+      await signIn();
+      realtime.emitConnected();
+      devicesBloc.add(const DevicesRequested());
+      supportRequestsBloc.add(const SupportRequestsRequested());
+      await settle();
+    }
+
+    DevicesLoaded deviceList() => devicesBloc.state as DevicesLoaded;
+    SupportRequestsLoaded queue() =>
+        supportRequestsBloc.state as SupportRequestsLoaded;
+
+    bool? listPresence([String id = deviceId]) => deviceList().devices
+        .where((device) => device.id == id)
+        .map((device) => device.isOnline)
+        .firstOrNull;
+    bool cardPresence() => queue().requests.single.device!.isOnline;
+
+    test('re-reads GET /devices and GET /support-requests', () async {
+      await signInWithPresence(isOnline: false);
+      final devicesBefore = devices.loadCount;
+      final requestsBefore = supportRequests.loadCount;
+      final currentBefore = remoteSessions.currentCount;
+
+      realtime.emitDevicePresenceUpdated(deviceId);
+      await settle();
+
+      // Both, whichever section the technician happens to be looking at: the
+      // coordinator knows nothing about the screen.
+      expect(devices.loadCount, devicesBefore + 1);
+      expect(supportRequests.loadCount, requestsBefore + 1);
+      // A presence trigger and nothing else.
+      expect(remoteSessions.currentCount, currentBefore);
+      expect(supportRequests.assignedIds, isEmpty);
+      expect(remoteSessions.createdSupportRequestIds, isEmpty);
+      expect(realtime.joinedSessionIds, isEmpty);
+      expect(peers.sessions, isEmpty);
+    });
+
+    test('OFFLINE -> ONLINE reaches both sections without ACTUALIZAR', () async {
+      await signInWithPresence(isOnline: false);
+      expect(listPresence(), isFalse);
+      expect(cardPresence(), isFalse);
+
+      backendPresence(isOnline: true);
+      realtime.emitDevicePresenceUpdated(deviceId);
+      await settle();
+
+      expect(listPresence(), isTrue);
+      expect(cardPresence(), isTrue);
+      expect(deviceList().isRefreshing, isFalse);
+      expect(queue().isRefreshing, isFalse);
+    });
+
+    test('ONLINE -> OFFLINE reaches both sections as well', () async {
+      await signInWithPresence(isOnline: true);
+      expect(listPresence(), isTrue);
+      expect(cardPresence(), isTrue);
+
+      backendPresence(isOnline: false);
+      realtime.emitDevicePresenceUpdated(deviceId);
+      await settle();
+
+      expect(listPresence(), isFalse);
+      expect(cardPresence(), isFalse);
+    });
+
+    test('the event alone never changes a model: REST does', () async {
+      await signInWithPresence(isOnline: false);
+      final devicesGate = Completer<void>();
+      final requestsGate = Completer<void>();
+      devices.loadGate = devicesGate.future;
+      supportRequests.loadGate = requestsGate.future;
+      backendPresence(isOnline: true);
+
+      realtime.emitDevicePresenceUpdated(deviceId);
+      await settle();
+
+      // Both GETs are out; nothing was toggled or copied in the meantime.
+      expect(deviceList().isRefreshing, isTrue);
+      expect(queue().isRefreshing, isTrue);
+      expect(listPresence(), isFalse);
+      expect(cardPresence(), isFalse);
+
+      devicesGate.complete();
+      requestsGate.complete();
+      await settle();
+
+      expect(listPresence(), isTrue);
+      expect(cardPresence(), isTrue);
+    });
+
+    test('an event that REST contradicts leaves what REST says', () async {
+      await signInWithPresence(isOnline: true);
+
+      // The backend still says ONLINE — the tablet bounced back already.
+      realtime.emitDevicePresenceUpdated(deviceId);
+      await settle();
+
+      // Nothing was inverted from the event.
+      expect(listPresence(), isTrue);
+      expect(cardPresence(), isTrue);
+    });
+
+    test('an event for device B never moves device A', () async {
+      remoteSessions.current = null;
+      devices.devices = [
+        tablet(isOnline: false),
+        buildDevice(id: otherDeviceId, publicId: '777-000-111', isOnline: false),
+      ];
+      supportRequests.requests = [request(isOnline: false)];
+      await signIn();
+      realtime.emitConnected();
+      devicesBloc.add(const DevicesRequested());
+      supportRequestsBloc.add(const SupportRequestsRequested());
+      await settle();
+
+      // Only B connected.
+      devices.devices = [
+        tablet(isOnline: false),
+        buildDevice(id: otherDeviceId, publicId: '777-000-111', isOnline: true),
+      ];
+      realtime.emitDevicePresenceUpdated(otherDeviceId);
+      await settle();
+
+      expect(listPresence(otherDeviceId), isTrue);
+      expect(listPresence(deviceId), isFalse);
+      expect(cardPresence(), isFalse);
+      expect(deviceList().devices, hasLength(2));
+    });
+
+    test('duplicated events neither duplicate rows nor pile up GETs', () async {
+      await signInWithPresence(isOnline: false);
+      final devicesBefore = devices.loadCount;
+      final requestsBefore = supportRequests.loadCount;
+      backendPresence(isOnline: true);
+      // A real GET takes a while: the burst lands while the first one travels.
+      final devicesGate = Completer<void>();
+      final requestsGate = Completer<void>();
+      devices.loadGate = devicesGate.future;
+      supportRequests.loadGate = requestsGate.future;
+
+      realtime
+        ..emitDevicePresenceUpdated(deviceId)
+        ..emitDevicePresenceUpdated(deviceId)
+        ..emitDevicePresenceUpdated(deviceId)
+        ..emitDevicePresenceUpdated(otherDeviceId);
+      await settle();
+      devicesGate.complete();
+      requestsGate.complete();
+      await settle();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      // One GET for the first event and a single one more for the rest of
+      // the burst: never one per event.
+      expect(devices.loadCount - devicesBefore, 2);
+      expect(supportRequests.loadCount - requestsBefore, 2);
+      expect(deviceList().devices, hasLength(1));
+      expect(queue().requests, hasLength(1));
+      expect(listPresence(), isTrue);
+      expect(cardPresence(), isTrue);
+    });
+
+    test('an event during a GET in flight is not lost', () async {
+      await signInWithPresence(isOnline: false);
+      final devicesGate = Completer<void>();
+      final requestsGate = Completer<void>();
+      devices.loadGate = devicesGate.future;
+      supportRequests.loadGate = requestsGate.future;
+
+      // ACTUALIZAR: both GETs read the registry while the tablet is OFFLINE.
+      devicesBloc.add(const DevicesRefreshRequested());
+      supportRequestsBloc.add(const SupportRequestsRefreshRequested());
+      await settle();
+      final devicesBefore = devices.loadCount;
+      final requestsBefore = supportRequests.loadCount;
+
+      // The tablet connects and its event arrives while both GETs travel.
+      backendPresence(isOnline: true);
+      realtime.emitDevicePresenceUpdated(deviceId);
+      await settle();
+      expect(devices.loadCount, devicesBefore, reason: 'no GET next to it');
+      expect(supportRequests.loadCount, requestsBefore);
+
+      devicesGate.complete();
+      requestsGate.complete();
+      await settle();
+
+      // The stale answers were followed by one more read each.
+      expect(devices.loadCount, devicesBefore + 1);
+      expect(supportRequests.loadCount, requestsBefore + 1);
+      expect(listPresence(), isTrue);
+      expect(cardPresence(), isTrue);
+    });
+
+    test('OFFLINE -> ONLINE -> OFFLINE with slow responses ends OFFLINE', () async {
+      await signInWithPresence(isOnline: false);
+
+      // ONLINE: its event starts both GETs, and both are slow.
+      final firstDevices = Completer<void>();
+      final firstRequests = Completer<void>();
+      devices.loadGate = firstDevices.future;
+      supportRequests.loadGate = firstRequests.future;
+      backendPresence(isOnline: true);
+      realtime.emitDevicePresenceUpdated(deviceId);
+      await settle();
+
+      // OFFLINE again before they came back; the reads after them are slow
+      // too.
+      final secondDevices = Completer<void>();
+      final secondRequests = Completer<void>();
+      devices.loadGate = secondDevices.future;
+      supportRequests.loadGate = secondRequests.future;
+      backendPresence(isOnline: false);
+      realtime.emitDevicePresenceUpdated(deviceId);
+      await settle();
+
+      firstDevices.complete();
+      firstRequests.complete();
+      await settle();
+      // The intermediate ONLINE is shown while the newer read is running...
+      expect(listPresence(), isTrue);
+      expect(cardPresence(), isTrue);
+      expect(deviceList().isRefreshing, isTrue);
+      expect(queue().isRefreshing, isTrue);
+
+      secondDevices.complete();
+      secondRequests.complete();
+      await settle();
+
+      // ...and the last effective presence is what stays.
+      expect(listPresence(), isFalse);
+      expect(cardPresence(), isFalse);
+      expect(deviceList().isRefreshing, isFalse);
+      expect(queue().isRefreshing, isFalse);
+    });
+
+    test('changes missed while disconnected are reconciled on reconnect', () async {
+      await signInWithPresence(isOnline: false);
+      final devicesBefore = devices.loadCount;
+      final requestsBefore = supportRequests.loadCount;
+
+      realtime.emitReconnecting();
+      await settle();
+      // The tablet connects while the socket is down: its event is lost.
+      backendPresence(isOnline: true);
+      realtime.emitConnected();
+      await settle();
+
+      expect(devices.loadCount, devicesBefore + 1);
+      expect(supportRequests.loadCount, requestsBefore + 1);
+      expect(listPresence(), isTrue);
+      expect(cardPresence(), isTrue);
+    });
+
+    test('the first connection re-reads nothing: the console just loaded', () async {
+      remoteSessions.current = null;
+      backendPresence(isOnline: false);
+      await signIn();
+      devicesBloc.add(const DevicesRequested());
+      await settle();
+      final devicesBefore = devices.loadCount;
+
+      realtime.emitConnected();
+      await settle();
+
+      expect(devices.loadCount, devicesBefore);
+    });
+
+    test('a signed-out console ignores it and drops a pending reload', () async {
+      await signInWithPresence(isOnline: false);
+      final gate = Completer<void>();
+      devices.loadGate = gate.future;
+      realtime.emitDevicePresenceUpdated(deviceId);
+      await settle();
+      // A second invalidation is coalesced behind the GET in flight.
+      realtime.emitDevicePresenceUpdated(deviceId);
+      await settle();
+      final devicesInFlight = devices.loadCount;
+
+      userSessionBloc.add(const UserSessionSignOutRequested());
+      await settle();
+      gate.complete();
+      await settle();
+      realtime.emitDevicePresenceUpdated(deviceId);
+      await settle();
+
+      // Neither the coalesced reload nor a new event costs a request.
+      expect(devices.loadCount, devicesInFlight);
+    });
+
+    test('support request events still leave the device list alone', () async {
+      await signInWithPresence(isOnline: false);
+      final devicesBefore = devices.loadCount;
+
+      realtime
+        ..emitSupportRequestQueueUpdated(requestId)
+        ..emitSupportRequestUpdated(requestId);
+      await settle();
+
+      // Their behaviour is unchanged: they re-read the queue only.
+      expect(devices.loadCount, devicesBefore);
     });
   });
 

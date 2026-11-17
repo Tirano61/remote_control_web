@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:remote_control_web/features/signaling/data/signaling_transport.dart';
 import 'package:remote_control_web/features/technician_realtime/data/gateway/realtime_socket_gateway.dart';
 import 'package:remote_control_web/features/technician_realtime/domain/client/technician_realtime_client.dart';
+import 'package:remote_control_web/features/technician_realtime/domain/entities/device_presence_updated_notice.dart';
 import 'package:remote_control_web/features/technician_realtime/domain/entities/join_remote_session_result.dart';
 import 'package:remote_control_web/features/technician_realtime/domain/entities/remote_session_active_notice.dart';
 import 'package:remote_control_web/features/technician_realtime/domain/entities/remote_session_closed_notice.dart';
@@ -34,6 +35,9 @@ class FakeTechnicianRealtimeClient
   final StreamController<SupportRequestQueueUpdatedNotice>
   _supportRequestQueueUpdatedController =
       StreamController<SupportRequestQueueUpdatedNotice>.broadcast();
+  final StreamController<DevicePresenceUpdatedNotice>
+  _devicePresenceUpdatedController =
+      StreamController<DevicePresenceUpdatedNotice>.broadcast();
 
   TechnicianRealtimeStatus _status = const TechnicianRealtimeDisconnected();
 
@@ -89,6 +93,10 @@ class FakeTechnicianRealtimeClient
   @override
   Stream<SupportRequestQueueUpdatedNotice> get supportRequestQueueUpdated =>
       _supportRequestQueueUpdatedController.stream;
+
+  @override
+  Stream<DevicePresenceUpdatedNotice> get devicePresenceUpdated =>
+      _devicePresenceUpdatedController.stream;
 
   @override
   Stream<RemoteSessionPeerJoinedNotice> get peerJoined =>
@@ -169,6 +177,7 @@ class FakeTechnicianRealtimeClient
     await _peerJoinedController.close();
     await _supportRequestUpdatedController.close();
     await _supportRequestQueueUpdatedController.close();
+    await _devicePresenceUpdatedController.close();
     await _signalingController.close();
   }
 
@@ -242,6 +251,15 @@ class FakeTechnicianRealtimeClient
     if (_supportRequestQueueUpdatedController.isClosed) return;
     _supportRequestQueueUpdatedController.add(
       SupportRequestQueueUpdatedNotice(supportRequestId: supportRequestId),
+    );
+  }
+
+  /// `device:presence-updated`: the effective presence of a device changed.
+  /// Which way is deliberately not said, exactly like the real payload.
+  void emitDevicePresenceUpdated(String deviceId) {
+    if (_devicePresenceUpdatedController.isClosed) return;
+    _devicePresenceUpdatedController.add(
+      DevicePresenceUpdatedNotice(deviceId: deviceId),
     );
   }
 

@@ -15,6 +15,7 @@ remote sessions: create, recover, close
 remote-session:join, with its peerJoined readiness
 remote-session:peer-joined
 remote-session:closed
+device:presence-updated (re-reads devices and support requests)
 webrtc:offer / webrtc:answer / webrtc:ice-candidate relay
 RTCPeerConnection (flutter_webrtc), technician side as the offerer
 the control RTCDataChannel
@@ -80,6 +81,8 @@ flutter build web
 ```text
 docs/backend/ENDPOINTS.md          REST contract (source of truth)
 docs/backend/REALTIME.md           Socket.IO contract (source of truth)
+docs/REALTIME.md                   How the console uses realtime: invalidations,
+                                   coalesced refreshes, reconnection
 docs/SECURITY_TOKEN_STORAGE.md     Why the User JWT lives in browser storage
 docs/WEBRTC.md                     WebRTC decisions of the technician side
 ```
