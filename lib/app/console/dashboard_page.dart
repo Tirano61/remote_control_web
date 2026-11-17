@@ -106,6 +106,7 @@ class _ConsoleCoordinatorScopeState extends State<_ConsoleCoordinatorScope> {
       technicianRealtimeBloc: context.read<TechnicianRealtimeBloc>(),
       signalingJoinBloc: context.read<SignalingJoinBloc>(),
       supportRequestsBloc: context.read<SupportRequestsBloc>(),
+      devicesBloc: context.read<DevicesBloc>(),
       webRtcSessionBloc: context.read<WebRtcSessionBloc>(),
     )..start();
   }

@@ -58,6 +58,19 @@ class TechnicianRealtimeContract {
   /// `support-request:queue-updated`.
   static const String supportRequestIdField = 'supportRequestId';
 
+  /// Server to client domain notification: the effective presence of one
+  /// device changed — `OFFLINE -> ONLINE` or `ONLINE -> OFFLINE`. Requires no
+  /// join and reaches every authenticated socket of the namespace.
+  ///
+  /// Payload: `{ deviceId }`. It does **not** say which way the device went:
+  /// it is an invalidation, a trigger for `GET /devices` and
+  /// `GET /support-requests`, never the state itself.
+  static const String devicePresenceUpdatedEvent = 'device:presence-updated';
+
+  /// The only field of `device:presence-updated`: the internal `Device.id`,
+  /// never the human-friendly `publicId`.
+  static const String deviceIdField = 'deviceId';
+
   /// Server to client readiness notification: the other end of the session
   /// joined its signaling room after this socket did.
   ///

@@ -112,6 +112,14 @@ class FakeDeviceRepository implements DeviceRepository {
   Failure? failureAfterFirstLoad;
   bool _loaded = false;
 
+  /// Keeps a `GET /devices` in flight so other triggers can arrive meanwhile.
+  ///
+  /// Read when the call starts, like the rows: changing [devices] — or
+  /// replacing the gate — while a load waits is a change the GET in flight
+  /// does not see, exactly like a presence change committed after the backend
+  /// already read its registry.
+  Future<void>? loadGate;
+
   int loadCount = 0;
 
   @override
@@ -119,8 +127,11 @@ class FakeDeviceRepository implements DeviceRepository {
     loadCount++;
     final current = _loaded ? failureAfterFirstLoad ?? failure : failure;
     _loaded = true;
+    final snapshot = devices;
+    final gate = loadGate;
+    if (gate != null) await gate;
     if (current != null) return Failed(current);
-    return Success(devices);
+    return Success(snapshot);
   }
 
   @override

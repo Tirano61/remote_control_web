@@ -1,3 +1,4 @@
+import '../entities/device_presence_updated_notice.dart';
 import '../entities/join_remote_session_result.dart';
 import '../entities/remote_session_active_notice.dart';
 import '../entities/remote_session_closed_notice.dart';
@@ -13,9 +14,10 @@ import '../entities/technician_realtime_status.dart';
 /// implementation owns the transport, the reconnection policy and the token.
 ///
 /// It covers the `/technicians` namespace of `docs/backend/REALTIME.md` as far
-/// as this stage needs it — connection, the `support-request:queue-updated`,
-/// `support-request:updated`, `remote-session:active` and
-/// `remote-session:closed` domain notifications and `remote-session:join`.
+/// as this stage needs it — connection, the `device:presence-updated`,
+/// `support-request:queue-updated`, `support-request:updated`,
+/// `remote-session:active` and `remote-session:closed` domain notifications
+/// and `remote-session:join`.
 ///
 /// The `webrtc:*` relay travels over the very same socket, but it is a
 /// different concern and has its own port, `TechnicianSignalingClient`. One
@@ -52,6 +54,13 @@ abstract interface class TechnicianRealtimeClient {
   /// not only the owner of a request. They require no join either, and are a
   /// trigger for `GET /support-requests` as well.
   Stream<SupportRequestQueueUpdatedNotice> get supportRequestQueueUpdated;
+
+  /// `device:presence-updated` notifications: the effective presence of one
+  /// device changed.
+  ///
+  /// They reach every technician and admin, require no join, and carry no
+  /// `isOnline`: an invalidation for `GET /devices` and `GET /support-requests`.
+  Stream<DevicePresenceUpdatedNotice> get devicePresenceUpdated;
 
   /// Opens the namespace with the User JWT that is valid right now.
   ///

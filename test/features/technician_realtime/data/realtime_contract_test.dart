@@ -4,6 +4,7 @@ import 'package:remote_control_web/features/technician_realtime/data/models/join
 import 'package:remote_control_web/features/technician_realtime/data/models/remote_session_active_notice_dto.dart';
 import 'package:remote_control_web/features/technician_realtime/data/models/remote_session_closed_notice_dto.dart';
 import 'package:remote_control_web/features/technician_realtime/data/models/remote_session_peer_joined_dto.dart';
+import 'package:remote_control_web/features/technician_realtime/data/models/device_presence_updated_notice_dto.dart';
 import 'package:remote_control_web/features/technician_realtime/data/models/support_request_queue_updated_notice_dto.dart';
 import 'package:remote_control_web/features/technician_realtime/data/models/support_request_updated_notice_dto.dart';
 import 'package:remote_control_web/features/technician_realtime/data/gateway/realtime_connect_error.dart';
@@ -537,12 +538,86 @@ void main() {
     });
   });
 
+  group('device:presence-updated', () {
+    const deviceId = '550e8400-e29b-41d4-a716-446655440000';
+
+    test('the event name is the documented one', () {
+      expect(
+        TechnicianRealtimeContract.devicePresenceUpdatedEvent,
+        'device:presence-updated',
+      );
+      for (final other in [
+        TechnicianRealtimeContract.supportRequestQueueUpdatedEvent,
+        TechnicianRealtimeContract.supportRequestUpdatedEvent,
+        TechnicianRealtimeContract.remoteSessionActiveEvent,
+        TechnicianRealtimeContract.remoteSessionClosedEvent,
+        TechnicianRealtimeContract.remoteSessionPeerJoinedEvent,
+        TechnicianRealtimeContract.joinEvent,
+      ]) {
+        expect(
+          TechnicianRealtimeContract.devicePresenceUpdatedEvent,
+          isNot(other),
+        );
+      }
+    });
+
+    test('the payload is exactly { deviceId }', () {
+      final notice = DevicePresenceUpdatedNoticeDto.fromEvent({
+        'deviceId': deviceId,
+      });
+
+      expect(notice, isNotNull);
+      expect(notice!.deviceId, deviceId);
+      expect(notice.props, [deviceId]);
+    });
+
+    test('an isOnline in the payload is never read: it is an invalidation', () {
+      // The contract carries no state. Should a field like this ever appear,
+      // the console must still ask REST instead of trusting it.
+      final notice = DevicePresenceUpdatedNoticeDto.fromEvent({
+        'deviceId': deviceId,
+        'isOnline': true,
+        'publicId': '132-491-092',
+      });
+
+      expect(notice!.props, [deviceId]);
+    });
+
+    test('an invalid payload is ignored without throwing', () {
+      for (final data in <Object?>[
+        null,
+        'presence-updated',
+        42,
+        <Object?>[deviceId],
+        <String, Object?>{},
+        {'deviceId': null},
+        {'deviceId': 42},
+        {'deviceId': ''},
+        {'deviceId': '   '},
+        // Neither the public id nor another notice's id is the device id.
+        {'publicId': '132-491-092'},
+        {'supportRequestId': deviceId},
+      ]) {
+        expect(DevicePresenceUpdatedNoticeDto.fromEvent(data), isNull);
+      }
+    });
+
+    test('it reads the documented id field', () {
+      final notice = DevicePresenceUpdatedNoticeDto.fromEvent({
+        TechnicianRealtimeContract.deviceIdField: deviceId,
+      });
+
+      expect(notice!.deviceId, deviceId);
+    });
+  });
+
   group('field names', () {
     test('match the contract exactly', () {
       expect(
         TechnicianRealtimeContract.supportRequestIdField,
         'supportRequestId',
       );
+      expect(TechnicianRealtimeContract.deviceIdField, 'deviceId');
       expect(TechnicianRealtimeContract.authTokenField, 'token');
       expect(
         TechnicianRealtimeContract.remoteSessionIdField,

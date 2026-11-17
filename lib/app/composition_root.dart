@@ -238,6 +238,7 @@ class AppDependencies {
     required TechnicianRealtimeBloc technicianRealtimeBloc,
     required SignalingJoinBloc signalingJoinBloc,
     required SupportRequestsBloc supportRequestsBloc,
+    required DevicesBloc devicesBloc,
     required WebRtcSessionBloc webRtcSessionBloc,
   }) => TechnicianConsoleCoordinator(
     userSessionBloc: userSessionBloc,
@@ -245,6 +246,7 @@ class AppDependencies {
     technicianRealtimeBloc: technicianRealtimeBloc,
     signalingJoinBloc: signalingJoinBloc,
     supportRequestsBloc: supportRequestsBloc,
+    devicesBloc: devicesBloc,
     webRtcSessionBloc: webRtcSessionBloc,
     realtimeClient: technicianRealtimeClient,
     signalingClient: technicianSignalingClient,

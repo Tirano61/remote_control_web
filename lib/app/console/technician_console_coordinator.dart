@@ -2,12 +2,14 @@ import 'dart:async';
 
 import '../../core/error/failure.dart';
 import '../../features/auth/presentation/bloc/user_session/user_session_bloc.dart';
+import '../../features/devices/presentation/bloc/devices/devices_bloc.dart';
 import '../../features/remote_control/domain/entities/remote_control_status.dart';
 import '../../features/remote_session/presentation/bloc/remote_session/remote_session_bloc.dart';
 import '../../features/signaling/domain/client/technician_signaling_client.dart';
 import '../../features/signaling/domain/entities/signaling_relay_result.dart';
 import '../../features/support/presentation/bloc/support_requests/support_requests_bloc.dart';
 import '../../features/technician_realtime/domain/client/technician_realtime_client.dart';
+import '../../features/technician_realtime/domain/entities/device_presence_updated_notice.dart';
 import '../../features/technician_realtime/domain/entities/remote_session_active_notice.dart';
 import '../../features/technician_realtime/domain/entities/remote_session_closed_notice.dart';
 import '../../features/technician_realtime/domain/entities/signaling_error_code.dart';
@@ -32,7 +34,7 @@ const String kRealtimeSessionRejectedNotice =
 /// authenticated                      -> connect /technicians + GET current
 /// signed out                         -> disconnect + forget the session
 /// socket connected + live session    -> remote-session:join
-/// socket reconnected                 -> reload the support request queue
+/// socket reconnected                 -> GET /devices + GET /support-requests
 /// socket lost                        -> the join is no longer valid
 /// joined + peer ready + live session -> negotiate WebRTC
 /// joined without the peer            -> wait: an offer would reach nobody
@@ -45,6 +47,7 @@ const String kRealtimeSessionRejectedNotice =
 /// remote-session:closed              -> GET current (never the event as state)
 /// support-request:updated            -> GET /support-requests (idem)
 /// support-request:queue-updated      -> GET /support-requests (idem)
+/// device:presence-updated            -> GET /devices + GET /support-requests
 /// live session disappeared          -> reload the support request queue
 /// socket handshake rejected          -> the user session is over
 /// relay refused NOT_JOINED           -> join the room again, once
@@ -69,6 +72,7 @@ class TechnicianConsoleCoordinator {
     required TechnicianRealtimeBloc technicianRealtimeBloc,
     required SignalingJoinBloc signalingJoinBloc,
     required SupportRequestsBloc supportRequestsBloc,
+    required DevicesBloc devicesBloc,
     required WebRtcSessionBloc webRtcSessionBloc,
     required TechnicianRealtimeClient realtimeClient,
     required TechnicianSignalingClient signalingClient,
@@ -77,6 +81,7 @@ class TechnicianConsoleCoordinator {
        _technicianRealtimeBloc = technicianRealtimeBloc,
        _signalingJoinBloc = signalingJoinBloc,
        _supportRequestsBloc = supportRequestsBloc,
+       _devicesBloc = devicesBloc,
        _webRtcSessionBloc = webRtcSessionBloc,
        _realtimeClient = realtimeClient,
        _signalingClient = signalingClient;
@@ -96,6 +101,7 @@ class TechnicianConsoleCoordinator {
   final TechnicianRealtimeBloc _technicianRealtimeBloc;
   final SignalingJoinBloc _signalingJoinBloc;
   final SupportRequestsBloc _supportRequestsBloc;
+  final DevicesBloc _devicesBloc;
   final WebRtcSessionBloc _webRtcSessionBloc;
   final TechnicianRealtimeClient _realtimeClient;
   final TechnicianSignalingClient _signalingClient;
@@ -186,6 +192,9 @@ class TechnicianConsoleCoordinator {
           _onSupportRequestQueueUpdated,
         ),
       )
+      ..add(
+        _realtimeClient.devicePresenceUpdated.listen(_onDevicePresenceUpdated),
+      )
       ..add(_signalingClient.relayRefusals.listen(_onRelayRefused));
 
     // The console is opened by an already authenticated session, so the
@@ -221,6 +230,7 @@ class TechnicianConsoleCoordinator {
     // A reload coalesced behind a GET in flight would otherwise run after the
     // sign out.
     _supportRequestsBloc.add(const SupportRequestsPendingRefreshDiscarded());
+    _devicesBloc.add(const DevicesPendingRefreshDiscarded());
     _hadLiveSession = false;
     _lastConnectionId = null;
     _requestedNegotiation = null;
@@ -245,11 +255,11 @@ class TechnicianConsoleCoordinator {
       _lastConnectionId = status.connectionId;
       if (previousConnectionId != null &&
           previousConnectionId != status.connectionId) {
-        // Neither `support-request:updated` nor
-        // `support-request:queue-updated` is replayed: whatever the tablet
-        // answered, created or cancelled while the socket was down is only
-        // known to REST.
-        _supportRequestsBloc.add(const SupportRequestsRefreshRequested());
+        // No notification is replayed: whatever the tablet answered, created
+        // or cancelled while the socket was down — and every presence change
+        // of every device, `device:presence-updated` included — is only known
+        // to REST. Both collections are re-read, because both show presence.
+        _reconcilePresenceAndQueue();
       }
       _resetRelayGuards(connectionId: status.connectionId);
       _joinLiveSessionIfPossible();
@@ -412,6 +422,30 @@ class TechnicianConsoleCoordinator {
     // No card is added, removed or moved from the event: REST says whether the
     // request is `WAITING`, `ASSIGNED` or `CANCELLED`. A burst — every console
     // hears every change — is coalesced by the BLoC's pending refresh.
+    _supportRequestsBloc.add(const SupportRequestsRefreshRequested());
+  }
+
+  /// `device:presence-updated` arrived over `/technicians`: some device went
+  /// `ONLINE` or `OFFLINE` — the event does not say which, on purpose.
+  ///
+  /// Presence is shown in two places, each with its own source of truth —
+  /// `Device.isOnline` in the device list, `SupportRequest.device.isOnline` on
+  /// every request card — so both are re-read, whichever section is on
+  /// screen. Nothing is copied from one BLoC to the other and no row is
+  /// touched from here: the `deviceId` is not even looked at, because the
+  /// GETs answer for every device at once.
+  void _onDevicePresenceUpdated(DevicePresenceUpdatedNotice notice) {
+    if (_userSessionBloc.state is! UserSessionAuthenticated) return;
+    _reconcilePresenceAndQueue();
+  }
+
+  /// `GET /devices` and `GET /support-requests`.
+  ///
+  /// A burst — several devices, or a tablet that bounced — is coalesced by
+  /// each BLoC's pending refresh: one GET in flight plus at most one after
+  /// it, and an event arriving during a GET is never lost.
+  void _reconcilePresenceAndQueue() {
+    _devicesBloc.add(const DevicesRefreshRequested());
     _supportRequestsBloc.add(const SupportRequestsRefreshRequested());
   }
 
