@@ -7,6 +7,7 @@ import 'package:remote_control_web/app/console/dashboard_page.dart';
 import 'package:remote_control_web/app/remote_control_app.dart';
 import 'package:remote_control_web/core/config/app_config.dart';
 import 'package:remote_control_web/core/error/failure.dart';
+import 'package:remote_control_web/core/presentation/widgets/presence_indicator.dart';
 import 'package:remote_control_web/features/auth/data/repositories/auth_repository_impl.dart';
 import 'package:remote_control_web/features/auth/presentation/pages/login_page.dart';
 import 'package:remote_control_web/features/signaling/data/technician_signaling_client_impl.dart';
@@ -686,6 +687,117 @@ void main() {
       expect(find.byType(LoginPage), findsOneWidget);
       expect(storage.token, isNull);
       expect(realtime.disconnectCount, greaterThanOrEqualTo(1));
+    });
+  });
+
+  group('device:presence-updated', () {
+    /// Presence as each section renders it: the device table uses the full
+    /// indicator, a support request card the compact one.
+    List<bool> tablePresence(WidgetTester tester) => tester
+        .widgetList<PresenceIndicator>(find.byType(PresenceIndicator))
+        .where((indicator) => !indicator.compact)
+        .map((indicator) => indicator.isOnline)
+        .toList();
+    List<bool> cardPresence(WidgetTester tester) => tester
+        .widgetList<PresenceIndicator>(find.byType(PresenceIndicator))
+        .where((indicator) => indicator.compact)
+        .map((indicator) => indicator.isOnline)
+        .toList();
+
+    void backendPresence({required bool isOnline}) {
+      devices.devices = [buildDevice(isOnline: isOnline)];
+      supportRequests.requests = [
+        buildSupportRequest(isDeviceOnline: isOnline),
+      ];
+    }
+
+    Future<void> connect(WidgetTester tester) async {
+      realtime.emitConnected();
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('OFFLINE -> ONLINE updates both sections without ACTUALIZAR', (
+      tester,
+    ) async {
+      backendPresence(isOnline: false);
+      await pumpConsole(tester);
+      await connect(tester);
+      expect(tablePresence(tester), [false]);
+      expect(cardPresence(tester), [false]);
+      expect(find.text('1 registrados · 0 online'), findsOneWidget);
+      expect(
+        find.textContaining('El dispositivo está desconectado'),
+        findsOneWidget,
+      );
+
+      backendPresence(isOnline: true);
+      realtime.emitDevicePresenceUpdated(deviceId);
+      await tester.pumpAndSettle();
+
+      expect(tablePresence(tester), [true]);
+      expect(cardPresence(tester), [true]);
+      expect(find.text('1 registrados · 1 online'), findsOneWidget);
+      // The card follows: the request can be taken now.
+      final button = tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, 'TOMAR SOLICITUD'),
+      );
+      expect(button.onPressed, isNotNull);
+      expect(
+        find.textContaining('El dispositivo está desconectado'),
+        findsNothing,
+      );
+    });
+
+    testWidgets('ONLINE -> OFFLINE updates both sections as well', (
+      tester,
+    ) async {
+      backendPresence(isOnline: true);
+      await pumpConsole(tester);
+      await connect(tester);
+      expect(tablePresence(tester), [true]);
+      expect(cardPresence(tester), [true]);
+
+      backendPresence(isOnline: false);
+      realtime.emitDevicePresenceUpdated(deviceId);
+      await tester.pumpAndSettle();
+
+      expect(tablePresence(tester), [false]);
+      expect(cardPresence(tester), [false]);
+      final button = tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, 'TOMAR SOLICITUD'),
+      );
+      expect(button.onPressed, isNull);
+    });
+
+    testWidgets('a reconnection reconciles what was missed meanwhile', (
+      tester,
+    ) async {
+      backendPresence(isOnline: false);
+      await pumpConsole(tester);
+      await connect(tester);
+
+      realtime.emitReconnecting();
+      await tester.pumpAndSettle();
+      backendPresence(isOnline: true);
+      await connect(tester);
+
+      expect(tablePresence(tester), [true]);
+      expect(cardPresence(tester), [true]);
+    });
+
+    testWidgets('a 401 on the presence refresh ends the session as usual', (
+      tester,
+    ) async {
+      backendPresence(isOnline: false);
+      await pumpConsole(tester);
+      await connect(tester);
+
+      devices.failure = const AuthFailure();
+      realtime.emitDevicePresenceUpdated(deviceId);
+      await tester.pumpAndSettle();
+
+      expect(find.byType(LoginPage), findsOneWidget);
+      expect(storage.token, isNull);
     });
   });
 
