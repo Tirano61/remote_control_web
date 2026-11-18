@@ -250,7 +250,8 @@ final class WebRtcInterrupted extends WebRtcNegotiation {
 ///
 /// No automatic retry is made from here: a new negotiation starts when a
 /// genuinely new situation appears — a new connection, a new join, a new
-/// readiness — or when the user asks for it.
+/// readiness — or when the console, within its recovery budget and only after
+/// REST confirmed the session is still live, asks for one.
 final class WebRtcFailed extends WebRtcSessionState {
   const WebRtcFailed({required this.remoteSessionId, required this.reason});
 

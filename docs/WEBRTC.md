@@ -81,7 +81,13 @@ They fail independently, so they are tracked independently. In particular:
   *incomplete* negotiation is dropped instead, because the answer and the
   remaining candidates would never arrive;
 * **after a reconnection no second offer is created** while the current peer
-  connection is still usable.
+  connection is still usable;
+* **a connected peer connection is not authority.** Remote control also needs
+  the socket and a REST read made since it last came back; a peer connection
+  that keeps working while the socket is down keeps its video, not its control;
+* **a failed peer connection is renegotiated, within a budget,** only after
+  `GET /remote-sessions/current` confirms the same session is still live. See
+  [SESSION_LIFECYCLE.md](SESSION_LIFECYCLE.md#webrtc-failure).
 
 ## ICE configuration
 
@@ -453,8 +459,10 @@ both candidate queues are released together, from every ending — and with
 them the remote screen surface, whose `RTCVideoRenderer` is disposed:
 
 ```text
-FINALIZAR ASISTENCIA        (RemoteSession -> Idle)
-remote-session:closed       (-> REST reconciliation -> Idle)
+FINALIZAR ASISTENCIA        (RemoteSession -> Idle once POST close succeeds)
+remote-session:closed       (the session on screen: at once, then REST)
+a reconnection whose GET no longer returns the session
+another session replacing the one held
 sign out
 a new negotiation
 RTCPeerConnectionState.failed / closed
