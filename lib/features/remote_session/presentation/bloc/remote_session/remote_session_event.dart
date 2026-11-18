@@ -17,10 +17,47 @@ final class RemoteSessionStarted extends RemoteSessionEvent {
 
 /// Re-read `GET /remote-sessions/current`.
 ///
-/// Raised after a close, after a `remote-session:closed` notice and by the
-/// retry button when the state could not be refreshed.
+/// Raised by the retry button, after a refused command or relay, and after a
+/// `remote-session:active` notice. A request that arrives while a read is in
+/// flight is never lost: that read is treated as stale and one more follows it.
 final class RemoteSessionRefreshRequested extends RemoteSessionEvent {
   const RemoteSessionRefreshRequested();
+}
+
+/// The console needs to know whether the backend still holds its session
+/// *now*: the `/technicians` socket came back, or the peer connection failed.
+///
+/// It is a refresh with a receipt. [checkId] is a number the console chose; the
+/// state reports, in [RemoteSessionState.answeredAuthorityCheck], the highest
+/// check a successful read that *started after it was asked for* has answered.
+/// Until then the console treats the session as unconfirmed, whatever the state
+/// on screen still says.
+final class RemoteSessionAuthorityCheckRequested extends RemoteSessionEvent {
+  const RemoteSessionAuthorityCheckRequested(this.checkId);
+
+  final int checkId;
+
+  @override
+  List<Object?> get props => [checkId];
+}
+
+/// `remote-session:closed` arrived for [remoteSessionId].
+///
+/// The backend emits it only after the close committed, and a closed session
+/// never reopens. So a session with this id is over for good: if it is the one
+/// on screen it ends here, without waiting for REST, and no read — one already
+/// in flight included — may bring it back. REST is still read afterwards, for
+/// whatever else it has to say.
+///
+/// [endedBy] is kept raw and only logged: every value means the same thing.
+final class RemoteSessionClosedReported extends RemoteSessionEvent {
+  const RemoteSessionClosedReported(this.remoteSessionId, {this.endedBy});
+
+  final String remoteSessionId;
+  final String? endedBy;
+
+  @override
+  List<Object?> get props => [remoteSessionId, endedBy];
 }
 
 /// The technician pressed "INICIAR ASISTENCIA" on an accepted request.

@@ -94,18 +94,31 @@ class FakeRemoteSessionRepository implements RemoteSessionRepository {
     final failure = createFailure;
     if (failure != null) return Failed(failure);
     final created =
-        createResponse ?? buildRemoteSession(supportRequestId: supportRequestId);
+        createResponse ??
+        buildRemoteSession(supportRequestId: supportRequestId);
     current = created;
     return Success(created);
   }
 
+  /// Holds every `GET /remote-sessions/current` in flight while set.
+  ///
+  /// The answer is what the backend had when the request *started*, which is
+  /// exactly what an old answer is: a read that left before a close and comes
+  /// back after it still says ACTIVE.
+  Future<void>? currentGate;
+
   @override
   Future<Result<RemoteSession?>> loadCurrent() async {
     currentCount++;
-    final failure = _read ? currentFailureAfterFirstRead ?? currentFailure : currentFailure;
+    final failure = _read
+        ? currentFailureAfterFirstRead ?? currentFailure
+        : currentFailure;
     _read = true;
+    final snapshot = current;
+    final gate = currentGate;
+    if (gate != null) await gate;
     if (failure != null) return Failed(failure);
-    return Success(current);
+    return Success(snapshot);
   }
 
   @override
