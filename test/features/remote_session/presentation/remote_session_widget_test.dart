@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:remote_control_web/app/console/technician_console_coordinator.dart';
 import 'package:remote_control_web/app/composition_root.dart';
 import 'package:remote_control_web/app/remote_control_app.dart';
 import 'package:remote_control_web/core/config/app_config.dart';
@@ -683,13 +684,64 @@ void main() {
       await establish(tester);
       peers.last.emitRemoteVideoTrack('screen-0');
       await settleUi(tester);
+      final failed = peers.last;
+      final renderer = renderers.last;
 
+      failed.emitPeerState(WebRtcPeerConnectionState.failed);
+      await settleUi(tester);
+
+      // Its frames go with it, whatever comes next: the renderer shows no
+      // track, whether the surface was rebuilt for the new negotiation or not.
+      expect(video('screen-0'), findsNothing);
+      expect(renderer.isDisplaying, isFalse);
+      expect(renderer.track, isNull);
+      // REST still has the session: one new offer, on a new peer connection.
+      expect(peers.sessions, hasLength(2));
+      expect(
+        tester.widget<Text>(find.byKey(const Key('webrtc_status'))).data,
+        'Conectando con el dispositivo...',
+      );
+      // The assistance itself is still the backend's to end.
+      expect(find.text('FINALIZAR ASISTENCIA'), findsOneWidget);
+
+      realtime.answerRelayAck({
+        'delivered': true,
+        'remoteSessionId': remoteSessionId,
+      });
+      await settleUi(tester);
+    });
+
+    testWidgets('a failure past the recovery budget stays on screen', (
+      tester,
+    ) async {
+      await pumpNegotiating(tester);
+      await establish(tester);
+
+      for (
+        var attempt = 0;
+        attempt <
+            TechnicianConsoleCoordinator.maxAutomaticWebRtcRecoveriesPerSession;
+        attempt++
+      ) {
+        peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+        await settleUi(tester);
+        realtime.answerRelayAck({
+          'delivered': true,
+          'remoteSessionId': remoteSessionId,
+        });
+        await settleUi(tester);
+      }
       peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
       await settleUi(tester);
 
+      expect(
+        peers.sessions,
+        hasLength(
+          TechnicianConsoleCoordinator.maxAutomaticWebRtcRecoveriesPerSession +
+              1,
+        ),
+      );
       expect(surface, findsNothing);
-      expect(renderers.last.disposeCount, 1);
-      // The assistance itself is still the backend's to end.
       expect(find.text('FINALIZAR ASISTENCIA'), findsOneWidget);
       expect(
         tester.widget<Text>(find.byKey(const Key('webrtc_status'))).data,
@@ -1462,15 +1514,24 @@ void main() {
       ) async {
         await pumpAssistance(tester);
 
+        final failed = peers.last;
         final gesture = await tester.startGesture(tester.getCenter(surface));
         await tester.pump(const Duration(milliseconds: 200));
-        peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+        failed.emitPeerState(WebRtcPeerConnectionState.failed);
+        await settleUi(tester);
+        // The console renegotiates; the new offer is acknowledged.
+        realtime.answerRelayAck({
+          'delivered': true,
+          'remoteSessionId': remoteSessionId,
+        });
         await settleUi(tester);
 
         await tester.pump(holdTime * 4);
         await gesture.up();
         await settleUi(tester);
 
+        // Neither the failed peer connection nor its successor got anything.
+        expect(failed.sentRemoteControlCommands, isEmpty);
         expect(sent(), isEmpty);
       });
 
@@ -2244,6 +2305,15 @@ void main() {
             expect(controller.text, anyOf(isEmpty, sentinel));
             expect(find.byType(RemoteTextDialog), findsNothing);
             expect(session.sentRemoteControlCommands, isEmpty);
+
+            // A failed peer connection is renegotiated: its offer is
+            // acknowledged so that nothing is left waiting. Answering an
+            // acknowledgement that was already answered changes nothing.
+            realtime.answerRelayAck({
+              'delivered': true,
+              'remoteSessionId': remoteSessionId,
+            });
+            await settleUi(tester);
           });
         }
 

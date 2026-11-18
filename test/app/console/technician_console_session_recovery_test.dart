@@ -655,6 +655,222 @@ void main() {
     });
   });
 
+  group('WebRTC recovery', () {
+    const budget =
+        TechnicianConsoleCoordinator.maxAutomaticWebRtcRecoveriesPerSession;
+
+    void answer(String sdp) => realtime.emitSignalingEvent('webrtc:answer', {
+      'remoteSessionId': remoteSessionId,
+      'from': 'DEVICE',
+      'sdp': sdp,
+    });
+
+    test('FAILED asks REST first, then makes exactly one new offer', () async {
+      await signInWithWorkingAssistance();
+      final failed = peers.last;
+      final readsBefore = remoteSessions.currentCount;
+      final gate = Completer<void>();
+      remoteSessions.currentGate = gate.future;
+
+      failed.emitPeerState(WebRtcPeerConnectionState.failed);
+      await settle();
+
+      // Released at once, and nothing renegotiated before REST answers.
+      expect(failed.isClosed, isTrue);
+      expect(webRtcSessionBloc.state, isA<WebRtcFailed>());
+      expect(webRtcSessionBloc.state.canSendRemoteControl, isFalse);
+      expect(remoteSessions.currentCount, readsBefore + 1);
+      expect(peers.sessions, hasLength(1));
+      expect(offers(), 1);
+
+      remoteSessions.currentGate = null;
+      gate.complete();
+      await settle();
+
+      // Still ACTIVE in the backend: one new peer connection, one new offer.
+      expect(peers.sessions, hasLength(2));
+      expect(offers(), 2);
+      // The same RemoteSession: nothing was created, nothing accepted again.
+      expect(remoteSessions.createdSupportRequestIds, isEmpty);
+      expect(remoteSessions.activatedIds, isEmpty);
+      expect(peers.last.remoteSessionId, remoteSessionId);
+
+      await deliverOffer();
+      await establish();
+      expect(webRtcSessionBloc.state.canSendRemoteControl, isTrue);
+      await tap();
+      expect(peers.last.sentRemoteControlCommands, hasLength(1));
+      expect(failed.sentRemoteControlCommands, isEmpty);
+    });
+
+    test('the recovery never leaves two peer connections', () async {
+      await signInWithWorkingAssistance();
+      peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+      await settle();
+      await deliverOffer();
+
+      // Every trigger that re-evaluates readiness, again.
+      realtime.emitPeerJoined(remoteSessionId);
+      remoteSessionBloc.add(const RemoteSessionRefreshRequested());
+      await settle();
+
+      expect(peers.sessions, hasLength(2));
+      expect(peers.sessions.where((peer) => !peer.isClosed), hasLength(1));
+      expect(offers(), 2);
+    });
+
+    test('a late ACK and an unexpected answer change nothing', () async {
+      await signInWithWorkingAssistance();
+      peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+      await settle();
+      final recovering = peers.last;
+      expect(peers.sessions, hasLength(2));
+
+      // An answer before the new offer was even relayed: nothing waits for
+      // one, so it is ignored rather than applied to the new connection.
+      answer('v=0 stale answer');
+      await settle();
+      expect(recovering.appliedAnswers, isEmpty);
+
+      // The new offer is relayed, then the acknowledgement arrives twice.
+      await deliverOffer();
+      await deliverOffer();
+      expect(webRtcSessionBloc.state, isA<WebRtcConnecting>());
+
+      answer('v=0 answer');
+      answer('v=0 duplicate answer');
+      await settle();
+      expect(recovering.appliedAnswers, hasLength(1));
+      expect(peers.sessions, hasLength(2));
+      expect(offers(), 2);
+    });
+
+    test('the old data channel speaks for nothing any more', () async {
+      await signInWithWorkingAssistance();
+      final failed = peers.last;
+      failed.emitPeerState(WebRtcPeerConnectionState.failed);
+      await settle();
+      await deliverOffer();
+      final recovering = peers.last;
+
+      // Late callbacks of the failed peer connection.
+      failed
+        ..emitControlChannelState(WebRtcDataChannelState.open)
+        ..emitPeerState(WebRtcPeerConnectionState.connected)
+        ..emitRemoteVideoTrack('old-screen')
+        ..emitRemoteControlAck('tap-1');
+      await settle();
+
+      // None of it is taken for the new negotiation.
+      expect(webRtcSessionBloc.state, isA<WebRtcConnecting>());
+      expect(webRtcSessionBloc.state.isControlChannelOpen, isFalse);
+      expect(webRtcSessionBloc.state.hasRemoteVideo, isFalse);
+      expect(webRtcSessionBloc.state.canSendRemoteControl, isFalse);
+      await tap();
+      expect(failed.sentRemoteControlCommands, isEmpty);
+      expect(recovering.sentRemoteControlCommands, isEmpty);
+    });
+
+    test('a close arriving during the recovery wins', () async {
+      await signInWithWorkingAssistance();
+      final gate = Completer<void>();
+      remoteSessions.currentGate = gate.future;
+
+      peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+      await settle();
+      // The backend closes it while the recovery's GET travels ...
+      remoteSessions.current = null;
+      realtime.emitRemoteSessionClosed(remoteSessionId, endedBy: 'SYSTEM');
+      await settle();
+      // ... and that GET comes back with what it read: ACTIVE.
+      remoteSessions.currentGate = null;
+      gate.complete();
+      await settle();
+
+      expect(remoteSessionBloc.state, isA<RemoteSessionIdle>());
+      expect(webRtcSessionBloc.state, isA<WebRtcIdle>());
+      expect(peers.sessions, hasLength(1));
+      expect(offers(), 1);
+    });
+
+    test('REST without the session: nothing is renegotiated', () async {
+      await signInWithWorkingAssistance();
+      remoteSessions.current = null;
+
+      peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+      await settle();
+
+      expect(remoteSessionBloc.state, isA<RemoteSessionIdle>());
+      expect(peers.sessions, hasLength(1));
+      expect(offers(), 1);
+    });
+
+    test('REST failing: no offer until a read confirms the session', () async {
+      await signInWithWorkingAssistance();
+      remoteSessions.currentFailure = const NetworkFailure();
+
+      peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+      await settle();
+      expect(remoteSessionBloc.state.isVerified, isFalse);
+      expect(peers.sessions, hasLength(1));
+
+      remoteSessions.currentFailure = null;
+      remoteSessionBloc.add(const RemoteSessionRefreshRequested());
+      await settle();
+
+      expect(peers.sessions, hasLength(2));
+      expect(offers(), 2);
+    });
+
+    test('the budget bounds the attempts, without a timer', () async {
+      await signInWithWorkingAssistance();
+
+      // Every new peer connection fails before connecting.
+      for (var attempt = 0; attempt <= budget; attempt++) {
+        peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+        await settle();
+        await deliverOffer();
+      }
+
+      expect(peers.sessions, hasLength(budget + 1));
+      expect(webRtcSessionBloc.state, isA<WebRtcFailed>());
+      // Nothing more happens on its own, however long it waits.
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      await settle();
+      expect(peers.sessions, hasLength(budget + 1));
+      expect(offers(), budget + 1);
+    });
+
+    test('a connection that worked again gives the budget back', () async {
+      await signInWithWorkingAssistance();
+
+      for (var round = 0; round < budget + 1; round++) {
+        peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+        await settle();
+        await deliverOffer();
+        await establish();
+        expect(webRtcSessionBloc.state.canSendRemoteControl, isTrue);
+      }
+
+      expect(peers.sessions, hasLength(budget + 2));
+    });
+
+    test('a reconnection after the budget negotiates again', () async {
+      await signInWithWorkingAssistance();
+      for (var attempt = 0; attempt <= budget; attempt++) {
+        peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+        await settle();
+        await deliverOffer();
+      }
+      expect(peers.sessions, hasLength(budget + 1));
+
+      // A genuinely new situation: a new socket, joined again.
+      await reconnect();
+
+      expect(peers.sessions, hasLength(budget + 2));
+    });
+  });
+
   group('presence', () {
     test(
       'device:presence-updated still reloads both lists, nothing else',
