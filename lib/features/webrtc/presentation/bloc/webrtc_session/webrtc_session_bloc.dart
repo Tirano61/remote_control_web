@@ -83,7 +83,9 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     RemoteControlCommandIdGenerator? commandIdGenerator,
     Duration remoteCommandMargin = defaultRemoteCommandMargin,
     Duration settleDuration = remoteSettleDuration,
+    Duration answerDeadline = defaultAnswerDeadline,
   }) : _peerClient = peerClient,
+       _answerDeadline = answerDeadline,
        _signalingClient = signalingClient,
        _iceConfiguration = iceConfiguration,
        _commandIdGenerator =
@@ -114,6 +116,9 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     on<_WebRtcRemoteActionSettled>(_onRemoteActionSettled);
     on<_WebRtcPeerReported>(_onPeerReported);
     on<_WebRtcSignalingReported>(_onSignalingReported);
+    on<_WebRtcAnswerDeadlineReached>(_onAnswerDeadlineReached);
+    on<WebRtcAutomaticRecoveryChanged>(_onAutomaticRecoveryChanged);
+    on<WebRtcConnectionRetryRequested>(_onConnectionRetryRequested);
 
     _incomingSubscription = _signalingClient.incoming.listen(
       (message) => add(_WebRtcSignalingReported(message)),
@@ -129,6 +134,40 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   /// has to do first ([PendingRemoteCommands.deadlineFor]). The tablet sends none
   /// on a channel that closed or was replaced, so an answer may never come.
   static const Duration defaultRemoteCommandMargin = Duration(seconds: 3);
+
+  /// How long a relayed offer may wait for its answer before the negotiation
+  /// is reported as unanswered ([WebRtcSessionState.isAnswerOverdue]).
+  ///
+  /// It ends nothing. The tablet answers only after Android's MediaProjection
+  /// consent, so a person deciding is a perfectly normal reason for this, and
+  /// the peer connection is kept for an answer that comes late. Seen on the
+  /// T10A: 10 s from the offer to the answer while the user read the dialog.
+  static const Duration defaultAnswerDeadline = Duration(seconds: 30);
+
+  final Duration _answerDeadline;
+
+  /// Started when the backend relayed the offer, for that negotiation only.
+  Timer? _answerDeadlineTimer;
+
+  /// The answer deadline of the current negotiation passed without one.
+  bool _isAnswerOverdue = false;
+
+  /// No offer of the session has been answered since a deadline passed. It
+  /// outlives the negotiation it was noticed on, so the technician keeps being
+  /// told the tablet may be waiting for its user while the console offers again.
+  bool _isTabletSilent = false;
+
+  /// What the console said about its automatic recovery. Outlives a
+  /// negotiation: it is about the session, and it is said before the next one
+  /// exists.
+  bool _isRecoveryScheduled = false;
+
+  final StreamController<String> _connectionRetries =
+      StreamController<String>.broadcast();
+
+  /// The REINTENTAR presses that reached a negotiation which could use one,
+  /// each with the session it is for. The console decides what follows.
+  Stream<String> get connectionRetries => _connectionRetries.stream;
 
   late final StreamSubscription<RemoteSignalingMessage> _incomingSubscription;
 
@@ -209,7 +248,9 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     _settleGuard.clear();
     _touch?.end();
     _touch = null;
+    _answerDeadlineTimer?.cancel();
     await _incomingSubscription.cancel();
+    await _connectionRetries.close();
     _generation++;
     await _releaseNegotiation();
     return super.close();
@@ -225,13 +266,21 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     // A usable negotiation for this very session already exists. This is the
     // rule that makes a reconnection harmless: the console rejoins the room,
     // asks again, and no second offer is created while the peers still talk.
+    //
+    // The single exception is a negotiation whose offer was never answered,
+    // and only when the console says so — after REST confirmed the session. It
+    // is replaced like a failed one: released first, so there are never two.
     if (state.remoteSessionId == remoteSessionId && state.hasNegotiation) {
-      logDebug('negotiation already in place $remoteSessionId');
-      return;
+      if (!event.replacesUnansweredOffer || !state.isAnswerOverdue) {
+        logDebug('negotiation already in place $remoteSessionId');
+        return;
+      }
+      logDebug('unanswered negotiation replaced $remoteSessionId');
     }
 
     _generation++;
     final generation = _generation;
+    if (state.remoteSessionId != remoteSessionId) _isTabletSilent = false;
     await _releaseNegotiation();
 
     emit(
@@ -284,6 +333,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
           WebRtcFailed(
             remoteSessionId: remoteSessionId,
             reason: WebRtcFailureReason.offerNotDelivered,
+            isRecoveryScheduled: _isRecoveryScheduled,
           ),
         );
         return;
@@ -291,6 +341,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
 
       logDebug('offer relayed $remoteSessionId');
       _isOfferDelivered = true;
+      _startAnswerDeadline(generation);
       if (state is WebRtcOffering) {
         emit(
           _withNegotiationFacts(
@@ -307,9 +358,60 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         WebRtcFailed(
           remoteSessionId: remoteSessionId,
           reason: WebRtcFailureReason.negotiationFailed,
+          isRecoveryScheduled: _isRecoveryScheduled,
         ),
       );
     }
+  }
+
+  /// Arms the answer deadline of [generation], once its offer was relayed.
+  void _startAnswerDeadline(int generation) {
+    _answerDeadlineTimer?.cancel();
+    _answerDeadlineTimer = Timer(_answerDeadline, () {
+      if (isClosed) return;
+      add(_WebRtcAnswerDeadlineReached(generation));
+    });
+  }
+
+  /// No answer in time. Said, not acted upon: the peer connection stays, and a
+  /// late answer is applied to it. Whether a new offer is worth making is the
+  /// console's decision, after REST.
+  void _onAnswerDeadlineReached(
+    _WebRtcAnswerDeadlineReached event,
+    Emitter<WebRtcSessionState> emit,
+  ) {
+    if (event.generation != _generation) return;
+    final session = _session;
+    if (session == null || !_isOfferDelivered || _isAnswerAccepted) return;
+    if (_isAnswerOverdue) return;
+    _answerDeadlineTimer = null;
+    _isAnswerOverdue = true;
+    _isTabletSilent = true;
+    logDebug('answer overdue ${session.remoteSessionId}');
+    final next = _withNegotiationFacts(state);
+    if (next != state) emit(next);
+  }
+
+  void _onAutomaticRecoveryChanged(
+    WebRtcAutomaticRecoveryChanged event,
+    Emitter<WebRtcSessionState> emit,
+  ) {
+    if (event.isScheduled == _isRecoveryScheduled) return;
+    _isRecoveryScheduled = event.isScheduled;
+    final next = _withNegotiationFacts(state);
+    if (next != state) emit(next);
+  }
+
+  /// REINTENTAR, handed on to the console when it can mean anything: the
+  /// connection of that very session failed, or its offer is unanswered.
+  void _onConnectionRetryRequested(
+    WebRtcConnectionRetryRequested event,
+    Emitter<WebRtcSessionState> emit,
+  ) {
+    if (state.remoteSessionId != event.remoteSessionId) return;
+    if (!state.canRetryConnection) return;
+    logDebug('connection retry requested ${event.remoteSessionId}');
+    _connectionRetries.add(event.remoteSessionId);
   }
 
   /// The signaling room is gone.
@@ -340,6 +442,8 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   ) async {
     _generation++;
     _activeRemoteSessionId = null;
+    _isRecoveryScheduled = false;
+    _isTabletSilent = false;
     await _releaseNegotiation();
     if (state is WebRtcIdle) return;
     emit(const WebRtcIdle());
@@ -1328,6 +1432,11 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         }
 
       case WebRtcPeerConnectionState.connected:
+        // Connected proves an answer was applied: nothing is overdue any more.
+        _answerDeadlineTimer?.cancel();
+        _answerDeadlineTimer = null;
+        _isAnswerOverdue = false;
+        _isTabletSilent = false;
         // The peers can talk. `RemoteSession` is *not* promoted to ACTIVE:
         // that transition does not exist in the backend and is never faked.
         emit(
@@ -1355,6 +1464,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
           WebRtcFailed(
             remoteSessionId: remoteSessionId,
             reason: WebRtcFailureReason.connectionFailed,
+            isRecoveryScheduled: _isRecoveryScheduled,
           ),
         );
 
@@ -1393,6 +1503,16 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
           return;
         }
         _isAnswerAccepted = true;
+        _answerDeadlineTimer?.cancel();
+        _answerDeadlineTimer = null;
+        if (_isAnswerOverdue || _isTabletSilent) {
+          // Late, and still this negotiation's: the tablet was most likely
+          // waiting for its user. Nothing about it was given up on.
+          logDebug('late answer accepted ${message.remoteSessionId}');
+          _isAnswerOverdue = false;
+          _isTabletSilent = false;
+          emit(_withNegotiationFacts(state));
+        }
         final generation = _generation;
         try {
           await session.applyRemoteAnswer(answer);
@@ -1404,6 +1524,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
             WebRtcFailed(
               remoteSessionId: message.remoteSessionId,
               reason: WebRtcFailureReason.negotiationFailed,
+              isRecoveryScheduled: _isRecoveryScheduled,
             ),
           );
           return;
@@ -1491,6 +1612,9 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     _isOfferDelivered = false;
     _isAnswerAccepted = false;
     _isRemoteDescriptionApplied = false;
+    _answerDeadlineTimer?.cancel();
+    _answerDeadlineTimer = null;
+    _isAnswerOverdue = false;
     _pendingLocalIceCandidates.clear();
     _pendingRemoteIceCandidates.clear();
     _controlChannelState = WebRtcDataChannelState.closed;
@@ -1501,7 +1625,11 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     _settleGuard.clear();
     _lastRemoteCommand = null;
 
-    await subscription?.cancel();
+    // Not awaited: the subscription stops delivering the moment it is
+    // cancelled, and the generation already drops anything late. Its future
+    // only reports the clean-up, and waiting for it would hold a replacement
+    // back for nothing.
+    unawaited(subscription?.cancel());
     await session?.close();
   }
 
@@ -1515,30 +1643,50 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
           controlChannelState: _controlChannelState,
           remoteVideoTrack: _remoteVideoTrack,
           remoteControl: _remoteControlOf(remoteSessionId),
+          isAnswerOverdue: _isAnswerOverdue,
+          isRecoveryScheduled: _isRecoveryScheduled,
+          isTabletSilent: _isTabletSilent,
         ),
         WebRtcOffering(:final remoteSessionId) => WebRtcOffering(
           remoteSessionId: remoteSessionId,
           controlChannelState: _controlChannelState,
           remoteVideoTrack: _remoteVideoTrack,
           remoteControl: _remoteControlOf(remoteSessionId),
+          isAnswerOverdue: _isAnswerOverdue,
+          isRecoveryScheduled: _isRecoveryScheduled,
+          isTabletSilent: _isTabletSilent,
         ),
         WebRtcConnecting(:final remoteSessionId) => WebRtcConnecting(
           remoteSessionId: remoteSessionId,
           controlChannelState: _controlChannelState,
           remoteVideoTrack: _remoteVideoTrack,
           remoteControl: _remoteControlOf(remoteSessionId),
+          isAnswerOverdue: _isAnswerOverdue,
+          isRecoveryScheduled: _isRecoveryScheduled,
+          isTabletSilent: _isTabletSilent,
         ),
         WebRtcConnected(:final remoteSessionId) => WebRtcConnected(
           remoteSessionId: remoteSessionId,
           controlChannelState: _controlChannelState,
           remoteVideoTrack: _remoteVideoTrack,
           remoteControl: _remoteControlOf(remoteSessionId),
+          isAnswerOverdue: _isAnswerOverdue,
+          isRecoveryScheduled: _isRecoveryScheduled,
+          isTabletSilent: _isTabletSilent,
         ),
         WebRtcInterrupted(:final remoteSessionId) => WebRtcInterrupted(
           remoteSessionId: remoteSessionId,
           controlChannelState: _controlChannelState,
           remoteVideoTrack: _remoteVideoTrack,
           remoteControl: _remoteControlOf(remoteSessionId),
+          isAnswerOverdue: _isAnswerOverdue,
+          isRecoveryScheduled: _isRecoveryScheduled,
+          isTabletSilent: _isTabletSilent,
+        ),
+        WebRtcFailed(:final remoteSessionId, :final reason) => WebRtcFailed(
+          remoteSessionId: remoteSessionId,
+          reason: reason,
+          isRecoveryScheduled: _isRecoveryScheduled,
         ),
         _ => current,
       };

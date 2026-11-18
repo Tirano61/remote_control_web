@@ -13,6 +13,7 @@ import '../../../remote_control/domain/entities/remote_control_status.dart';
 import '../../../remote_control/presentation/widgets/remote_control_gesture_layer.dart';
 import '../../../remote_control/presentation/widgets/remote_text_dialog.dart';
 import '../../../technician_realtime/presentation/bloc/signaling_join/signaling_join_bloc.dart';
+import '../../../technician_realtime/domain/entities/technician_realtime_status.dart';
 import '../../../technician_realtime/presentation/bloc/technician_realtime/technician_realtime_bloc.dart';
 import '../../../webrtc/domain/entities/webrtc_connection_state.dart';
 import '../../../webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dart';
@@ -250,6 +251,7 @@ class _LiveAssistance extends StatelessWidget {
             const _AssistanceChannelStatus(),
             const SizedBox(height: 6),
             const _RemoteConnectionStatus(),
+            _ControlPauseNotice(state: state),
           ],
         ),
       ),
@@ -1033,6 +1035,97 @@ class _AssistanceChannelStatus extends StatelessWidget {
   }
 }
 
+/// Shown while the console cannot confirm that the assistance on screen is
+/// still the technician's: the connection with the server is lost, or the last
+/// attempt to check the assistance failed.
+///
+/// Remote control is withheld meanwhile — the decision is the console's, this
+/// only says why. It never claims the assistance ended: it may still be open,
+/// and the backend decides.
+const String kControlPausedBySocketNotice =
+    'Sin conexión con el servidor. El control remoto está en pausa hasta '
+    'confirmar que la asistencia sigue activa.';
+
+const String kControlPausedUnverifiedNotice =
+    'No se pudo confirmar que la asistencia sigue activa. El control remoto '
+    'está en pausa.';
+
+class _ControlPauseNotice extends StatelessWidget {
+  const _ControlPauseNotice({required this.state});
+
+  final RemoteSessionLive state;
+
+  @override
+  Widget build(BuildContext context) {
+    // Only an ACTIVE assistance has remote control to pause.
+    if (state is! RemoteSessionActive || state.isClosing) {
+      return const SizedBox.shrink();
+    }
+    final theme = Theme.of(context);
+
+    return BlocBuilder<TechnicianRealtimeBloc, TechnicianRealtimeStatus>(
+      buildWhen: (previous, current) =>
+          previous.isConnected != current.isConnected,
+      builder: (context, status) {
+        final message = !status.isConnected
+            ? kControlPausedBySocketNotice
+            : !state.isVerified
+            ? kControlPausedUnverifiedNotice
+            : null;
+        if (message == null) return const SizedBox.shrink();
+        // The error banner already offers REINTENTAR while it is shown.
+        final canRetry =
+            status.isConnected && !state.isVerified && state.failure == null;
+
+        return Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Row(
+            children: [
+              Icon(
+                Icons.pause_circle_outline,
+                size: 18,
+                color: theme.colorScheme.error,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  key: const Key('remote_control_paused_notice'),
+                  message,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.error,
+                  ),
+                ),
+              ),
+              if (canRetry)
+                TextButton(
+                  key: const Key('remote_control_paused_retry_button'),
+                  onPressed: () => context.read<RemoteSessionBloc>().add(
+                    const RemoteSessionRefreshRequested(),
+                  ),
+                  child: const Text('REINTENTAR'),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// The peer connection failed and the console has an attempt planned.
+const String kWebRtcRecoveringNotice =
+    'Se perdió la conexión con el dispositivo. Reintentando...';
+
+/// The peer connection failed and no automatic attempt is left.
+const String kWebRtcFailedNotice = 'No se pudo establecer la conexión remota.';
+
+/// The offer was relayed long ago and the tablet has not answered. Most often
+/// its user is still looking at Android's screen sharing dialog, so it is not
+/// worded as an error.
+const String kWebRtcUnansweredNotice =
+    'El dispositivo todavía no respondió. Si la tablet pide permiso para '
+    'compartir la pantalla, debe aceptarse allí.';
+
 /// One line telling the technician whether the browser reached the tablet.
 ///
 /// It reports the WebRTC negotiation, which is a different fact from both the
@@ -1060,6 +1153,21 @@ class _RemoteConnectionStatus extends StatelessWidget {
 
         final isEstablished = state.isConnected && state.isControlChannelOpen;
         final hasFailed = state is WebRtcFailed;
+        final isUnanswered =
+            !hasFailed && (state.isAnswerOverdue || state.isTabletSilent);
+        final isRecovering = hasFailed && state.isRecoveryScheduled;
+        final remoteSessionId = state.remoteSessionId;
+        final isError = hasFailed && !isRecovering;
+
+        final message = isEstablished
+            ? 'Conexión remota establecida'
+            : isRecovering
+            ? kWebRtcRecoveringNotice
+            : hasFailed
+            ? kWebRtcFailedNotice
+            : isUnanswered
+            ? kWebRtcUnansweredNotice
+            : 'Conectando con el dispositivo...';
 
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -1069,11 +1177,13 @@ class _RemoteConnectionStatus extends StatelessWidget {
                 Icon(
                   isEstablished
                       ? Icons.cast_connected
-                      : hasFailed
+                      : isError
                       ? Icons.error_outline
+                      : isUnanswered
+                      ? Icons.hourglass_empty
                       : Icons.sync,
                   size: 18,
-                  color: hasFailed
+                  color: isError
                       ? theme.colorScheme.error
                       : theme.colorScheme.onSurfaceVariant,
                 ),
@@ -1081,13 +1191,9 @@ class _RemoteConnectionStatus extends StatelessWidget {
                 Expanded(
                   child: Text(
                     key: const Key('webrtc_status'),
-                    isEstablished
-                        ? 'Conexión remota establecida'
-                        : hasFailed
-                        ? 'No se pudo establecer la conexión remota.'
-                        : 'Conectando con el dispositivo...',
+                    message,
                     style: theme.textTheme.bodySmall?.copyWith(
-                      color: hasFailed
+                      color: isError
                           ? theme.colorScheme.error
                           : theme.colorScheme.onSurfaceVariant,
                     ),
@@ -1095,6 +1201,20 @@ class _RemoteConnectionStatus extends StatelessWidget {
                 ),
               ],
             ),
+            // Always there when a new attempt could help, also while one is
+            // planned: the technician may know the network is back.
+            if (state.canRetryConnection && remoteSessionId != null)
+              Padding(
+                padding: const EdgeInsets.only(left: 18),
+                child: TextButton.icon(
+                  key: const Key('webrtc_retry_button'),
+                  onPressed: () => context.read<WebRtcSessionBloc>().add(
+                    WebRtcConnectionRetryRequested(remoteSessionId),
+                  ),
+                  icon: const Icon(Icons.refresh, size: 18),
+                  label: const Text('REINTENTAR CONEXIÓN'),
+                ),
+              ),
             // Debug builds only, and deliberately shallow: the two facts a
             // developer needs while bringing WebRTC up, and nothing that could
             // leak an SDP, a candidate or a token.

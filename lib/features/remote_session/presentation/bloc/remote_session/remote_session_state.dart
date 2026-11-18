@@ -13,6 +13,9 @@ sealed class RemoteSessionState extends Equatable {
     bool isClosing = false,
     bool isActivating = false,
     bool canRetryActivation = false,
+    bool isVerified = true,
+    int answeredAuthorityCheck = 0,
+    int failedAuthorityCheck = 0,
     Failure? failure,
   }) {
     if (session.isConnecting) {
@@ -21,6 +24,9 @@ sealed class RemoteSessionState extends Equatable {
         isClosing: isClosing,
         isActivating: isActivating,
         canRetryActivation: canRetryActivation,
+        isVerified: isVerified,
+        answeredAuthorityCheck: answeredAuthorityCheck,
+        failedAuthorityCheck: failedAuthorityCheck,
         failure: failure,
       );
     }
@@ -28,6 +34,9 @@ sealed class RemoteSessionState extends Equatable {
       return RemoteSessionActive(
         session: session,
         isClosing: isClosing,
+        isVerified: isVerified,
+        answeredAuthorityCheck: answeredAuthorityCheck,
+        failedAuthorityCheck: failedAuthorityCheck,
         failure: failure,
       );
     }
@@ -61,6 +70,25 @@ sealed class RemoteSessionState extends Equatable {
 
   /// Whether a REST call of this feature is in flight.
   bool get isBusy => false;
+
+  /// Whether the last read about the session on screen succeeded.
+  ///
+  /// `false` after a `GET /remote-sessions/current` that failed while a session
+  /// was known: it stays on screen, but nothing says the backend still holds it,
+  /// and the console does not let remote control run on it until a read
+  /// succeeds. Dismissing the error banner does not change this.
+  bool get isVerified => true;
+
+  /// The highest [RemoteSessionAuthorityCheckRequested.checkId] a successful
+  /// read has answered — one that started after that check was asked for.
+  int get answeredAuthorityCheck => 0;
+
+  /// The highest check a *failed* read started after it was asked for.
+  ///
+  /// A read that fails twice in a row produces the same state twice, which a
+  /// listener never sees as a change. This is what makes every failure of a
+  /// check observable — the answer, not the state, is what is being waited for.
+  int get failedAuthorityCheck => 0;
 
   @override
   List<Object?> get props => const [];
@@ -109,6 +137,9 @@ sealed class RemoteSessionLive extends RemoteSessionState {
   const RemoteSessionLive({
     required this.session,
     this.isClosing = false,
+    this.isVerified = true,
+    this.answeredAuthorityCheck = 0,
+    this.failedAuthorityCheck = 0,
     this.failure,
   });
 
@@ -117,6 +148,15 @@ sealed class RemoteSessionLive extends RemoteSessionState {
 
   /// `POST /remote-sessions/:id/close` is in flight.
   final bool isClosing;
+
+  @override
+  final bool isVerified;
+
+  @override
+  final int answeredAuthorityCheck;
+
+  @override
+  final int failedAuthorityCheck;
 
   @override
   final Failure? failure;
@@ -130,6 +170,9 @@ sealed class RemoteSessionLive extends RemoteSessionState {
     isClosing,
     isActivating,
     canRetryActivation,
+    isVerified,
+    answeredAuthorityCheck,
+    failedAuthorityCheck,
     failure,
   ];
 }
@@ -145,6 +188,9 @@ final class RemoteSessionConnecting extends RemoteSessionLive {
     super.isClosing,
     this.isActivating = false,
     this.canRetryActivation = false,
+    super.isVerified,
+    super.answeredAuthorityCheck,
+    super.failedAuthorityCheck,
     super.failure,
   });
 
@@ -164,6 +210,9 @@ final class RemoteSessionActive extends RemoteSessionLive {
   const RemoteSessionActive({
     required super.session,
     super.isClosing,
+    super.isVerified,
+    super.answeredAuthorityCheck,
+    super.failedAuthorityCheck,
     super.failure,
   });
 }
