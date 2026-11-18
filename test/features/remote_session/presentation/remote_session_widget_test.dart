@@ -4036,4 +4036,96 @@ void main() {
       expect(texts, isNot(contains('/technicians')));
     });
   });
+  group('control pause', () {
+    final notice = find.byKey(const Key('remote_control_paused_notice'));
+    final retry = find.byKey(const Key('remote_control_paused_retry_button'));
+
+    /// An ACTIVE assistance, its peers connected and its screen arriving.
+    Future<void> pumpWorkingAssistance(WidgetTester tester) async {
+      remoteSessions.current = buildRemoteSession();
+      realtime.peerJoinedOnJoin = true;
+      await pumpConsole(tester);
+      await connectSocket(tester);
+      realtime.answerRelayAck({
+        'delivered': true,
+        'remoteSessionId': remoteSessionId,
+      });
+      await settleUi(tester);
+      peers.last
+        ..emitControlChannelState(WebRtcDataChannelState.open)
+        ..emitPeerState(WebRtcPeerConnectionState.connected)
+        ..emitRemoteVideoTrack('screen-0');
+      await settleUi(tester);
+      expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
+    }
+
+    testWidgets('losing the server pauses control and says why', (
+      tester,
+    ) async {
+      await pumpWorkingAssistance(tester);
+      expect(notice, findsNothing);
+
+      realtime.emitReconnecting();
+      await settleUi(tester);
+
+      expect(tester.widget<Text>(notice).data, kControlPausedBySocketNotice);
+      // The assistance is not said to be over, and FINALIZAR stays.
+      expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
+      expect(find.text('FINALIZAR ASISTENCIA'), findsOneWidget);
+      expect(retry, findsNothing);
+
+      realtime.emitConnected();
+      await settleUi(tester);
+
+      expect(notice, findsNothing);
+    });
+
+    testWidgets('an unconfirmed assistance keeps a retry after the banner', (
+      tester,
+    ) async {
+      await pumpWorkingAssistance(tester);
+      realtime.emitReconnecting();
+      await settleUi(tester);
+      remoteSessions.currentFailure = const NetworkFailure();
+      realtime.emitConnected();
+      await settleUi(tester);
+
+      expect(tester.widget<Text>(notice).data, kControlPausedUnverifiedNotice);
+      // While the banner is there, its own REINTENTAR is the one offered.
+      expect(find.byKey(const Key('remote_session_error_banner')), findsOne);
+      expect(retry, findsNothing);
+
+      await tester.tap(
+        find.descendant(
+          of: find.byKey(const Key('remote_session_error_banner')),
+          matching: find.byType(IconButton),
+        ),
+      );
+      await settleUi(tester);
+      expect(
+        find.byKey(const Key('remote_session_error_banner')),
+        findsNothing,
+      );
+      expect(retry, findsOneWidget);
+
+      remoteSessions.currentFailure = null;
+      await tester.tap(retry);
+      await settleUi(tester);
+
+      expect(notice, findsNothing);
+    });
+
+    testWidgets('remote-session:closed ends the view, no pause notice', (
+      tester,
+    ) async {
+      await pumpWorkingAssistance(tester);
+      remoteSessions.current = null;
+
+      realtime.emitRemoteSessionClosed(remoteSessionId, endedBy: 'SYSTEM');
+      await settleUi(tester);
+
+      expect(find.text('FINALIZAR ASISTENCIA'), findsNothing);
+      expect(notice, findsNothing);
+    });
+  });
 }

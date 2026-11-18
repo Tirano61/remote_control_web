@@ -13,6 +13,7 @@ import '../../../remote_control/domain/entities/remote_control_status.dart';
 import '../../../remote_control/presentation/widgets/remote_control_gesture_layer.dart';
 import '../../../remote_control/presentation/widgets/remote_text_dialog.dart';
 import '../../../technician_realtime/presentation/bloc/signaling_join/signaling_join_bloc.dart';
+import '../../../technician_realtime/domain/entities/technician_realtime_status.dart';
 import '../../../technician_realtime/presentation/bloc/technician_realtime/technician_realtime_bloc.dart';
 import '../../../webrtc/domain/entities/webrtc_connection_state.dart';
 import '../../../webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dart';
@@ -250,6 +251,7 @@ class _LiveAssistance extends StatelessWidget {
             const _AssistanceChannelStatus(),
             const SizedBox(height: 6),
             const _RemoteConnectionStatus(),
+            _ControlPauseNotice(state: state),
           ],
         ),
       ),
@@ -1029,6 +1031,83 @@ class _AssistanceChannelStatus extends StatelessWidget {
         connectionId: connectionId,
         force: true,
       ),
+    );
+  }
+}
+
+/// Shown while the console cannot confirm that the assistance on screen is
+/// still the technician's: the connection with the server is lost, or the last
+/// attempt to check the assistance failed.
+///
+/// Remote control is withheld meanwhile — the decision is the console's, this
+/// only says why. It never claims the assistance ended: it may still be open,
+/// and the backend decides.
+const String kControlPausedBySocketNotice =
+    'Sin conexión con el servidor. El control remoto está en pausa hasta '
+    'confirmar que la asistencia sigue activa.';
+
+const String kControlPausedUnverifiedNotice =
+    'No se pudo confirmar que la asistencia sigue activa. El control remoto '
+    'está en pausa.';
+
+class _ControlPauseNotice extends StatelessWidget {
+  const _ControlPauseNotice({required this.state});
+
+  final RemoteSessionLive state;
+
+  @override
+  Widget build(BuildContext context) {
+    // Only an ACTIVE assistance has remote control to pause.
+    if (state is! RemoteSessionActive || state.isClosing) {
+      return const SizedBox.shrink();
+    }
+    final theme = Theme.of(context);
+
+    return BlocBuilder<TechnicianRealtimeBloc, TechnicianRealtimeStatus>(
+      buildWhen: (previous, current) =>
+          previous.isConnected != current.isConnected,
+      builder: (context, status) {
+        final message = !status.isConnected
+            ? kControlPausedBySocketNotice
+            : !state.isVerified
+            ? kControlPausedUnverifiedNotice
+            : null;
+        if (message == null) return const SizedBox.shrink();
+        // The error banner already offers REINTENTAR while it is shown.
+        final canRetry =
+            status.isConnected && !state.isVerified && state.failure == null;
+
+        return Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Row(
+            children: [
+              Icon(
+                Icons.pause_circle_outline,
+                size: 18,
+                color: theme.colorScheme.error,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  key: const Key('remote_control_paused_notice'),
+                  message,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.error,
+                  ),
+                ),
+              ),
+              if (canRetry)
+                TextButton(
+                  key: const Key('remote_control_paused_retry_button'),
+                  onPressed: () => context.read<RemoteSessionBloc>().add(
+                    const RemoteSessionRefreshRequested(),
+                  ),
+                  child: const Text('REINTENTAR'),
+                ),
+            ],
+          ),
+        );
+      },
     );
   }
 }
