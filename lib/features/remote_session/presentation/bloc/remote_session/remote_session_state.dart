@@ -15,6 +15,7 @@ sealed class RemoteSessionState extends Equatable {
     bool canRetryActivation = false,
     bool isVerified = true,
     int answeredAuthorityCheck = 0,
+    int failedAuthorityCheck = 0,
     Failure? failure,
   }) {
     if (session.isConnecting) {
@@ -25,6 +26,7 @@ sealed class RemoteSessionState extends Equatable {
         canRetryActivation: canRetryActivation,
         isVerified: isVerified,
         answeredAuthorityCheck: answeredAuthorityCheck,
+        failedAuthorityCheck: failedAuthorityCheck,
         failure: failure,
       );
     }
@@ -34,6 +36,7 @@ sealed class RemoteSessionState extends Equatable {
         isClosing: isClosing,
         isVerified: isVerified,
         answeredAuthorityCheck: answeredAuthorityCheck,
+        failedAuthorityCheck: failedAuthorityCheck,
         failure: failure,
       );
     }
@@ -79,6 +82,13 @@ sealed class RemoteSessionState extends Equatable {
   /// The highest [RemoteSessionAuthorityCheckRequested.checkId] a successful
   /// read has answered — one that started after that check was asked for.
   int get answeredAuthorityCheck => 0;
+
+  /// The highest check a *failed* read started after it was asked for.
+  ///
+  /// A read that fails twice in a row produces the same state twice, which a
+  /// listener never sees as a change. This is what makes every failure of a
+  /// check observable — the answer, not the state, is what is being waited for.
+  int get failedAuthorityCheck => 0;
 
   @override
   List<Object?> get props => const [];
@@ -129,6 +139,7 @@ sealed class RemoteSessionLive extends RemoteSessionState {
     this.isClosing = false,
     this.isVerified = true,
     this.answeredAuthorityCheck = 0,
+    this.failedAuthorityCheck = 0,
     this.failure,
   });
 
@@ -145,6 +156,9 @@ sealed class RemoteSessionLive extends RemoteSessionState {
   final int answeredAuthorityCheck;
 
   @override
+  final int failedAuthorityCheck;
+
+  @override
   final Failure? failure;
 
   @override
@@ -158,6 +172,7 @@ sealed class RemoteSessionLive extends RemoteSessionState {
     canRetryActivation,
     isVerified,
     answeredAuthorityCheck,
+    failedAuthorityCheck,
     failure,
   ];
 }
@@ -175,6 +190,7 @@ final class RemoteSessionConnecting extends RemoteSessionLive {
     this.canRetryActivation = false,
     super.isVerified,
     super.answeredAuthorityCheck,
+    super.failedAuthorityCheck,
     super.failure,
   });
 
@@ -196,6 +212,7 @@ final class RemoteSessionActive extends RemoteSessionLive {
     super.isClosing,
     super.isVerified,
     super.answeredAuthorityCheck,
+    super.failedAuthorityCheck,
     super.failure,
   });
 }

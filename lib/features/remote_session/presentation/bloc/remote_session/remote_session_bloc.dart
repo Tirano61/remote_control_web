@@ -107,6 +107,7 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
   /// started after it has answered.
   int _requestedAuthorityCheck = 0;
   int _answeredAuthorityCheck = 0;
+  int _failedAuthorityCheck = 0;
 
   /// Whether the last read about the session on screen succeeded.
   bool _isVerified = true;
@@ -418,6 +419,12 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
           logDebug('remote session read superseded, reading again');
           continue;
         }
+        // Whatever [apply] makes of it, a failed read answered this check
+        // too: the console waiting on it must hear so, even when the state
+        // it leaves behind looks exactly like the previous one.
+        if (result is Failed<RemoteSession?>) {
+          _failedAuthorityCheck = math.max(_failedAuthorityCheck, check);
+        }
         apply(result, check);
         return;
       }
@@ -592,6 +599,7 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
         canRetryActivation: canRetryActivation,
         isVerified: _isVerified,
         answeredAuthorityCheck: _answeredAuthorityCheck,
+        failedAuthorityCheck: _failedAuthorityCheck,
         failure: failure,
       ),
     );
