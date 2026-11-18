@@ -66,6 +66,15 @@ void main() {
   late WebRtcSessionBloc webRtcSessionBloc;
   late TechnicianConsoleCoordinator coordinator;
 
+  // The schedule keeps its length — that is the budget — but not its waits,
+  // so that a run of failures plays out within [settle]. The tests about the
+  // waits themselves set their own.
+  var recoveryDelays = List<Duration>.filled(
+    TechnicianConsoleCoordinator.maxAutomaticWebRtcRecoveriesPerSession,
+    Duration.zero,
+  );
+  var answerDeadline = const Duration(hours: 1);
+
   final activeSession = buildRemoteSession(
     status: RemoteSessionStatus.active,
     connectedAt: DateTime.utc(2026, 3, 11, 9, 35, 12),
@@ -112,6 +121,7 @@ void main() {
       peerClient: peers,
       signalingClient: signaling,
       iceConfiguration: const WebRtcIceConfiguration(),
+      answerDeadline: answerDeadline,
     );
     coordinator = TechnicianConsoleCoordinator(
       userSessionBloc: userSessionBloc,
@@ -123,6 +133,7 @@ void main() {
       webRtcSessionBloc: webRtcSessionBloc,
       realtimeClient: realtime,
       signalingClient: signaling,
+      webRtcRecoveryDelays: recoveryDelays,
     );
   });
 
@@ -805,24 +816,113 @@ void main() {
       expect(offers(), 1);
     });
 
-    test('REST failing: no offer until a read confirms the session', () async {
+    test('REST failing: no offer is made on an unconfirmed session', () async {
       await signInWithWorkingAssistance();
+      final readsBefore = remoteSessions.currentCount;
       remoteSessions.currentFailure = const NetworkFailure();
 
       peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
-      await settle();
+      // One read after the other, each in its own turn of the schedule.
+      for (var attempt = 0; attempt <= budget; attempt++) {
+        await settle();
+      }
+
+      // Every attempt read REST, none of them got an answer: nothing offered,
+      // and the schedule is spent rather than retried forever.
       expect(remoteSessionBloc.state.isVerified, isFalse);
       expect(peers.sessions, hasLength(1));
-
-      remoteSessions.currentFailure = null;
-      remoteSessionBloc.add(const RemoteSessionRefreshRequested());
-      await settle();
-
-      expect(peers.sessions, hasLength(2));
-      expect(offers(), 2);
+      expect(offers(), 1);
+      expect(remoteSessions.currentCount, greaterThan(readsBefore + 1));
+      expect(webRtcSessionBloc.state.isRecoveryScheduled, isFalse);
     });
 
-    test('the budget bounds the attempts, without a timer', () async {
+    test('ICE DISCONNECTED is waited out: nothing is renegotiated', () async {
+      await signInWithWorkingAssistance();
+      final peer = peers.last;
+      final reads = remoteSessions.currentCount;
+
+      peer.emitPeerState(WebRtcPeerConnectionState.disconnected);
+      await settle();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await settle();
+
+      expect(webRtcSessionBloc.state, isA<WebRtcInterrupted>());
+      expect(peer.isClosed, isFalse);
+      expect(peers.sessions, hasLength(1));
+      expect(offers(), 1);
+      expect(remoteSessions.currentCount, reads);
+
+      // ICE came back on its own: the same peer connection, nothing new.
+      peer.emitPeerState(WebRtcPeerConnectionState.connected);
+      await settle();
+      expect(webRtcSessionBloc.state.canSendRemoteControl, isTrue);
+      expect(peers.sessions, hasLength(1));
+    });
+
+    test('REINTENTAR after the schedule: REST first, then one offer', () async {
+      await signInWithWorkingAssistance();
+      for (var attempt = 0; attempt <= budget; attempt++) {
+        peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+        await settle();
+        await deliverOffer();
+      }
+      expect(peers.sessions, hasLength(budget + 1));
+      expect(webRtcSessionBloc.state.isRecoveryScheduled, isFalse);
+      expect(webRtcSessionBloc.state.canRetryConnection, isTrue);
+
+      final gate = Completer<void>();
+      remoteSessions.currentGate = gate.future;
+      final reads = remoteSessions.currentCount;
+      webRtcSessionBloc.add(
+        const WebRtcConnectionRetryRequested(remoteSessionId),
+      );
+      await settle();
+      // The read is out, the offer is not.
+      expect(remoteSessions.currentCount, reads + 1);
+      expect(peers.sessions, hasLength(budget + 1));
+
+      remoteSessions.currentGate = null;
+      gate.complete();
+      await settle();
+      expect(peers.sessions, hasLength(budget + 2));
+      expect(peers.sessions.where((peer) => !peer.isClosed), hasLength(1));
+      expect(offers(), budget + 2);
+    });
+
+    test('REINTENTAR on a session REST no longer has offers nothing', () async {
+      await signInWithWorkingAssistance();
+      for (var attempt = 0; attempt <= budget; attempt++) {
+        peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+        await settle();
+        await deliverOffer();
+      }
+      remoteSessions.current = null;
+
+      webRtcSessionBloc.add(
+        const WebRtcConnectionRetryRequested(remoteSessionId),
+      );
+      await settle();
+
+      expect(remoteSessionBloc.state, isA<RemoteSessionIdle>());
+      expect(webRtcSessionBloc.state, isA<WebRtcIdle>());
+      expect(peers.sessions, hasLength(budget + 1));
+      expect(offers(), budget + 1);
+    });
+
+    test('REINTENTAR for another session, or a working one, is ignored', () {
+      return () async {
+        await signInWithWorkingAssistance();
+        webRtcSessionBloc
+          ..add(const WebRtcConnectionRetryRequested(remoteSessionId))
+          ..add(const WebRtcConnectionRetryRequested('other-session'));
+        await settle();
+        expect(peers.sessions, hasLength(1));
+        expect(offers(), 1);
+        expect(webRtcSessionBloc.state.canSendRemoteControl, isTrue);
+      }();
+    });
+
+    test('the schedule bounds the attempts', () async {
       await signInWithWorkingAssistance();
 
       // Every new peer connection fails before connecting.
@@ -868,6 +968,323 @@ void main() {
       await reconnect();
 
       expect(peers.sessions, hasLength(budget + 2));
+    });
+  });
+
+  group('WebRTC recovery schedule', () {
+    // Short, but real, waits between the attempts.
+    const wait = Duration(milliseconds: 60);
+    setUpAll(() {
+      recoveryDelays = const [Duration.zero, wait, wait, wait];
+    });
+    tearDownAll(() {
+      recoveryDelays = List<Duration>.filled(
+        TechnicianConsoleCoordinator.maxAutomaticWebRtcRecoveriesPerSession,
+        Duration.zero,
+      );
+    });
+
+    Future<void> waitOut() async {
+      await Future<void>.delayed(wait + const Duration(milliseconds: 30));
+      await settle();
+    }
+
+    test('the attempts are spaced, and say so while they wait', () async {
+      await signInWithWorkingAssistance();
+
+      // The first one is immediate.
+      peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+      await settle();
+      await deliverOffer();
+      expect(peers.sessions, hasLength(2));
+
+      // The second one waits for its time, and the screen is told.
+      peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+      await settle();
+      expect(peers.sessions, hasLength(2));
+      expect(webRtcSessionBloc.state, isA<WebRtcFailed>());
+      expect(webRtcSessionBloc.state.isRecoveryScheduled, isTrue);
+
+      await waitOut();
+      expect(peers.sessions, hasLength(3));
+      expect(peers.sessions.where((peer) => !peer.isClosed), hasLength(1));
+    });
+
+    test('a REST read failing during the outage does not park it', () async {
+      // Seen on the T10A: the network that broke the peer connection breaks
+      // the read the recovery depends on, and the console never offered again.
+      await signInWithWorkingAssistance();
+      remoteSessions.currentFailure = const NetworkFailure();
+
+      peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+      await settle();
+      expect(remoteSessionBloc.state.isVerified, isFalse);
+      expect(peers.sessions, hasLength(1));
+      expect(webRtcSessionBloc.state.isRecoveryScheduled, isTrue);
+
+      // The network comes back before the next attempt: nobody pressed
+      // anything, and the session is read and renegotiated.
+      remoteSessions.currentFailure = null;
+      await waitOut();
+
+      expect(remoteSessionBloc.state.isVerified, isTrue);
+      expect(peers.sessions, hasLength(2));
+      expect(offers(), 2);
+      await deliverOffer();
+      await establish();
+      expect(webRtcSessionBloc.state.canSendRemoteControl, isTrue);
+    });
+
+    test('FINALIZAR while an attempt waits: nothing goes out', () async {
+      await signInWithWorkingAssistance();
+      peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+      await settle();
+      await deliverOffer();
+      peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+      await settle();
+      expect(webRtcSessionBloc.state.isRecoveryScheduled, isTrue);
+
+      remoteSessions.current = null;
+      remoteSessionBloc.add(const RemoteSessionCloseRequested());
+      await settle();
+      await waitOut();
+
+      expect(remoteSessions.closedIds, [remoteSessionId]);
+      expect(remoteSessionBloc.state, isA<RemoteSessionIdle>());
+      expect(webRtcSessionBloc.state, isA<WebRtcIdle>());
+      expect(peers.sessions, hasLength(2));
+      expect(offers(), 2);
+    });
+
+    test('a SYSTEM close while an attempt waits: nothing goes out', () async {
+      await signInWithWorkingAssistance();
+      peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+      await settle();
+      await deliverOffer();
+      peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+      await settle();
+
+      remoteSessions.current = null;
+      realtime.emitRemoteSessionClosed(remoteSessionId, endedBy: 'SYSTEM');
+      await settle();
+      await waitOut();
+
+      expect(remoteSessionBloc.state, isA<RemoteSessionIdle>());
+      expect(webRtcSessionBloc.state, isA<WebRtcIdle>());
+      expect(peers.sessions, hasLength(2));
+      expect(offers(), 2);
+    });
+
+    test('a close answered by the attempt\'s own read wins', () async {
+      await signInWithWorkingAssistance();
+      peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+      await settle();
+      await deliverOffer();
+      peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+      await settle();
+
+      // The backend closed it and the event was lost: REST says so.
+      remoteSessions.current = buildRemoteSession(
+        status: RemoteSessionStatus.closed,
+      );
+      await waitOut();
+
+      expect(remoteSessionBloc.state, isA<RemoteSessionIdle>());
+      expect(peers.sessions, hasLength(2));
+      expect(offers(), 2);
+    });
+
+    test('no socket when the attempt runs: the reconnection offers', () async {
+      await signInWithWorkingAssistance();
+      peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+      await settle();
+      await deliverOffer();
+      peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+      await settle();
+
+      realtime.emitReconnecting();
+      await settle();
+      await waitOut();
+      // Confirmed by REST or not, there is no room to offer into.
+      expect(peers.sessions, hasLength(2));
+      expect(webRtcSessionBloc.state.canSendRemoteControl, isFalse);
+
+      realtime.emitConnected();
+      await settle();
+      expect(peers.sessions, hasLength(3));
+      expect(peers.sessions.where((peer) => !peer.isClosed), hasLength(1));
+    });
+  });
+
+  group('unanswered offer', () {
+    const budget =
+        TechnicianConsoleCoordinator.maxAutomaticWebRtcRecoveriesPerSession;
+    const deadline = Duration(milliseconds: 40);
+    setUpAll(() => answerDeadline = deadline);
+    tearDownAll(() => answerDeadline = const Duration(hours: 1));
+
+    void answer(String sdp) => realtime.emitSignalingEvent('webrtc:answer', {
+      'remoteSessionId': remoteSessionId,
+      'from': 'DEVICE',
+      'sdp': sdp,
+    });
+
+    /// An `ACTIVE` assistance after an F5: the offer is relayed, and the
+    /// tablet does not answer.
+    Future<void> offerNobodyAnswers() async {
+      remoteSessions.current = activeSession;
+      supportRequests.requests = [buildSupportRequest()];
+      realtime.peerJoinedOnJoin = true;
+      await signIn();
+      realtime.emitConnected();
+      await settle();
+      await deliverOffer();
+      expect(peers.sessions, hasLength(1));
+    }
+
+    Future<void> passDeadline() async {
+      await Future<void>.delayed(deadline + const Duration(milliseconds: 30));
+      await settle();
+    }
+
+    test('before the deadline it is waiting, nothing else', () async {
+      await offerNobodyAnswers();
+      expect(webRtcSessionBloc.state, isA<WebRtcConnecting>());
+      expect(webRtcSessionBloc.state.isAnswerOverdue, isFalse);
+      expect(webRtcSessionBloc.state.canRetryConnection, isFalse);
+    });
+
+    test('REST first, then that negotiation alone is replaced', () async {
+      await offerNobodyAnswers();
+      final unanswered = peers.last;
+      final gate = Completer<void>();
+      remoteSessions.currentGate = gate.future;
+
+      await passDeadline();
+      // Reported, kept, and the attempt reads REST before anything.
+      expect(webRtcSessionBloc.state.isAnswerOverdue, isTrue);
+      expect(webRtcSessionBloc.state.isTabletSilent, isTrue);
+      expect(unanswered.isClosed, isFalse);
+      expect(peers.sessions, hasLength(1));
+
+      remoteSessions.currentGate = null;
+      gate.complete();
+      await settle();
+
+      expect(unanswered.isClosed, isTrue);
+      expect(peers.sessions, hasLength(2));
+      expect(peers.sessions.where((peer) => !peer.isClosed), hasLength(1));
+      expect(offers(), 2);
+      // Nothing was created, closed or accepted again for it.
+      expect(remoteSessions.createdSupportRequestIds, isEmpty);
+      expect(remoteSessions.closedIds, isEmpty);
+
+      // The tablet answers the new offer: applied once, and the screen stops
+      // saying it waits for the tablet.
+      await deliverOffer();
+      answer('v=0 answer');
+      await settle();
+      expect(peers.last.appliedAnswers, hasLength(1));
+      expect(webRtcSessionBloc.state.isTabletSilent, isFalse);
+    });
+
+    test('a late answer before the replacement is simply applied', () async {
+      await offerNobodyAnswers();
+      final unanswered = peers.last;
+      final gate = Completer<void>();
+      remoteSessions.currentGate = gate.future;
+      await passDeadline();
+      expect(webRtcSessionBloc.state.isAnswerOverdue, isTrue);
+
+      // The user allowed the capture while REST was being read.
+      answer('v=0 late answer');
+      await settle();
+      expect(unanswered.appliedAnswers, hasLength(1));
+      expect(webRtcSessionBloc.state.isAnswerOverdue, isFalse);
+
+      remoteSessions.currentGate = null;
+      gate.complete();
+      await settle();
+
+      // Nothing to recover any more: the same peer connection, no new offer.
+      expect(unanswered.isClosed, isFalse);
+      expect(peers.sessions, hasLength(1));
+      expect(offers(), 1);
+    });
+
+    test('an answer to the replaced offer is never applied twice', () async {
+      await offerNobodyAnswers();
+      await passDeadline();
+      final replacement = peers.last;
+      expect(peers.sessions, hasLength(2));
+
+      // The old answer, on the wire before the new offer was even relayed.
+      answer('v=0 stale answer');
+      await settle();
+      expect(replacement.appliedAnswers, isEmpty);
+
+      await deliverOffer();
+      answer('v=0 answer');
+      answer('v=0 duplicate answer');
+      await settle();
+      expect(replacement.appliedAnswers, hasLength(1));
+    });
+
+    test('REST without the session: the assistance ends, no offer', () async {
+      await offerNobodyAnswers();
+      remoteSessions.current = null;
+      await passDeadline();
+
+      expect(remoteSessionBloc.state, isA<RemoteSessionIdle>());
+      expect(webRtcSessionBloc.state, isA<WebRtcIdle>());
+      expect(peers.sessions, hasLength(1));
+      expect(peers.last.isClosed, isTrue);
+      expect(offers(), 1);
+    });
+
+    test('the deadline never ends the assistance by itself', () async {
+      await offerNobodyAnswers();
+      remoteSessions.currentFailure = const NetworkFailure();
+      await passDeadline();
+
+      // REST cannot be reached: nothing is replaced on an unconfirmed
+      // session, and nothing is closed either.
+      expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
+      expect(remoteSessions.closedIds, isEmpty);
+      expect(peers.sessions, hasLength(1));
+      expect(peers.last.isClosed, isFalse);
+      expect(webRtcSessionBloc.state.isAnswerOverdue, isTrue);
+    });
+
+    test('a silent tablet costs a bounded number of offers', () async {
+      await offerNobodyAnswers();
+      for (var round = 0; round < budget + 2; round++) {
+        await passDeadline();
+        await deliverOffer();
+      }
+      await passDeadline();
+
+      expect(peers.sessions, hasLength(budget + 1));
+      expect(offers(), budget + 1);
+      // The last one is kept for an answer that may still come.
+      expect(peers.last.isClosed, isFalse);
+      expect(webRtcSessionBloc.state.isAnswerOverdue, isTrue);
+      expect(webRtcSessionBloc.state.canRetryConnection, isTrue);
+      answer('v=0 finally');
+      await settle();
+      expect(peers.last.appliedAnswers, hasLength(1));
+    });
+
+    test('FINALIZAR on an unanswered offer releases it at once', () async {
+      await offerNobodyAnswers();
+      await passDeadline();
+      remoteSessions.current = null;
+      remoteSessionBloc.add(const RemoteSessionCloseRequested());
+      await settle();
+      await passDeadline();
+
+      expect(remoteSessionBloc.state, isA<RemoteSessionIdle>());
+      expect(peers.sessions.every((peer) => peer.isClosed), isTrue);
     });
   });
 

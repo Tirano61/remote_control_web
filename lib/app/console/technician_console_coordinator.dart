@@ -48,8 +48,12 @@ const String kRealtimeSessionRejectedNotice =
 ///   read since the socket came back,
 ///   socket connected                 -> remote control may be used
 /// another session replaces the held  -> the old peer connection is released
-/// WebRTC failed, session still live  -> GET current, then one new offer
-///                                       (bounded, see the recovery budget)
+/// WebRTC failed, session still live  -> GET current, then one new offer,
+///                                       on a bounded, spaced schedule
+/// offer unanswered past its deadline -> the same, replacing only that
+///                                       negotiation; a late answer still
+///                                       counts while nothing replaced it
+/// REINTENTAR on the connection       -> the same, with a fresh schedule
 /// tap refused session_not_active     -> GET current (the tap is not resent)
 /// remote-session:active              -> GET current (never the event as state)
 /// remote-session:closed (held id)    -> remote control and WebRTC end at once,
@@ -87,7 +91,10 @@ class TechnicianConsoleCoordinator {
     required WebRtcSessionBloc webRtcSessionBloc,
     required TechnicianRealtimeClient realtimeClient,
     required TechnicianSignalingClient signalingClient,
-  }) : _userSessionBloc = userSessionBloc,
+    List<Duration> webRtcRecoveryDelays = defaultWebRtcRecoveryDelays,
+  }) : assert(webRtcRecoveryDelays.isNotEmpty),
+       _webRtcRecoveryDelays = webRtcRecoveryDelays,
+       _userSessionBloc = userSessionBloc,
        _remoteSessionBloc = remoteSessionBloc,
        _technicianRealtimeBloc = technicianRealtimeBloc,
        _signalingJoinBloc = signalingJoinBloc,
@@ -107,14 +114,30 @@ class TechnicianConsoleCoordinator {
   static const int maxAutomaticRejoinsPerConnection = 1;
   static const int maxAutomaticReconciliationsPerConnection = 1;
 
-  /// How many times in a row a failed peer connection may be renegotiated
-  /// automatically for one `RemoteSession`.
+  /// When each automatic WebRTC recovery attempt of a run of failures starts,
+  /// counted from the failure — or the unanswered offer — that asks for it.
   ///
-  /// The budget is given back when a peer connection is really established
-  /// again, and starts over for a new session. Exhausted, the console waits for
-  /// a genuinely new situation — a socket reconnection, an F5, a new assistance
-  /// — and never retries on a timer.
-  static const int maxAutomaticWebRtcRecoveriesPerSession = 2;
+  /// One entry per attempt, so the list is also the budget. Spaced on purpose:
+  /// on the T10A, with the browser's UDP blocked, every new peer connection
+  /// failed 17–20 s after its offer, and two attempts in a row were spent —
+  /// and the console gave up for good — half a minute before the network came
+  /// back. Spread like this the attempts cover about two minutes of outage.
+  ///
+  /// Every attempt reads REST first, so one whose read fails is spent like
+  /// any other and the next one reads again: a failed read never parks the
+  /// recovery. The schedule starts over when a peer connection really works
+  /// again, on a socket reconnection, for a new session, and on REINTENTAR.
+  static const List<Duration> defaultWebRtcRecoveryDelays = [
+    Duration.zero,
+    Duration(seconds: 5),
+    Duration(seconds: 15),
+    Duration(seconds: 30),
+  ];
+
+  /// The number of automatic attempts in [defaultWebRtcRecoveryDelays].
+  static const int maxAutomaticWebRtcRecoveriesPerSession = 4;
+
+  final List<Duration> _webRtcRecoveryDelays;
 
   final UserSessionBloc _userSessionBloc;
   final RemoteSessionBloc _remoteSessionBloc;
@@ -203,13 +226,16 @@ class TechnicianConsoleCoordinator {
   /// replacing it.
   String? _heldRemoteSessionId;
 
-  /// Automatic WebRTC recovery: the session it is for, how many attempts its
-  /// budget has used, the check a renegotiation waits for, and whether the
-  /// current failure was already looked at.
+  /// WebRTC recovery: the session it is for, how many attempts of its
+  /// schedule were used, the attempt waiting for its time, the check a
+  /// renegotiation waits for, and whether the current failure — or unanswered
+  /// offer — was already looked at.
   String? _webRtcRecoverySessionId;
   int _webRtcRecoveries = 0;
+  Timer? _webRtcRecoveryTimer;
   int? _webRtcRecoveryCheck;
   bool _isWebRtcFailureSeen = false;
+  bool _isUnansweredOfferSeen = false;
 
   void start() {
     if (_isStarted) return;
@@ -236,7 +262,8 @@ class TechnicianConsoleCoordinator {
       ..add(
         _realtimeClient.devicePresenceUpdated.listen(_onDevicePresenceUpdated),
       )
-      ..add(_signalingClient.relayRefusals.listen(_onRelayRefused));
+      ..add(_signalingClient.relayRefusals.listen(_onRelayRefused))
+      ..add(_webRtcSessionBloc.connectionRetries.listen(_onConnectionRetry));
 
     // The console is opened by an already authenticated session, so the
     // current state has to be acted upon and not only its future changes.
@@ -248,6 +275,8 @@ class TechnicianConsoleCoordinator {
       await subscription.cancel();
     }
     _subscriptions.clear();
+    _webRtcRecoveryTimer?.cancel();
+    _webRtcRecoveryTimer = null;
     _isStarted = false;
   }
 
@@ -303,6 +332,9 @@ class TechnicianConsoleCoordinator {
         // this technician's. Required before the request even leaves, so
         // that no state already on screen can answer for it.
         _requestAuthorityCheck(requiredForControl: true);
+        // A new socket is a genuinely new situation: whatever the recovery
+        // had spent is given back, and the join below negotiates again.
+        _restartWebRtcRecovery();
         // No notification is replayed: whatever the tablet answered, created
         // or cancelled while the socket was down — and every presence change
         // of every device, `device:presence-updated` included — is only known
@@ -421,20 +453,38 @@ class TechnicianConsoleCoordinator {
     final isEstablished = state.isConnected && state.isControlChannelOpen;
     if (isEstablished && !_isWebRtcEstablished) {
       // A new episode of "the peers can work". The previous one's activation
-      // budget does not carry over, and neither does the recovery budget: a
+      // budget does not carry over, and neither does the recovery schedule: a
       // connection that really worked again ends the run of failures.
       _webRtcReadinessEpisode++;
-      _webRtcRecoveries = 0;
+      _restartWebRtcRecovery();
     }
     _isWebRtcEstablished = isEstablished;
 
     if (state is WebRtcFailed) {
       if (!_isWebRtcFailureSeen) {
         _isWebRtcFailureSeen = true;
-        _startWebRtcRecovery(state);
+        logDebug(
+          'webrtc failed ${state.remoteSessionId} (${state.reason.name})',
+        );
+        _scheduleWebRtcRecovery(state.remoteSessionId);
       }
     } else {
       _isWebRtcFailureSeen = false;
+    }
+
+    // An offer nobody answered. Most often the user of the tablet is reading
+    // Android's MediaProjection dialog, which nothing in the protocol says; the
+    // same silence is a refused or a lost offer. Nothing is torn down for it:
+    // the recovery reads REST first, waits its turn, and only then replaces
+    // that negotiation — and a late answer, while it is still there, counts.
+    if (state.isAnswerOverdue) {
+      if (!_isUnansweredOfferSeen) {
+        _isUnansweredOfferSeen = true;
+        logDebug('webrtc offer unanswered ${state.remoteSessionId}');
+        _scheduleWebRtcRecovery(state.remoteSessionId!);
+      }
+    } else {
+      _isUnansweredOfferSeen = false;
     }
 
     _activateIfEstablished();
@@ -678,7 +728,7 @@ class TechnicianConsoleCoordinator {
   /// `joined == true` is deliberately not enough. An offer relayed into a room
   /// the tablet has not entered is handed to nobody and silently dropped, and
   /// nothing would ever answer it.
-  void _negotiateWebRtcIfReady() {
+  void _negotiateWebRtcIfReady({bool replacesUnansweredOffer = false}) {
     final join = _signalingJoinBloc.state;
     if (join is! SignalingJoined || !join.peerJoined) return;
 
@@ -696,7 +746,12 @@ class TechnicianConsoleCoordinator {
     if (_requestedNegotiation == negotiation) return;
     _requestedNegotiation = negotiation;
 
-    _webRtcSessionBloc.add(WebRtcNegotiationRequested(session.id));
+    _webRtcSessionBloc.add(
+      WebRtcNegotiationRequested(
+        session.id,
+        replacesUnansweredOffer: replacesUnansweredOffer,
+      ),
+    );
   }
 
   /// Confirms to the backend that the assistance really started, when — and
@@ -803,44 +858,83 @@ class TechnicianConsoleCoordinator {
     );
   }
 
-  /// The peer connection of the session the console holds failed.
+  /// Whether the negotiation of [remoteSessionId] still needs recovering: it
+  /// failed, or its offer is unanswered. Anything else — a new negotiation
+  /// started by a reconnection, a late answer, a close — means it does not.
+  bool _needsWebRtcRecovery(String remoteSessionId) {
+    final webRtc = _webRtcSessionBloc.state;
+    if (webRtc.remoteSessionId != remoteSessionId) return false;
+    return webRtc is WebRtcFailed || webRtc.isAnswerOverdue;
+  }
+
+  /// Plans the next recovery attempt for the session the console holds.
   ///
   /// Nothing is renegotiated on the spot: a failure is also what a session
-  /// closed by the backend looks like from WebRTC. REST is asked first, and
-  /// only an answer that still shows this session live leads to a new offer —
-  /// see [_continueWebRtcRecovery]. The budget bounds the attempts.
-  void _startWebRtcRecovery(WebRtcFailed failed) {
+  /// closed by the backend looks like from WebRTC, so every attempt reads REST
+  /// first — see [_runWebRtcRecoveryAttempt]. One attempt at a time, each one
+  /// at its place in [defaultWebRtcRecoveryDelays], and never more than there
+  /// are places: exhausted, the console says so and waits for REINTENTAR or a
+  /// genuinely new situation.
+  void _scheduleWebRtcRecovery(String remoteSessionId) {
     final session = _remoteSessionBloc.state.session;
-    if (session == null ||
-        !session.isLive ||
-        session.id != failed.remoteSessionId) {
+    if (session == null || !session.isLive || session.id != remoteSessionId) {
       return;
     }
     if (_webRtcRecoverySessionId != session.id) {
+      _cancelWebRtcRecoveryAttempt();
       _webRtcRecoverySessionId = session.id;
       _webRtcRecoveries = 0;
     }
-    if (_webRtcRecoveries >= maxAutomaticWebRtcRecoveriesPerSession) {
+    // One attempt at a time: a failure reported while one is planned or
+    // reading REST is what that attempt is already about.
+    if (_webRtcRecoveryTimer != null || _webRtcRecoveryCheck != null) return;
+    if (_webRtcRecoveries >= _webRtcRecoveryDelays.length) {
       logDebug('webrtc recovery budget exhausted ${session.id}');
+      _publishWebRtcRecoveryScheduled(false);
       return;
     }
+    final delay = _webRtcRecoveryDelays[_webRtcRecoveries];
     _webRtcRecoveries++;
     logDebug(
-      'webrtc failed ${session.id} (${failed.reason.name}), '
-      'checking the session before recovering',
+      'webrtc recovery $_webRtcRecoveries/${_webRtcRecoveryDelays.length} '
+      'planned in ${delay.inMilliseconds} ms ${session.id}',
     );
+    _publishWebRtcRecoveryScheduled(true);
+    _webRtcRecoveryTimer = Timer(delay, _runWebRtcRecoveryAttempt);
+  }
+
+  /// The attempt's time came: REST is asked whether the session is still this
+  /// technician's, with a receipt [_continueWebRtcRecovery] waits for.
+  void _runWebRtcRecoveryAttempt() {
+    _webRtcRecoveryTimer = null;
+    if (!_isStarted) return;
+    final sessionId = _webRtcRecoverySessionId;
+    final session = _remoteSessionBloc.state.session;
+    if (sessionId == null ||
+        session == null ||
+        !session.isLive ||
+        session.id != sessionId ||
+        !_needsWebRtcRecovery(sessionId)) {
+      // Recovered, replaced or over meanwhile: nothing left to do.
+      _publishWebRtcRecoveryScheduled(false);
+      return;
+    }
+    logDebug('webrtc recovery checking the session $sessionId');
     _webRtcRecoveryCheck = _requestAuthorityCheck();
   }
 
-  /// Renegotiates a failed peer connection once REST confirmed its session.
+  /// Renegotiates once REST confirmed the session the recovery is for.
   ///
   /// A new offer goes out only if, by then, all of this still holds: the
   /// session REST answered with is the one that failed, live, and read after
-  /// the failure; the negotiation is still failed — a reconnection or a rejoin
-  /// may have restarted it meanwhile — and the usual readiness of
+  /// the attempt started; the negotiation still needs it — a reconnection or a
+  /// late answer may have settled it meanwhile — and the usual readiness of
   /// [_negotiateWebRtcIfReady] holds: socket, room and tablet. The WebRTC BLoC
-  /// releases the failed peer connection before making the new one, so there
-  /// are never two, and it never reuses the old data channel.
+  /// releases the old peer connection before making the new one, so there are
+  /// never two, and it never reuses the old data channel.
+  ///
+  /// A read that fails spends the attempt, and the next one is planned: the
+  /// network that broke the peer connection is often the one breaking REST.
   ///
   /// Whether the tablet can share its screen again without asking is the
   /// tablet's business: if Android needs a new MediaProjection consent, the
@@ -850,26 +944,76 @@ class TechnicianConsoleCoordinator {
     if (check == null) return;
     final state = _remoteSessionBloc.state;
     final session = state.session;
-    if (session == null ||
-        !session.isLive ||
-        session.id != _webRtcRecoverySessionId) {
+    final sessionId = _webRtcRecoverySessionId;
+    if (session == null || !session.isLive || session.id != sessionId) {
       _webRtcRecoveryCheck = null;
+      _publishWebRtcRecoveryScheduled(false);
       return;
     }
-    // Not answered yet, or answered with a failure: keep waiting. A retry, the
-    // next reconnection or the next trigger may still confirm it.
+    if (state.failedAuthorityCheck >= check) {
+      // The read failed. Not a confirmation, and not a reason to stop either.
+      _webRtcRecoveryCheck = null;
+      logDebug('webrtc recovery could not confirm the session $sessionId');
+      if (_needsWebRtcRecovery(session.id)) {
+        _scheduleWebRtcRecovery(session.id);
+      } else {
+        _publishWebRtcRecoveryScheduled(false);
+      }
+      return;
+    }
+    // Not answered yet: keep waiting for the read that carries the receipt.
     if (!state.isVerified || state.answeredAuthorityCheck < check) return;
     _webRtcRecoveryCheck = null;
     final webRtc = _webRtcSessionBloc.state;
-    if (webRtc is! WebRtcFailed || webRtc.remoteSessionId != session.id) {
+    if (!_needsWebRtcRecovery(session.id)) {
+      _publishWebRtcRecoveryScheduled(false);
       return;
     }
     logDebug('webrtc recovery ${session.id}');
+    _publishWebRtcRecoveryScheduled(false);
     _requestedNegotiation = null;
-    _negotiateWebRtcIfReady();
+    _negotiateWebRtcIfReady(
+      replacesUnansweredOffer:
+          webRtc is! WebRtcFailed && webRtc.isAnswerOverdue,
+    );
+  }
+
+  /// REINTENTAR on the connection: a fresh schedule, starting now. It still
+  /// goes through REST like every other attempt.
+  void _onConnectionRetry(String remoteSessionId) {
+    final session = _remoteSessionBloc.state.session;
+    if (session == null || !session.isLive || session.id != remoteSessionId) {
+      return;
+    }
+    if (_webRtcRecoveryCheck != null) return;
+    _restartWebRtcRecovery();
+    _webRtcRecoverySessionId = session.id;
+    _scheduleWebRtcRecovery(session.id);
+  }
+
+  /// Gives the schedule back: nothing planned, nothing spent. A check already
+  /// in flight still completes and is judged then.
+  void _restartWebRtcRecovery() {
+    _cancelWebRtcRecoveryAttempt();
+    _webRtcRecoveries = 0;
+  }
+
+  void _cancelWebRtcRecoveryAttempt() {
+    final timer = _webRtcRecoveryTimer;
+    if (timer == null) return;
+    timer.cancel();
+    _webRtcRecoveryTimer = null;
+    _publishWebRtcRecoveryScheduled(false);
+  }
+
+  void _publishWebRtcRecoveryScheduled(bool isScheduled) {
+    _webRtcSessionBloc.add(
+      WebRtcAutomaticRecoveryChanged(isScheduled: isScheduled),
+    );
   }
 
   void _forgetWebRtcRecovery() {
+    _cancelWebRtcRecoveryAttempt();
     _webRtcRecoverySessionId = null;
     _webRtcRecoveries = 0;
     _webRtcRecoveryCheck = null;
