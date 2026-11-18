@@ -19,6 +19,7 @@ import 'package:remote_control_web/features/remote_session/presentation/widgets/
 import 'package:remote_control_web/features/signaling/data/technician_signaling_client_impl.dart';
 import 'package:remote_control_web/features/support/domain/entities/support_request_status.dart';
 import 'package:remote_control_web/features/webrtc/domain/entities/webrtc_connection_state.dart';
+import 'package:remote_control_web/features/webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dart';
 import 'package:remote_control_web/features/webrtc/presentation/widgets/remote_screen_view.dart';
 
 import '../../../support/auth_test_doubles.dart';
@@ -723,8 +724,24 @@ void main() {
             TechnicianConsoleCoordinator.maxAutomaticWebRtcRecoveriesPerSession;
         attempt++
       ) {
+        final before = peers.sessions.length;
         peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
         await settleUi(tester);
+        if (attempt > 0) {
+          // While an attempt waits for its turn the console says it retries.
+          expect(
+            tester.widget<Text>(find.byKey(const Key('webrtc_status'))).data,
+            kWebRtcRecoveringNotice,
+          );
+        }
+        // The attempts are spaced: the next peer connection appears once its
+        // turn comes, and its offer is relayed then.
+        for (var second = 0; second < 31; second++) {
+          if (peers.sessions.length > before) break;
+          await tester.pump(const Duration(seconds: 1));
+        }
+        await settleUi(tester);
+        expect(peers.sessions, hasLength(before + 1));
         realtime.answerRelayAck({
           'delivered': true,
           'remoteSessionId': remoteSessionId,
@@ -746,6 +763,81 @@ void main() {
       expect(
         tester.widget<Text>(find.byKey(const Key('webrtc_status'))).data,
         'No se pudo establecer la conexión remota.',
+      );
+      // Nothing more happens on its own ...
+      await tester.pump(const Duration(minutes: 5));
+      await settleUi(tester);
+      expect(
+        peers.sessions,
+        hasLength(
+          TechnicianConsoleCoordinator.maxAutomaticWebRtcRecoveriesPerSession +
+              1,
+        ),
+      );
+
+      // ... until the technician asks: REST first, then one new offer.
+      final retry = find.byKey(const Key('webrtc_retry_button'));
+      expect(retry, findsOneWidget);
+      await tester.tap(retry);
+      await settleUi(tester);
+      expect(
+        peers.sessions,
+        hasLength(
+          TechnicianConsoleCoordinator.maxAutomaticWebRtcRecoveriesPerSession +
+              2,
+        ),
+      );
+      realtime.answerRelayAck({
+        'delivered': true,
+        'remoteSessionId': remoteSessionId,
+      });
+      await settleUi(tester);
+    });
+
+    testWidgets('an unanswered offer is said, kept, and replaced once', (
+      tester,
+    ) async {
+      await pumpNegotiating(tester);
+      final waiting = peers.last;
+      expect(find.byKey(const Key('webrtc_retry_button')), findsNothing);
+
+      await tester.pump(WebRtcSessionBloc.defaultAnswerDeadline);
+      await settleUi(tester);
+
+      // Not an error, and not the end of anything: the tablet may be asking
+      // its user for the screen. The first attempt reads REST and replaces
+      // that negotiation alone.
+      expect(
+        tester.widget<Text>(find.byKey(const Key('webrtc_status'))).data,
+        kWebRtcUnansweredNotice,
+      );
+      expect(find.text('FINALIZAR ASISTENCIA'), findsOneWidget);
+      expect(waiting.isClosed, isTrue);
+      expect(peers.sessions, hasLength(2));
+      expect(peers.sessions.where((peer) => !peer.isClosed), hasLength(1));
+
+      // The new offer goes out: still silent, still said why it may be.
+      realtime.answerRelayAck({
+        'delivered': true,
+        'remoteSessionId': remoteSessionId,
+      });
+      await settleUi(tester);
+      expect(
+        tester.widget<Text>(find.byKey(const Key('webrtc_status'))).data,
+        kWebRtcUnansweredNotice,
+      );
+
+      // The user of the tablet allowed the capture: the answer arrives.
+      realtime.emitSignalingEvent('webrtc:answer', {
+        'remoteSessionId': remoteSessionId,
+        'from': 'DEVICE',
+        'sdp': 'v=0 answer',
+      });
+      await settleUi(tester);
+      expect(peers.last.appliedAnswers, hasLength(1));
+      expect(
+        tester.widget<Text>(find.byKey(const Key('webrtc_status'))).data,
+        'Conectando con el dispositivo...',
       );
     });
 

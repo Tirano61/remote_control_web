@@ -1112,6 +1112,20 @@ class _ControlPauseNotice extends StatelessWidget {
   }
 }
 
+/// The peer connection failed and the console has an attempt planned.
+const String kWebRtcRecoveringNotice =
+    'Se perdió la conexión con el dispositivo. Reintentando...';
+
+/// The peer connection failed and no automatic attempt is left.
+const String kWebRtcFailedNotice = 'No se pudo establecer la conexión remota.';
+
+/// The offer was relayed long ago and the tablet has not answered. Most often
+/// its user is still looking at Android's screen sharing dialog, so it is not
+/// worded as an error.
+const String kWebRtcUnansweredNotice =
+    'El dispositivo todavía no respondió. Si la tablet pide permiso para '
+    'compartir la pantalla, debe aceptarse allí.';
+
 /// One line telling the technician whether the browser reached the tablet.
 ///
 /// It reports the WebRTC negotiation, which is a different fact from both the
@@ -1139,6 +1153,21 @@ class _RemoteConnectionStatus extends StatelessWidget {
 
         final isEstablished = state.isConnected && state.isControlChannelOpen;
         final hasFailed = state is WebRtcFailed;
+        final isUnanswered =
+            !hasFailed && (state.isAnswerOverdue || state.isTabletSilent);
+        final isRecovering = hasFailed && state.isRecoveryScheduled;
+        final remoteSessionId = state.remoteSessionId;
+        final isError = hasFailed && !isRecovering;
+
+        final message = isEstablished
+            ? 'Conexión remota establecida'
+            : isRecovering
+            ? kWebRtcRecoveringNotice
+            : hasFailed
+            ? kWebRtcFailedNotice
+            : isUnanswered
+            ? kWebRtcUnansweredNotice
+            : 'Conectando con el dispositivo...';
 
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -1148,11 +1177,13 @@ class _RemoteConnectionStatus extends StatelessWidget {
                 Icon(
                   isEstablished
                       ? Icons.cast_connected
-                      : hasFailed
+                      : isError
                       ? Icons.error_outline
+                      : isUnanswered
+                      ? Icons.hourglass_empty
                       : Icons.sync,
                   size: 18,
-                  color: hasFailed
+                  color: isError
                       ? theme.colorScheme.error
                       : theme.colorScheme.onSurfaceVariant,
                 ),
@@ -1160,13 +1191,9 @@ class _RemoteConnectionStatus extends StatelessWidget {
                 Expanded(
                   child: Text(
                     key: const Key('webrtc_status'),
-                    isEstablished
-                        ? 'Conexión remota establecida'
-                        : hasFailed
-                        ? 'No se pudo establecer la conexión remota.'
-                        : 'Conectando con el dispositivo...',
+                    message,
                     style: theme.textTheme.bodySmall?.copyWith(
-                      color: hasFailed
+                      color: isError
                           ? theme.colorScheme.error
                           : theme.colorScheme.onSurfaceVariant,
                     ),
@@ -1174,6 +1201,20 @@ class _RemoteConnectionStatus extends StatelessWidget {
                 ),
               ],
             ),
+            // Always there when a new attempt could help, also while one is
+            // planned: the technician may know the network is back.
+            if (state.canRetryConnection && remoteSessionId != null)
+              Padding(
+                padding: const EdgeInsets.only(left: 18),
+                child: TextButton.icon(
+                  key: const Key('webrtc_retry_button'),
+                  onPressed: () => context.read<WebRtcSessionBloc>().add(
+                    WebRtcConnectionRetryRequested(remoteSessionId),
+                  ),
+                  icon: const Icon(Icons.refresh, size: 18),
+                  label: const Text('REINTENTAR CONEXIÓN'),
+                ),
+              ),
             // Debug builds only, and deliberately shallow: the two facts a
             // developer needs while bringing WebRTC up, and nothing that could
             // leak an SDP, a candidate or a token.
