@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import '../../core/error/failure.dart';
+import '../../core/logging/debug_log.dart';
 import '../../features/auth/presentation/bloc/user_session/user_session_bloc.dart';
 import '../../features/devices/presentation/bloc/devices/devices_bloc.dart';
 import '../../features/remote_control/domain/entities/remote_control_status.dart';
@@ -35,16 +36,24 @@ const String kRealtimeSessionRejectedNotice =
 /// signed out                         -> disconnect + forget the session
 /// socket connected + live session    -> remote-session:join
 /// socket reconnected                 -> GET /devices + GET /support-requests
-/// socket lost                        -> the join is no longer valid
+///                                       + GET /remote-sessions/current (check)
+/// socket lost                        -> remote control suspended, at once;
+///                                       the join is no longer valid
 /// joined + peer ready + live session -> negotiate WebRTC
 /// joined without the peer            -> wait: an offer would reach nobody
 /// signaling room lost                -> incomplete negotiations are dropped
 /// live session gone                  -> the peer connection is released
 /// CONNECTING + connected + control   -> POST /remote-sessions/:id/activate
-/// ACTIVE and not closing             -> remote control may be used
+/// ACTIVE, not closing, confirmed by a
+///   read since the socket came back,
+///   socket connected                 -> remote control may be used
+/// another session replaces the held  -> the old peer connection is released
 /// tap refused session_not_active     -> GET current (the tap is not resent)
 /// remote-session:active              -> GET current (never the event as state)
-/// remote-session:closed              -> GET current (never the event as state)
+/// remote-session:closed (held id)    -> remote control and WebRTC end at once,
+///                                       the session ends, then GET current
+/// remote-session:closed (other id)   -> GET current
+/// join refused UNAUTHORIZED          -> GET current (once per connection)
 /// support-request:updated            -> GET /support-requests (idem)
 /// support-request:queue-updated      -> GET /support-requests (idem)
 /// device:presence-updated            -> GET /devices + GET /support-requests
@@ -170,6 +179,19 @@ class TechnicianConsoleCoordinator {
   /// sides.
   (int, String)? _requestedNegotiation;
 
+  /// Numbers the authority checks sent to the [RemoteSessionBloc]. Never reset,
+  /// so a check of a previous connection can never answer a later one.
+  int _authorityCheckCounter = 0;
+
+  /// The check remote control waits for: a successful read that started after
+  /// the socket last came back. Until the session state answers it, the
+  /// session on screen is not taken as confirmed, whatever it says.
+  int _requiredAuthorityCheck = 0;
+
+  /// The live session the console last acted upon, to notice another one
+  /// replacing it.
+  String? _heldRemoteSessionId;
+
   void start() {
     if (_isStarted) return;
     _isStarted = true;
@@ -234,6 +256,8 @@ class TechnicianConsoleCoordinator {
     _hadLiveSession = false;
     _lastConnectionId = null;
     _requestedNegotiation = null;
+    _heldRemoteSessionId = null;
+    _requiredAuthorityCheck = 0;
     _forgetWebRtcReadiness();
     _clearRelayGuards();
   }
@@ -255,12 +279,19 @@ class TechnicianConsoleCoordinator {
       _lastConnectionId = status.connectionId;
       if (previousConnectionId != null &&
           previousConnectionId != status.connectionId) {
+        // Remote control stays suspended until REST says the session is still
+        // this technician's. Required before the request even leaves, so
+        // that no state already on screen can answer for it.
+        _requestAuthorityCheck(requiredForControl: true);
         // No notification is replayed: whatever the tablet answered, created
         // or cancelled while the socket was down — and every presence change
         // of every device, `device:presence-updated` included — is only known
         // to REST. Both collections are re-read, because both show presence.
+        // The remote session is too: a `remote-session:closed` sent while the
+        // socket was down — a `SYSTEM` close above all — is lost for good.
         _reconcilePresenceAndQueue();
       }
+      _publishControlAuthority();
       _resetRelayGuards(connectionId: status.connectionId);
       _joinLiveSessionIfPossible();
       // Readiness is never carried over a reconnection: this socket has to be
@@ -269,6 +300,12 @@ class TechnicianConsoleCoordinator {
       return;
     }
 
+    // First, before anything is awaited anywhere: without the socket the
+    // console cannot hear a `remote-session:closed`, so it no longer knows the
+    // session is still its own. Remote control is suspended — a finger still
+    // down is lifted, whatever is pending is dropped — and comes back only
+    // after a read made once the socket is back.
+    _publishControlAuthority();
     // Rooms do not survive the connection, so nothing is joined any more. The
     // peer connection is not touched here: that is decided when the join state
     // changes, and a connected one survives a socket that dropped.
@@ -281,15 +318,24 @@ class TechnicianConsoleCoordinator {
       _userSessionBloc.add(const UserSessionInvalidated());
     }
 
+    final liveId = state.hasLiveSession ? state.session!.id : null;
+    final heldId = _heldRemoteSessionId;
+    if (heldId != null && liveId != null && heldId != liveId) {
+      // REST answered with a different assistance than the one the console
+      // held: the old one is over. Nothing of it is inherited — not its peer
+      // connection, its channel, its pending commands nor its room — and the
+      // new one goes through the usual join and negotiation.
+      logDebug('remote session replaced $heldId -> $liveId');
+      _signalingJoinBloc.add(const SignalingJoinReset());
+      _webRtcSessionBloc.add(const WebRtcSessionTerminated());
+      _requestedNegotiation = null;
+      _requestedActivation = null;
+    }
+    _heldRemoteSessionId = liveId;
+
     // Remote control stops the moment the close is asked for, not when the
     // backend confirms it, and comes back only if that close fails.
-    _webRtcSessionBloc.add(
-      WebRtcRemoteSessionActivityChanged(
-        state is RemoteSessionActive && !state.isClosing
-            ? state.session.id
-            : null,
-      ),
-    );
+    _publishControlAuthority();
 
     if (state.hasLiveSession) {
       _hadLiveSession = true;
@@ -324,6 +370,14 @@ class TechnicianConsoleCoordinator {
     if (state is SignalingJoined) {
       _negotiateWebRtcIfReady();
       return;
+    }
+
+    // A join refused `UNAUTHORIZED` is how a session closed meanwhile — by the
+    // tablet, or by the backend while this socket was away — looks from
+    // signaling. REST says which; the budget keeps it to one read.
+    if (state is SignalingUnavailable &&
+        state.error == SignalingErrorCode.unauthorized) {
+      _reconcileAfterRelayRefusal();
     }
 
     // Not in the room any more. An incomplete negotiation cannot finish
@@ -389,11 +443,36 @@ class TechnicianConsoleCoordinator {
     _remoteSessionBloc.add(const RemoteSessionRefreshRequested());
   }
 
+  /// `remote-session:closed` arrived over `/technicians`: the tablet closed
+  /// the assistance (`DEVICE`) or the backend did (`SYSTEM`). Any other value
+  /// means the same: the session is over.
+  ///
+  /// The backend emits it after the close committed, and a closed session never
+  /// reopens. For the session the console holds it is therefore acted upon at
+  /// once, before any REST answer: remote control is withdrawn — a finger still
+  /// down is lifted, pending commands are dropped — and the peer connection, its
+  /// data channel and the room are released. The session itself ends in the
+  /// [RemoteSessionBloc], which also makes sure no read, in flight or not,
+  /// brings it back. REST is read afterwards, as always.
+  ///
+  /// An event about any other id never touches the session on screen: its id
+  /// is not adopted, and it only triggers that same read.
   void _onRemoteSessionClosed(RemoteSessionClosedNotice notice) {
-    // The event is a trigger, never the state: its id is not adopted and the
-    // current session is not closed locally, not even when the ids match.
-    // REST decides, here as everywhere else.
-    _remoteSessionBloc.add(const RemoteSessionRefreshRequested());
+    final held = _remoteSessionBloc.state.session;
+    if (held != null && held.id == notice.remoteSessionId) {
+      _webRtcSessionBloc
+        ..add(const WebRtcRemoteSessionActivityChanged(null))
+        ..add(const WebRtcSessionTerminated());
+      _signalingJoinBloc.add(const SignalingJoinReset());
+      _requestedNegotiation = null;
+      _requestedActivation = null;
+    }
+    _remoteSessionBloc.add(
+      RemoteSessionClosedReported(
+        notice.remoteSessionId,
+        endedBy: notice.endedBy,
+      ),
+    );
   }
 
   /// `support-request:updated` arrived over `/technicians`: the tablet
@@ -607,13 +686,11 @@ class TechnicianConsoleCoordinator {
   /// not the connection. A socket that dropped afterwards changes nothing —
   /// WebRTC is peer to peer and `/activate` is REST.
   ///
-  /// Known limitation of this stage: the transition is one way. If the peer
-  /// connection fails after the backend has been told the assistance started —
-  /// or while `/activate` is still unanswered — the session stays `ACTIVE`
-  /// server side until somebody closes it. Nothing here reverts it, there is
-  /// no heartbeat and no automatic close: deciding when a broken connection
-  /// should end an assistance is a lifecycle policy, and it belongs to its own
-  /// stage rather than to a silent rollback made from the client.
+  /// The transition is one way. If the peer connection fails after the backend
+  /// has been told the assistance started, the session stays `ACTIVE` server
+  /// side, and if nobody
+  /// takes part in the session any more the backend closes it on its own
+  /// (`endedBy: SYSTEM`, after its grace period). Nothing here reverts it.
   void _activateIfEstablished() {
     final webRtc = _webRtcSessionBloc.state;
     if (!webRtc.isConnected || !webRtc.isControlChannelOpen) return;
@@ -641,6 +718,54 @@ class TechnicianConsoleCoordinator {
   void _forgetWebRtcReadiness() {
     _requestedActivation = null;
     _isWebRtcEstablished = false;
+  }
+
+  /// Asks REST whether the session is still this technician's, with a
+  /// receipt the session state reports once a read started afterwards
+  /// succeeded. With [requiredForControl], remote control waits for it.
+  int _requestAuthorityCheck({bool requiredForControl = false}) {
+    final check = ++_authorityCheckCounter;
+    if (requiredForControl) _requiredAuthorityCheck = check;
+    _remoteSessionBloc.add(RemoteSessionAuthorityCheckRequested(check));
+    return check;
+  }
+
+  /// Tells the WebRTC layer which session remote control may run on, if any.
+  ///
+  /// All of this has to hold, and is evaluated again on every change of any
+  /// of it:
+  ///
+  /// ```text
+  /// signed in
+  /// + RemoteSession ACTIVE, and no close in flight
+  /// + its last read succeeded (isVerified)
+  /// + a read made after the socket last came back answered (authority check)
+  /// + the /technicians socket is connected
+  /// ```
+  ///
+  /// The socket is part of it because it is how the console hears
+  /// `remote-session:closed`: without it, the backend may close the session —
+  /// automatically, after its grace period — and the console would not know.
+  /// The peer connection and its data channel are *not* part of it: they say
+  /// the tablet can be reached, never that the technician may reach it.
+  ///
+  /// The WebRTC BLoC drops what it had pending the moment this becomes `null`,
+  /// so a suspension takes effect at once and is never queued behind a REST
+  /// call.
+  void _publishControlAuthority() {
+    final state = _remoteSessionBloc.state;
+    final isAuthorized =
+        _userSessionBloc.state is UserSessionAuthenticated &&
+        state is RemoteSessionActive &&
+        !state.isClosing &&
+        state.isVerified &&
+        state.answeredAuthorityCheck >= _requiredAuthorityCheck &&
+        _technicianRealtimeBloc.state.isConnected;
+    _webRtcSessionBloc.add(
+      WebRtcRemoteSessionActivityChanged(
+        isAuthorized ? state.session.id : null,
+      ),
+    );
   }
 
   void _joinLiveSessionIfPossible() {
