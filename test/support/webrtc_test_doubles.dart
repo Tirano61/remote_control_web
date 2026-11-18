@@ -162,7 +162,10 @@ class FakeWebRtcPeerSession implements WebRtcPeerSession {
   Future<void> close() async {
     closeCount++;
     calls.add('close');
-    if (!_events.isClosed) await _events.close();
+    // Not awaited: under fake_async the done future of a broadcast controller
+    // whose last listener was cancelled never completes, which would freeze a
+    // release that a real event loop completes at once.
+    if (!_events.isClosed) unawaited(_events.close());
   }
 
   // --- test helpers -------------------------------------------------------

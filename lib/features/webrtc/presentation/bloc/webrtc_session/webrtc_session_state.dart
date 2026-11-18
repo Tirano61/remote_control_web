@@ -126,6 +126,28 @@ sealed class WebRtcSessionState extends Equatable {
       !remoteControl.isSettling &&
       !remoteControl.isTouchActive;
 
+  /// The offer was relayed long ago and no answer came back.
+  ///
+  /// Not a failure, and nothing is torn down for it: the tablet answers only
+  /// once Android's MediaProjection consent has been answered, which takes as
+  /// long as a person takes, and nothing in the protocol tells the console the
+  /// tablet is waiting for one. The same silence is what an offer the tablet
+  /// refused, or one that got lost, looks like. A late answer is still applied.
+  bool get isAnswerOverdue => false;
+
+  /// No offer of this session has been answered for longer than the answer
+  /// deadline, across the negotiations that replaced one another meanwhile.
+  /// Cleared by the first answer, a connection, or the end of the session.
+  bool get isTabletSilent => false;
+
+  /// The console will try to restore the connection on its own, within its
+  /// bounded recovery budget. When this is `false` on a failure, nothing will
+  /// happen until the technician asks for it.
+  bool get isRecoveryScheduled => false;
+
+  /// Whether the technician may ask for a new connection attempt now.
+  bool get canRetryConnection => this is WebRtcFailed || isAnswerOverdue;
+
   /// Whether losing the signaling socket must leave the peer connection alone.
   ///
   /// WebRTC is peer to peer: once media/data flows, Socket.IO is not in the
@@ -150,6 +172,9 @@ sealed class WebRtcNegotiation extends WebRtcSessionState {
     this.controlChannelState = WebRtcDataChannelState.closed,
     this.remoteVideoTrack,
     this.remoteControl = const RemoteControlStatus(),
+    this.isAnswerOverdue = false,
+    this.isRecoveryScheduled = false,
+    this.isTabletSilent = false,
   });
 
   @override
@@ -165,6 +190,15 @@ sealed class WebRtcNegotiation extends WebRtcSessionState {
   final RemoteControlStatus remoteControl;
 
   @override
+  final bool isAnswerOverdue;
+
+  @override
+  final bool isRecoveryScheduled;
+
+  @override
+  final bool isTabletSilent;
+
+  @override
   bool get hasNegotiation => true;
 
   @override
@@ -173,6 +207,9 @@ sealed class WebRtcNegotiation extends WebRtcSessionState {
     controlChannelState,
     remoteVideoTrack,
     remoteControl,
+    isAnswerOverdue,
+    isRecoveryScheduled,
+    isTabletSilent,
   ];
 }
 
@@ -183,6 +220,9 @@ final class WebRtcPreparing extends WebRtcNegotiation {
     super.controlChannelState,
     super.remoteVideoTrack,
     super.remoteControl,
+    super.isAnswerOverdue,
+    super.isRecoveryScheduled,
+    super.isTabletSilent,
   });
 }
 
@@ -193,6 +233,9 @@ final class WebRtcOffering extends WebRtcNegotiation {
     super.controlChannelState,
     super.remoteVideoTrack,
     super.remoteControl,
+    super.isAnswerOverdue,
+    super.isRecoveryScheduled,
+    super.isTabletSilent,
   });
 }
 
@@ -206,6 +249,9 @@ final class WebRtcConnecting extends WebRtcNegotiation {
     super.controlChannelState,
     super.remoteVideoTrack,
     super.remoteControl,
+    super.isAnswerOverdue,
+    super.isRecoveryScheduled,
+    super.isTabletSilent,
   });
 }
 
@@ -221,6 +267,9 @@ final class WebRtcConnected extends WebRtcNegotiation {
     super.controlChannelState,
     super.remoteVideoTrack,
     super.remoteControl,
+    super.isAnswerOverdue,
+    super.isRecoveryScheduled,
+    super.isTabletSilent,
   });
 
   @override
@@ -240,6 +289,9 @@ final class WebRtcInterrupted extends WebRtcNegotiation {
     super.controlChannelState,
     super.remoteVideoTrack,
     super.remoteControl,
+    super.isAnswerOverdue,
+    super.isRecoveryScheduled,
+    super.isTabletSilent,
   });
 
   @override
@@ -250,10 +302,16 @@ final class WebRtcInterrupted extends WebRtcNegotiation {
 ///
 /// No automatic retry is made from here: a new negotiation starts when a
 /// genuinely new situation appears — a new connection, a new join, a new
-/// readiness — or when the console, within its recovery budget and only after
-/// REST confirmed the session is still live, asks for one.
+/// readiness — when the console, within its recovery schedule and only after
+/// REST confirmed the session is still live, asks for one, or when the
+/// technician presses REINTENTAR. [isRecoveryScheduled] says whether the
+/// console still has an attempt planned.
 final class WebRtcFailed extends WebRtcSessionState {
-  const WebRtcFailed({required this.remoteSessionId, required this.reason});
+  const WebRtcFailed({
+    required this.remoteSessionId,
+    required this.reason,
+    this.isRecoveryScheduled = false,
+  });
 
   @override
   final String remoteSessionId;
@@ -261,7 +319,10 @@ final class WebRtcFailed extends WebRtcSessionState {
   final WebRtcFailureReason reason;
 
   @override
-  List<Object?> get props => [remoteSessionId, reason];
+  final bool isRecoveryScheduled;
+
+  @override
+  List<Object?> get props => [remoteSessionId, reason, isRecoveryScheduled];
 }
 
 /// The peer connection reported `closed`.
