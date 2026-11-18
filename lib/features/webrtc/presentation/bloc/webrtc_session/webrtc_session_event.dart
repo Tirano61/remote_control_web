@@ -14,12 +14,60 @@ sealed class WebRtcSessionEvent extends Equatable {
 /// reconnection, a new assistance — and the BLoC decides whether it means a
 /// new peer connection or nothing at all.
 final class WebRtcNegotiationRequested extends WebRtcSessionEvent {
-  const WebRtcNegotiationRequested(this.remoteSessionId);
+  const WebRtcNegotiationRequested(
+    this.remoteSessionId, {
+    this.replacesUnansweredOffer = false,
+  });
+
+  final String remoteSessionId;
+
+  /// The console checked with REST that the session is still live, and asks
+  /// for the negotiation whose offer was never answered to be replaced.
+  ///
+  /// It only ever replaces that one: a negotiation that got its answer — and
+  /// a connected one above all — is still never touched by a new request.
+  final bool replacesUnansweredOffer;
+
+  @override
+  List<Object?> get props => [remoteSessionId, replacesUnansweredOffer];
+}
+
+/// Whether the console has an automatic recovery attempt in its schedule.
+///
+/// Only said, never acted upon here: the console owns the schedule, the BLoC
+/// carries the fact so that the screen can tell "reconnecting" from "stopped".
+final class WebRtcAutomaticRecoveryChanged extends WebRtcSessionEvent {
+  const WebRtcAutomaticRecoveryChanged({required this.isScheduled});
+
+  final bool isScheduled;
+
+  @override
+  List<Object?> get props => [isScheduled];
+}
+
+/// The technician pressed REINTENTAR on a connection that failed or whose
+/// offer was never answered.
+///
+/// The BLoC does not negotiate on its own because of it: a new offer needs the
+/// session confirmed by REST first, which is the console's call. The request is
+/// handed on through [WebRtcSessionBloc.connectionRetries].
+final class WebRtcConnectionRetryRequested extends WebRtcSessionEvent {
+  const WebRtcConnectionRetryRequested(this.remoteSessionId);
 
   final String remoteSessionId;
 
   @override
   List<Object?> get props => [remoteSessionId];
+}
+
+/// The answer to the current offer did not arrive in time. Internal.
+final class _WebRtcAnswerDeadlineReached extends WebRtcSessionEvent {
+  const _WebRtcAnswerDeadlineReached(this.generation);
+
+  final int generation;
+
+  @override
+  List<Object?> get props => [generation];
 }
 
 /// The signaling room was lost: the socket dropped, the join expired, or the

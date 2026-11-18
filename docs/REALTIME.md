@@ -19,11 +19,21 @@ remote-session:active          ->  GET /remote-sessions/current
 remote-session:closed          ->  GET /remote-sessions/current
 socket reconnected             ->  GET /devices
                                    GET /support-requests
+                                   GET /remote-sessions/current
 ```
 
 The wiring lives in `TechnicianConsoleCoordinator`
 (`lib/app/console/technician_console_coordinator.dart`). No BLoC imports
 another, no widget listens to the socket, and nothing is polled.
+
+One exception to "never state": `remote-session:closed` naming the session on
+screen ends it at once — remote control, peer connection, data channel and
+room — before REST answers. The backend emits it only after the close
+committed and a closed session never reopens, so there is nothing for REST to
+contradict; REST is still read afterwards. See
+[SESSION_LIFECYCLE.md](SESSION_LIFECYCLE.md), which also covers the automatic
+`SYSTEM` close, the suspension of remote control while the socket is down and
+the WebRTC recovery.
 
 ## Device presence
 
@@ -106,15 +116,20 @@ collections:
 ```text
 socket drops
   events may be lost
+  remote control suspended at once
 socket reconnects (a new connection id)
   GET /devices
   GET /support-requests
+  GET /remote-sessions/current   (an authority check: control waits for it)
   remote-session:join again, if an assistance is live
 ```
 
 The first connection after opening the console re-reads nothing: the console
-has just loaded both collections. A reconnection never creates or closes a
-`SupportRequest` or a `RemoteSession`; it only reconciles what is shown.
+has just loaded both collections and the current session. A reconnection never
+creates or closes a `SupportRequest` or a `RemoteSession`; it only reconciles
+what is shown — and a `remote-session:closed` lost while the socket was down,
+a `SYSTEM` close above all, is exactly what the remote session read recovers.
+Details in [SESSION_LIFECYCLE.md](SESSION_LIFECYCLE.md#reconnection).
 
 There is no fallback polling. If the socket stays down, the lists are as fresh
 as the last GET, and ACTUALIZAR still works.

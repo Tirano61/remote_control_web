@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:remote_control_web/app/console/technician_console_coordinator.dart';
 import 'package:remote_control_web/app/composition_root.dart';
 import 'package:remote_control_web/app/remote_control_app.dart';
 import 'package:remote_control_web/core/config/app_config.dart';
@@ -18,6 +19,7 @@ import 'package:remote_control_web/features/remote_session/presentation/widgets/
 import 'package:remote_control_web/features/signaling/data/technician_signaling_client_impl.dart';
 import 'package:remote_control_web/features/support/domain/entities/support_request_status.dart';
 import 'package:remote_control_web/features/webrtc/domain/entities/webrtc_connection_state.dart';
+import 'package:remote_control_web/features/webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dart';
 import 'package:remote_control_web/features/webrtc/presentation/widgets/remote_screen_view.dart';
 
 import '../../../support/auth_test_doubles.dart';
@@ -683,17 +685,159 @@ void main() {
       await establish(tester);
       peers.last.emitRemoteVideoTrack('screen-0');
       await settleUi(tester);
+      final failed = peers.last;
+      final renderer = renderers.last;
 
+      failed.emitPeerState(WebRtcPeerConnectionState.failed);
+      await settleUi(tester);
+
+      // Its frames go with it, whatever comes next: the renderer shows no
+      // track, whether the surface was rebuilt for the new negotiation or not.
+      expect(video('screen-0'), findsNothing);
+      expect(renderer.isDisplaying, isFalse);
+      expect(renderer.track, isNull);
+      // REST still has the session: one new offer, on a new peer connection.
+      expect(peers.sessions, hasLength(2));
+      expect(
+        tester.widget<Text>(find.byKey(const Key('webrtc_status'))).data,
+        'Conectando con el dispositivo...',
+      );
+      // The assistance itself is still the backend's to end.
+      expect(find.text('FINALIZAR ASISTENCIA'), findsOneWidget);
+
+      realtime.answerRelayAck({
+        'delivered': true,
+        'remoteSessionId': remoteSessionId,
+      });
+      await settleUi(tester);
+    });
+
+    testWidgets('a failure past the recovery budget stays on screen', (
+      tester,
+    ) async {
+      await pumpNegotiating(tester);
+      await establish(tester);
+
+      for (
+        var attempt = 0;
+        attempt <
+            TechnicianConsoleCoordinator.maxAutomaticWebRtcRecoveriesPerSession;
+        attempt++
+      ) {
+        final before = peers.sessions.length;
+        peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+        await settleUi(tester);
+        if (attempt > 0) {
+          // While an attempt waits for its turn the console says it retries.
+          expect(
+            tester.widget<Text>(find.byKey(const Key('webrtc_status'))).data,
+            kWebRtcRecoveringNotice,
+          );
+        }
+        // The attempts are spaced: the next peer connection appears once its
+        // turn comes, and its offer is relayed then.
+        for (var second = 0; second < 31; second++) {
+          if (peers.sessions.length > before) break;
+          await tester.pump(const Duration(seconds: 1));
+        }
+        await settleUi(tester);
+        expect(peers.sessions, hasLength(before + 1));
+        realtime.answerRelayAck({
+          'delivered': true,
+          'remoteSessionId': remoteSessionId,
+        });
+        await settleUi(tester);
+      }
       peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
       await settleUi(tester);
 
+      expect(
+        peers.sessions,
+        hasLength(
+          TechnicianConsoleCoordinator.maxAutomaticWebRtcRecoveriesPerSession +
+              1,
+        ),
+      );
       expect(surface, findsNothing);
-      expect(renderers.last.disposeCount, 1);
-      // The assistance itself is still the backend's to end.
       expect(find.text('FINALIZAR ASISTENCIA'), findsOneWidget);
       expect(
         tester.widget<Text>(find.byKey(const Key('webrtc_status'))).data,
         'No se pudo establecer la conexión remota.',
+      );
+      // Nothing more happens on its own ...
+      await tester.pump(const Duration(minutes: 5));
+      await settleUi(tester);
+      expect(
+        peers.sessions,
+        hasLength(
+          TechnicianConsoleCoordinator.maxAutomaticWebRtcRecoveriesPerSession +
+              1,
+        ),
+      );
+
+      // ... until the technician asks: REST first, then one new offer.
+      final retry = find.byKey(const Key('webrtc_retry_button'));
+      expect(retry, findsOneWidget);
+      await tester.tap(retry);
+      await settleUi(tester);
+      expect(
+        peers.sessions,
+        hasLength(
+          TechnicianConsoleCoordinator.maxAutomaticWebRtcRecoveriesPerSession +
+              2,
+        ),
+      );
+      realtime.answerRelayAck({
+        'delivered': true,
+        'remoteSessionId': remoteSessionId,
+      });
+      await settleUi(tester);
+    });
+
+    testWidgets('an unanswered offer is said, kept, and replaced once', (
+      tester,
+    ) async {
+      await pumpNegotiating(tester);
+      final waiting = peers.last;
+      expect(find.byKey(const Key('webrtc_retry_button')), findsNothing);
+
+      await tester.pump(WebRtcSessionBloc.defaultAnswerDeadline);
+      await settleUi(tester);
+
+      // Not an error, and not the end of anything: the tablet may be asking
+      // its user for the screen. The first attempt reads REST and replaces
+      // that negotiation alone.
+      expect(
+        tester.widget<Text>(find.byKey(const Key('webrtc_status'))).data,
+        kWebRtcUnansweredNotice,
+      );
+      expect(find.text('FINALIZAR ASISTENCIA'), findsOneWidget);
+      expect(waiting.isClosed, isTrue);
+      expect(peers.sessions, hasLength(2));
+      expect(peers.sessions.where((peer) => !peer.isClosed), hasLength(1));
+
+      // The new offer goes out: still silent, still said why it may be.
+      realtime.answerRelayAck({
+        'delivered': true,
+        'remoteSessionId': remoteSessionId,
+      });
+      await settleUi(tester);
+      expect(
+        tester.widget<Text>(find.byKey(const Key('webrtc_status'))).data,
+        kWebRtcUnansweredNotice,
+      );
+
+      // The user of the tablet allowed the capture: the answer arrives.
+      realtime.emitSignalingEvent('webrtc:answer', {
+        'remoteSessionId': remoteSessionId,
+        'from': 'DEVICE',
+        'sdp': 'v=0 answer',
+      });
+      await settleUi(tester);
+      expect(peers.last.appliedAnswers, hasLength(1));
+      expect(
+        tester.widget<Text>(find.byKey(const Key('webrtc_status'))).data,
+        'Conectando con el dispositivo...',
       );
     });
 
@@ -1462,15 +1606,24 @@ void main() {
       ) async {
         await pumpAssistance(tester);
 
+        final failed = peers.last;
         final gesture = await tester.startGesture(tester.getCenter(surface));
         await tester.pump(const Duration(milliseconds: 200));
-        peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
+        failed.emitPeerState(WebRtcPeerConnectionState.failed);
+        await settleUi(tester);
+        // The console renegotiates; the new offer is acknowledged.
+        realtime.answerRelayAck({
+          'delivered': true,
+          'remoteSessionId': remoteSessionId,
+        });
         await settleUi(tester);
 
         await tester.pump(holdTime * 4);
         await gesture.up();
         await settleUi(tester);
 
+        // Neither the failed peer connection nor its successor got anything.
+        expect(failed.sentRemoteControlCommands, isEmpty);
         expect(sent(), isEmpty);
       });
 
@@ -2244,6 +2397,15 @@ void main() {
             expect(controller.text, anyOf(isEmpty, sentinel));
             expect(find.byType(RemoteTextDialog), findsNothing);
             expect(session.sentRemoteControlCommands, isEmpty);
+
+            // A failed peer connection is renegotiated: its offer is
+            // acknowledged so that nothing is left waiting. Answering an
+            // acknowledgement that was already answered changes nothing.
+            realtime.answerRelayAck({
+              'delivered': true,
+              'remoteSessionId': remoteSessionId,
+            });
+            await settleUi(tester);
           });
         }
 
@@ -3964,6 +4126,98 @@ void main() {
       expect(texts, isNot(contains('socket')));
       expect(texts, isNot(contains('remote-session:join')));
       expect(texts, isNot(contains('/technicians')));
+    });
+  });
+  group('control pause', () {
+    final notice = find.byKey(const Key('remote_control_paused_notice'));
+    final retry = find.byKey(const Key('remote_control_paused_retry_button'));
+
+    /// An ACTIVE assistance, its peers connected and its screen arriving.
+    Future<void> pumpWorkingAssistance(WidgetTester tester) async {
+      remoteSessions.current = buildRemoteSession();
+      realtime.peerJoinedOnJoin = true;
+      await pumpConsole(tester);
+      await connectSocket(tester);
+      realtime.answerRelayAck({
+        'delivered': true,
+        'remoteSessionId': remoteSessionId,
+      });
+      await settleUi(tester);
+      peers.last
+        ..emitControlChannelState(WebRtcDataChannelState.open)
+        ..emitPeerState(WebRtcPeerConnectionState.connected)
+        ..emitRemoteVideoTrack('screen-0');
+      await settleUi(tester);
+      expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
+    }
+
+    testWidgets('losing the server pauses control and says why', (
+      tester,
+    ) async {
+      await pumpWorkingAssistance(tester);
+      expect(notice, findsNothing);
+
+      realtime.emitReconnecting();
+      await settleUi(tester);
+
+      expect(tester.widget<Text>(notice).data, kControlPausedBySocketNotice);
+      // The assistance is not said to be over, and FINALIZAR stays.
+      expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
+      expect(find.text('FINALIZAR ASISTENCIA'), findsOneWidget);
+      expect(retry, findsNothing);
+
+      realtime.emitConnected();
+      await settleUi(tester);
+
+      expect(notice, findsNothing);
+    });
+
+    testWidgets('an unconfirmed assistance keeps a retry after the banner', (
+      tester,
+    ) async {
+      await pumpWorkingAssistance(tester);
+      realtime.emitReconnecting();
+      await settleUi(tester);
+      remoteSessions.currentFailure = const NetworkFailure();
+      realtime.emitConnected();
+      await settleUi(tester);
+
+      expect(tester.widget<Text>(notice).data, kControlPausedUnverifiedNotice);
+      // While the banner is there, its own REINTENTAR is the one offered.
+      expect(find.byKey(const Key('remote_session_error_banner')), findsOne);
+      expect(retry, findsNothing);
+
+      await tester.tap(
+        find.descendant(
+          of: find.byKey(const Key('remote_session_error_banner')),
+          matching: find.byType(IconButton),
+        ),
+      );
+      await settleUi(tester);
+      expect(
+        find.byKey(const Key('remote_session_error_banner')),
+        findsNothing,
+      );
+      expect(retry, findsOneWidget);
+
+      remoteSessions.currentFailure = null;
+      await tester.tap(retry);
+      await settleUi(tester);
+
+      expect(notice, findsNothing);
+    });
+
+    testWidgets('remote-session:closed ends the view, no pause notice', (
+      tester,
+    ) async {
+      await pumpWorkingAssistance(tester);
+      remoteSessions.current = null;
+
+      realtime.emitRemoteSessionClosed(remoteSessionId, endedBy: 'SYSTEM');
+      await settleUi(tester);
+
+      expect(find.text('FINALIZAR ASISTENCIA'), findsNothing);
+      expect(notice, findsNothing);
     });
   });
 }
