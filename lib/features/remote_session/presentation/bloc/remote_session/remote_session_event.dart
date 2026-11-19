@@ -87,18 +87,45 @@ final class RemoteSessionActivationRequested extends RemoteSessionEvent {
 }
 
 /// The technician pressed "FINALIZAR ASISTENCIA".
+///
+/// The decision is final for this console the moment it is taken: the
+/// session stops being live here at once, before the backend is even asked,
+/// and no answer — a failed close included — gives it back.
 final class RemoteSessionCloseRequested extends RemoteSessionEvent {
   const RemoteSessionCloseRequested();
 }
 
-/// The user dismissed the error banner of the assistance view.
+/// Ask the backend once more to close the session this console finalized.
+///
+/// Raised by REINTENTAR on an unconfirmed close, and by the console when the
+/// socket comes back — a network that returned is worth a new attempt. It
+/// starts a fresh, bounded schedule; it does nothing while a close is in
+/// flight, and nothing at all once the close was confirmed.
+final class RemoteSessionCloseRetryRequested extends RemoteSessionEvent {
+  const RemoteSessionCloseRetryRequested();
+}
+
+/// The planned close attempt for [remoteSessionId] is due.
+final class _RemoteSessionCloseRetryDue extends RemoteSessionEvent {
+  const _RemoteSessionCloseRetryDue(this.remoteSessionId);
+
+  final String remoteSessionId;
+
+  @override
+  List<Object?> get props => [remoteSessionId];
+}
+
+/// The user dismissed the error banner of the assistance view, or the notice
+/// that an assistance was finalized.
 final class RemoteSessionNoticeDismissed extends RemoteSessionEvent {
   const RemoteSessionNoticeDismissed();
 }
 
 /// The user session ended: forget everything held in memory.
 ///
-/// Nothing is persisted, so there is nothing else to clean up.
+/// Sessions this console finalized are the exception: they stay finalized —
+/// in memory and in the pending close store — so that signing in again never
+/// brings one back as a controllable assistance.
 final class RemoteSessionCleared extends RemoteSessionEvent {
   const RemoteSessionCleared();
 }

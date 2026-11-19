@@ -119,7 +119,7 @@ successful `POST /remote-sessions/:id/close`, a `remote-session:closed`, or a
 read that no longer returns it. Nothing brings one back:
 
 ```text
-FINALIZAR -> POST close ok -> Idle at once
+FINALIZAR -> Ending at once (not live) -> POST close ok -> Idle
           -> GET current fails            -> still Idle, no banner
           -> GET current 401              -> Idle, the user session ends
 
@@ -131,9 +131,165 @@ close in flight, remote-session:closed    -> Idle
 close then fails (network)                -> still Idle
 ```
 
+A session FINALIZAR was pressed for is a stronger case: it is ended locally
+before the backend says anything, and stays ended — see *FINALIZAR is final
+locally* below. When both apply, *closed* wins: a read that still lists a session
+already confirmed closed is an old read and resumes nothing.
+
 Before this stage a `GET` failing right after a successful close re-emitted the
 session it had "preserved", `ACTIVE` and no longer closing, and the console gave
 remote control back.
+
+## Presence in the header (B1)
+
+**Defect.** During an assistance the header of *ASISTENCIA REMOTA* showed
+`RemoteSession.device.isOnline`. That copy is only refreshed by
+`GET /remote-sessions/current`, and `device:presence-updated` never reads it: the
+event re-reads `GET /devices` and `GET /support-requests` (both carry presence),
+not the session. A tablet that dropped and came back kept reading *Offline* in
+the header while the device list next to it already said *Online*.
+
+**Fix.** The header shows the presence of the session's device as the
+`DevicesBloc` holds it (`isSessionDeviceOnline`, matched by `Device.id`, never by
+`publicId`), and falls back to the session's own copy only while the list does
+not contain the device (not loaded, failed, unknown device).
+
+```text
+device:presence-updated   -> GET /devices + GET /support-requests   (unchanged)
+                             no extra request for the header
+                             GET /remote-sessions/current NOT read
+```
+
+* **No redundant REST.** The header reuses the read the event already makes.
+* **Old answers.** `DevicesBloc` serialises its reads: a `GET /devices` that left
+  before a presence change is always followed by one that left after it, and
+  answers are applied in the order they were asked. The last value shown is
+  always the newest read.
+* **Another device's event** re-reads the list (as before) and changes nothing in
+  the header.
+* **Presence is information only.** *Online* enables nothing: remote control is
+  still decided by `ACTIVE` + a confirmed read + the socket
+  (`_publishControlAuthority`). A tablet *Online* while control is paused stays
+  paused.
+
+## FINALIZAR is final locally (B2)
+
+**Defect.** Pressing FINALIZAR kept the session live with `isClosing: true`
+until `POST /remote-sessions/:id/close` answered. Remote control was suspended at
+once, but the `RTCPeerConnection`, the `control` channel and the room were only
+released by the answer — 1.9–2.7 s with Neon — and a network failure or a `5xx`
+put the session back as `ACTIVE`, with remote control (`a close that failed
+gives it back` was a test).
+
+**Policy.** The technician decided. The decision is irreversible *for this
+console* and never depends on REST:
+
+```text
+FINALIZAR
+  1. the id is finalized (memory) and RemoteSessionEnding is emitted
+     -> not live: the coordinator does what it does for any non-live session
+        remote control withdrawn: a finger down gets touch_cancel (never a
+          release), pending commands and the settle guard are dropped
+        WebRTC generation bumped: late callbacks of the old negotiation die
+        control channel and peer connection closed, candidate queues cleared
+        signaling room forgotten, WebRTC recovery cancelled
+  2. the id is written to PendingRemoteSessionCloseStore
+  3. one turn of the event loop later: POST /remote-sessions/:id/close
+```
+
+The revocation is all local and runs before the request leaves (asserted by a
+test that records the peer connection at the moment the close reaches the
+repository). Nothing afterwards gives the session back: not a failed close, not
+a `GET /remote-sessions/current` that still lists it (started before or after),
+not an activation answered late, not an F5, not signing out and in again. The
+FINALIZAR button disappears with the view, so there is no second press.
+
+### What the backend said
+
+`POST /remote-sessions/:id/close` is not idempotent: a session already closed
+answers `409`, and `409` also means "its support request could not be
+completed". `CloseRemoteSession` therefore returns a typed outcome and never
+decides from a `409` alone:
+
+| Answer | Outcome |
+|---|---|
+| `200` | confirmed |
+| `404` (not found / not this technician's) | confirmed: nothing left to close |
+| `409` → `GET /remote-sessions/:id` `CLOSED` | confirmed (a close whose answer was lost, or one by the tablet/backend) |
+| `409` → `GET /remote-sessions/:id` live | refused |
+| `409` → that read fails | unconfirmed |
+| `403`, `400` | refused |
+| no network, timeout, `5xx`, unreadable answer | unconfirmed |
+| `401` | unconfirmed, reported: the user session ends |
+
+`GET /remote-sessions/:id` is documented in `docs/backend/ENDPOINTS.md` and
+returns closed sessions too. No contract was invented.
+
+### Retries
+
+Exactly the finalized id is ever sent, so a retry can never close a newer
+assistance.
+
+```text
+unconfirmed      -> retry in 2 s, 5 s, 15 s, 30 s (five requests, ~1 min)
+                    then "La asistencia se detuvo en esta consola, pero no se
+                    pudo confirmar su cierre en el servidor." + REINTENTAR CIERRE
+refused, 401     -> no automatic retry (same request, same answer)
+socket reconnect -> one fresh schedule (the network came back)
+REINTENTAR       -> one fresh schedule, one request per press
+```
+
+The close is confirmed — and the schedule stops, with no further request — by
+any of: a confirmed outcome, `remote-session:closed` for that id (whoever won the
+race), or a successful `GET /remote-sessions/current` that no longer lists it
+(ownership scoped, one live session per technician). Then: *Asistencia
+finalizada.*, the queue is re-read once, the store entry is removed.
+
+While a close is pending no new assistance can be started (the backend may still
+hold the old one). After confirmation everything is as usual.
+
+### Persistence
+
+Needed: without it an F5, a closed tab or a browser restart during an
+unconfirmed close would read the session back from
+`GET /remote-sessions/current` as `ACTIVE`, and — the tablet having received no
+close — a new negotiation would hand remote control back.
+
+`BrowserPendingRemoteSessionCloseStore` (behind the domain
+`PendingRemoteSessionCloseStore`, so domain and presentation do not know it is
+`localStorage`):
+
+* stores `[{ "id": <remote session UUID>, "at": <ms> }]` and nothing else — no
+  User JWT, user id, device id, SDP or ICE; a session id authorizes nothing;
+* entries expire after 12 h, at most 8 are kept, corrupt or foreign values are
+  ignored, storage errors never throw (the in-memory protection still holds);
+* it is a deny list: an id in it is never shown as an assistance. It is read once
+  per page before the first `GET /remote-sessions/current`. If that read lists
+  the id as live, the close is resumed at once; if not, the entry is removed.
+* signing out keeps both the in-memory set and the store, so signing in again
+  never brings it back.
+
+### Closed elsewhere
+
+`DEVICE` and `SYSTEM` closes keep their path (`remote-session:closed` → the
+session ends at once, REST afterwards). Seen on the T10A: a tablet that lost its
+server stops the assistance on its own and closes it (`endedBy DEVICE`) when it
+comes back; a tablet away longer than the 60 s grace gets `endedBy SYSTEM`. Both
+end the console's view without a request of its own.
+
+### Contract notes
+
+* There is no event to leave the session room. After FINALIZAR the console no
+  longer joins, but its socket — still connected — keeps counting as the
+  technician's participation, so while the close is unconfirmed and the socket
+  stays up, the backend's automatic close does not start. Only the console's own
+  retries close it then. A disconnection (F5, closed tab, network) does start the
+  60 s grace. A `remote-session:leave`, or an idempotent close answering `200`
+  for a session already `CLOSED` by the same technician, would make this
+  simpler; both are `remote_control_backend` changes and are only proposed here.
+* The tablet receives `remote-session:closed` only when the close commits: until
+  then it sees the peer connection and its channel go (at once), and decides on
+  its own what to do with its capture.
 
 ## Reads in flight
 
@@ -149,9 +305,9 @@ fresh read answers           -> applied
 
 The device list may show an old answer for an instant; a remote session may
 not, because an old `ACTIVE` would hand remote control back for that instant.
-A `401` is never dropped. Signing out discards whatever is in flight. Close,
-activation and creation flags are fields of the BLoC, so a read answered in the
-middle of FINALIZAR keeps saying the session is closing.
+A `401` is never dropped. Signing out discards whatever is in flight. The
+pending close, activation and creation flags are fields of the BLoC, so a read
+answered in the middle of FINALIZAR keeps the session ended.
 
 ## WebRTC failure
 
@@ -353,6 +509,97 @@ attempt waits, a REST read failing during a real cut, a late answer arriving
 while the attempt reads REST, a socket down when an attempt runs, ICE
 `disconnected` recovering on its own.
 
+## Seen on the T10A (2026-11-19) — presence and FINALIZAR
+
+T10A `LSTT10M2026081504`, Android 16, `remote_control_device` `main` (`e40b39f`),
+backend `main` (`f7eba5a`, `node dist/main` on `:3000`, Neon) shared and left
+running; the tablet through the VS Code dev tunnel. This console in debug
+(`flutter run -d web-server`, `localhost:5173`) pointed at an isolated relay on
+`127.0.0.1:3101` that forwarded REST and the `/technicians` WebSocket to the
+backend and could delay, drop or cut them (control port `3102`, logs without
+headers or bodies). Only the console went through it. Times UTC; the tablet's
+clock runs ~0.2 s behind. PERMITIR and every MediaProjection consent were given
+by hand; ADB only for `input tap` on SOLICITAR ASISTENCIA, `cmd wifi`,
+`screencap` and `logcat`. No mobile-mcp, no UiAutomation.
+
+**A. Presence** (session `a58493da`, ACTIVE). Tablet Wi-Fi off at 17:21:42.8;
+`device:presence-updated` → `GET /devices` at 17:22:29: header **Offline**,
+session still *En curso*. Wi-Fi on at 17:22:38; event → `GET /devices` at
+17:22:54: header **Online**. No `GET /remote-sessions/current` was caused by
+either event. The tablet then closed the session itself (`endedBy DEVICE`, its
+own policy after losing the server), which the console handled as a remote close.
+A first attempt left the tablet away longer than the grace period: `endedBy
+SYSTEM` at 17:18:30, peer released at once.
+
+**B. Normal FINALIZAR** (session `0d67c7c3`):
+
+```text
+17:27:02.146  finalized locally
+17:27:02.154  peer connection closed (+8 ms)       tablet: SCTP "User-Initiated Abort"
+17:27:02.187  close attempt 1 (POST leaves)
+17:27:04.635  POST 200 (2442 ms, Neon)            tablet: capture stopped
+17:27:04.638  close confirmed -> "Asistencia finalizada."
+```
+
+**C. Slow POST** (session `c69965d8`, relay delaying the close 8 s): peer closed
+at +3 ms, the tablet's channel aborted at once. The client gave the first POST up
+after 10 s while the backend committed it at 10.5 s — a close that **arrived and
+lost its answer**, for real: retry 2 s later → `409` → `GET /remote-sessions/:id`
+`CLOSED` → confirmed. **F**: this session itself was a new assistance started
+normally right after B's confirmed close.
+
+**D/E/F5. Failing POST, reconnection, reload** (session `7485747a`, relay
+dropping every close before the backend):
+
+```text
+17:30:40.866  finalized locally; peer closed +3 ms; tablet channel aborted
+17:30:40–47   attempts 1–3 dropped; retries 2 s, 5 s; localStorage holds only
+              [{"id":"7485747a-…","at":…}]
+17:31:04      F5: "finalized before this page: 1"; GET current -> still ACTIVE
+              -> kept ended, no join, no offer; close resumed (dropped)
+17:31:20.3    relay cut: socket and REST down 8 s
+17:31:37.7    socket back -> fresh schedule, attempt at once (dropped);
+              GET current ACTIVE -> still ended; no join, no offer
+17:31:54.7    relay back to normal
+17:32:02.2    attempt 8: POST 200 -> confirmed; store empty;
+              tablet: "El técnico finalizó la asistencia."
+```
+
+The session never showed as live, the video never came back and nothing was
+offered after FINALIZAR, in any run. Not reached on the device: the exhausted
+schedule's *no se pudo confirmar* banner (the reconnection restarted it), a
+`500` from the backend, a drag held while pressing FINALIZAR — covered by tests.
+When the relay dropped a connection Chrome resent the same POST once by itself
+(two log lines per attempt); harmless, the close names one exact session.
+
+## Tests (Prompt 24)
+
+* `session_device_presence_test`: the list answers by `Device.id`, the session's
+  copy otherwise.
+* `remote_session_widget_test` › *presence in the header*: Offline → Online,
+  Online → Offline, another device's event, a `GET /devices` that left before
+  the change, Online with remote control paused.
+* `close_remote_session_test`: every row of the outcome table, and a retry after
+  a lost answer.
+* `remote_session_bloc_test` › *FINALIZAR is final for this console*: ended
+  before the POST answers, written down before it leaves, one request per
+  press, timeout, `500`, lost answer, `409` live / closed, `404`, `401`, an old
+  `GET` answering `ACTIVE`, a later read without it, `remote-session:closed`
+  during the close, F5, signing in again, a late activation, no new assistance
+  while pending, a new one after confirmation.
+* `technician_console_session_recovery_test` › *FINALIZAR is irreversible
+  locally*: peer and channel closed before the POST, `touch_cancel` and never a
+  release, pending commands dropped, timeout, `500`, lost answer, socket
+  reconnection, socket down, `remote-session:closed`, an old WebRTC generation,
+  a negotiation still being built, F5, a new assistance.
+* `pending_remote_session_close_codec_test`, contract and repository tests for
+  `GET /remote-sessions/:id`.
+* The tests that described the old behaviour (`a close that failed gives it
+  back`, `… gives the control back`, `… gives Back and Home back`, `is disabled
+  while the close is in flight`) were inverted. With the old behaviour restored
+  by mutation (a failed close giving the session back; the session live until
+  the POST answers; the header reading the session's copy) the new tests fail.
+
 ## Residual risks
 
 * **An answer already on the wire** when the web replaces a negotiation can be
@@ -371,6 +618,16 @@ while the attempt reads REST, a socket down when an attempt runs, ICE
   end on *No se pudo establecer la conexión remota.* with REINTENTAR CONEXIÓN.
 * **No TURN.** Networks that never allow UDP between the two ends cannot be
   recovered by any number of offers.
+* **An unconfirmed close with the socket up.** Without a way to leave the room,
+  the backend's automatic close does not start while this console stays
+  connected; the session is closed by the console's own retries, the next
+  reconnection or REINTENTAR CIERRE. Locally it is over regardless.
+* **The pending-close entry is per browser, not per user.** Another technician
+  signing in on the same browser never sees it (ownership-scoped reads never list
+  it) and its entry is dropped by their first read; the original technician's
+  session, its socket gone, is closed by the backend's grace period.
+* **Header presence follows the device list.** If `GET /devices` keeps failing
+  the header shows the last value that list applied, like the list itself.
 
 ## Closing the tab
 
@@ -408,7 +665,9 @@ console from what it missed:
   try at once while an offer is unanswered (an F5 does the same);
 * **on the tablet**, MediaProjection consent, when Android asks for it again;
 * **FINALIZAR** remains available throughout, and is the only way the console
-  itself closes a session.
+  itself closes a session;
+* **REINTENTAR CIERRE** once the automatic retries of an unconfirmed close are
+  spent (or after a refusal). The assistance is already over in the console.
 
 ## Logging
 
@@ -420,5 +679,12 @@ Debug only, identifiers only: `remote session closed <id> endedBy=<value>`,
 `webrtc recovery could not confirm the session <id>`, `webrtc recovery <id>`,
 `webrtc recovery budget exhausted <id>`, `answer overdue <id>`,
 `webrtc offer unanswered <id>`, `unanswered negotiation replaced <id>`,
-`late answer accepted <id>`, `connection retry requested <id>`. No token, SDP,
-ICE candidate, coordinate or text.
+`late answer accepted <id>`, `connection retry requested <id>`,
+`remote session finalized locally <id>`, `remote session close attempt <n> <id>`,
+`remote session close retry <n>/<max> in <ms> ms <id>`,
+`remote session close confirmed <id>`, `remote session close refused <id>`,
+`remote session close unconfirmed, retries exhausted <id>`,
+`remote session finalized here is still live <id>`,
+`remote session close confirmed by a read <id>`,
+`remote sessions finalized before this page: <count>`. No token, SDP, ICE
+candidate, coordinate or text.

@@ -8,6 +8,7 @@ import '../../../../core/presentation/format/elapsed_label.dart';
 import '../../../../core/presentation/widgets/console_feedback.dart';
 import '../../../../core/presentation/widgets/console_section.dart';
 import '../../../../core/presentation/widgets/presence_indicator.dart';
+import '../../../devices/presentation/bloc/devices/devices_bloc.dart';
 import '../../../remote_control/domain/entities/remote_control_command.dart';
 import '../../../remote_control/domain/entities/remote_control_status.dart';
 import '../../../remote_control/presentation/widgets/remote_control_gesture_layer.dart';
@@ -20,7 +21,9 @@ import '../../../webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dar
 import '../../../webrtc/presentation/remote_screen/remote_video_renderer.dart';
 import '../../../webrtc/presentation/widgets/remote_screen_view.dart';
 import '../../domain/entities/remote_session.dart';
+import '../../domain/entities/remote_session_device.dart';
 import '../bloc/remote_session/remote_session_bloc.dart';
+import '../presence/session_device_presence.dart';
 
 /// "ASISTENCIA REMOTA" block of the console.
 ///
@@ -72,12 +75,20 @@ class ActiveAssistanceSection extends StatelessWidget {
           state: state,
           remoteVideoRendererFactory: remoteVideoRendererFactory,
         ),
+        // FINALIZAR was pressed: over for this console, whatever the backend
+        // still has to confirm. No picture, no control, no way back.
+        RemoteSessionEnding() => _EndingAssistance(
+          key: const Key('ending_assistance_section'),
+          state: state,
+        ),
         // Nothing is open, but something went wrong while finding that out.
         RemoteSessionFailure(:final failure) => _AssistanceProblem(
           message: failure.message,
         ),
         RemoteSessionIdle(:final failure) when failure != null =>
           _AssistanceProblem(message: failure.message),
+        RemoteSessionIdle(:final notice) when notice != null =>
+          _AssistanceFinished(message: notice),
         // No live session: the dashboard looks the way it normally does.
         _ => const SizedBox.shrink(),
       },
@@ -109,7 +120,7 @@ class _LiveAssistance extends StatelessWidget {
         subtitle: session.status.label,
         trailing: device == null
             ? null
-            : PresenceIndicator(isOnline: device.isOnline, compact: true),
+            : _SessionDevicePresence(device: device),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -188,26 +199,16 @@ class _LiveAssistance extends StatelessWidget {
                       rendererFactory: remoteVideoRendererFactory,
                       finishButton: FilledButton.icon(
                         key: const Key('close_remote_session_button'),
-                        // Disabled while the close is in flight: the backend
-                        // answers `409` to a second one, and the user should
-                        // not have to see that.
-                        onPressed: state.isClosing
-                            ? null
-                            : () =>
-                                  bloc.add(const RemoteSessionCloseRequested()),
+                        // There is never a second press: the assistance stops
+                        // being live — and this button goes away with it —
+                        // the moment the first one is handled.
+                        onPressed: () =>
+                            bloc.add(const RemoteSessionCloseRequested()),
                         style: FilledButton.styleFrom(
                           backgroundColor: theme.colorScheme.error,
                           foregroundColor: theme.colorScheme.onError,
                         ),
-                        icon: state.isClosing
-                            ? const SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : const Icon(Icons.stop_circle_outlined),
+                        icon: const Icon(Icons.stop_circle_outlined),
                         label: const Text('FINALIZAR ASISTENCIA'),
                       ),
                     ),
@@ -1058,7 +1059,7 @@ class _ControlPauseNotice extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     // Only an ACTIVE assistance has remote control to pause.
-    if (state is! RemoteSessionActive || state.isClosing) {
+    if (state is! RemoteSessionActive) {
       return const SizedBox.shrink();
     }
     final theme = Theme.of(context);
@@ -1255,6 +1256,145 @@ class _RemoteConnectionStatus extends StatelessWidget {
     WebRtcDataChannelState.closing => 'cerrando',
     WebRtcDataChannelState.closed => 'cerrado',
   };
+}
+
+/// Presence of the assisted device, in the header — see [isSessionDeviceOnline]
+/// for where it comes from. Information only: it enables nothing.
+class _SessionDevicePresence extends StatelessWidget {
+  const _SessionDevicePresence({required this.device});
+
+  final RemoteSessionDevice device;
+
+  @override
+  Widget build(BuildContext context) {
+    return BlocSelector<DevicesBloc, DevicesState, bool>(
+      selector: (devices) => isSessionDeviceOnline(device, devices),
+      builder: (context, isOnline) => PresenceIndicator(
+        key: const Key('remote_session_device_presence'),
+        isOnline: isOnline,
+        compact: true,
+      ),
+    );
+  }
+}
+
+/// What is left on screen after FINALIZAR, until the backend confirms the
+/// close — or says it could not.
+///
+/// It is deliberately not the assistance view: there is no picture, no
+/// control and no FINALIZAR any more. The only action it offers is asking the
+/// backend again, and only once the console stopped asking on its own.
+class _EndingAssistance extends StatelessWidget {
+  const _EndingAssistance({required this.state, super.key});
+
+  final RemoteSessionEnding state;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final bloc = context.read<RemoteSessionBloc>();
+    final label = state.deviceLabel;
+    final publicId = state.devicePublicId;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 20),
+      child: ConsoleSection(
+        title: 'ASISTENCIA REMOTA',
+        subtitle: state.isConfirming ? 'Finalizando' : 'Cierre sin confirmar',
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (label != null)
+              Wrap(
+                spacing: 12,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Text(
+                    label,
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  if (publicId != null && publicId != label)
+                    Text(
+                      publicId,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                ],
+              ),
+            const SizedBox(height: 12),
+            if (state.isConfirming)
+              Row(
+                children: [
+                  const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      key: const Key('remote_session_close_confirming_notice'),
+                      kRemoteSessionCloseConfirmingNotice,
+                      style: theme.textTheme.bodyLarge,
+                    ),
+                  ),
+                ],
+              )
+            else ...[
+              const ConsoleBanner(
+                key: Key('remote_session_close_unconfirmed_banner'),
+                message: kRemoteSessionCloseUnconfirmedNotice,
+                isError: true,
+              ),
+              const SizedBox(height: 6),
+              TextButton.icon(
+                key: const Key('remote_session_close_retry_button'),
+                onPressed: state.canRetryClose
+                    ? () => bloc.add(const RemoteSessionCloseRetryRequested())
+                    : null,
+                icon: const Icon(Icons.refresh, size: 18),
+                label: const Text('REINTENTAR CIERRE'),
+              ),
+            ],
+            const SizedBox(height: 8),
+            Text(
+              key: const Key('remote_session_ending_control_notice'),
+              'El control remoto y la conexión con el dispositivo ya se '
+              'cerraron en esta consola.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// "Asistencia finalizada.", once the backend confirmed the close.
+class _AssistanceFinished extends StatelessWidget {
+  const _AssistanceFinished({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 20),
+      child: ConsoleBanner(
+        key: const Key('remote_session_finished_notice'),
+        message: message,
+        isError: false,
+        onDismiss: () => context.read<RemoteSessionBloc>().add(
+          const RemoteSessionNoticeDismissed(),
+        ),
+      ),
+    );
+  }
 }
 
 /// Compact error shown when the state of the assistance could not be read or a

@@ -85,6 +85,18 @@ class RemoteSessionRepositoryImpl implements RemoteSessionRepository {
   );
 
   @override
+  Future<Result<RemoteSession>> load({required String id}) => _authenticated(
+    (token) => _remoteDataSource.fetch(id: id, token: token),
+    overrides: (statusCode) => switch (statusCode) {
+      403 => const ForbiddenFailure(
+        'No tienes permisos para consultar la asistencia remota.',
+      ),
+      404 => const NotFoundFailure('La asistencia ya no existe.'),
+      _ => null,
+    },
+  );
+
+  @override
   Future<Result<RemoteSession>> activate({required String id}) =>
       _authenticated(
         (token) => _remoteDataSource.activate(id: id, token: token),

@@ -410,6 +410,63 @@ void main() {
     });
   });
 
+  group('GET /remote-sessions/:id', () {
+    test('uses GET on /remote-sessions/<uuid> with the User JWT', () async {
+      final (:dataSource, :adapter) = buildDataSource(body: closedResponseBody);
+
+      await dataSource.fetch(id: sessionId, token: 'user-jwt');
+
+      final captured = adapter.captured!;
+      expect(captured.method, 'GET');
+      expect(captured.uri.path, '/remote-sessions/$sessionId');
+      expect(captured.uri.query, isEmpty);
+      expect(captured.headers['Authorization'], 'Bearer user-jwt');
+    });
+
+    test('reads a CLOSED session, which this route also returns', () async {
+      final (:dataSource, adapter: _) = buildDataSource(
+        body: closedResponseBody,
+      );
+
+      final session = await dataSource.fetch(id: sessionId, token: 'jwt');
+
+      expect(session.id, sessionId);
+      expect(session.status, RemoteSessionStatus.closed);
+      expect(session.isLive, isFalse);
+    });
+
+    test('reads a live session the same way', () async {
+      final (:dataSource, adapter: _) = buildDataSource(
+        body: activatedResponseBody,
+      );
+
+      final session = await dataSource.fetch(id: sessionId, token: 'jwt');
+
+      expect(session.status, RemoteSessionStatus.active);
+      expect(session.isLive, isTrue);
+    });
+
+    test('surfaces 400, 401, 403 and 404 as status codes', () async {
+      for (final statusCode in [400, 401, 403, 404]) {
+        final (:dataSource, adapter: _) = buildDataSource(
+          statusCode: statusCode,
+          body: '{"message":"nope"}',
+        );
+
+        await expectLater(
+          () => dataSource.fetch(id: sessionId, token: 'jwt'),
+          throwsA(
+            isA<HttpApiException>().having(
+              (e) => e.statusCode,
+              'status',
+              statusCode,
+            ),
+          ),
+        );
+      }
+    });
+  });
+
   group('POST /remote-sessions/:id/close', () {
     test('uses POST on /remote-sessions/<uuid>/close', () async {
       final (:dataSource, :adapter) = buildDataSource(body: closedResponseBody);

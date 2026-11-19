@@ -7,6 +7,7 @@ import 'package:remote_control_web/features/remote_session/domain/entities/remot
 import 'package:remote_control_web/features/remote_session/domain/entities/remote_session_status.dart';
 import 'package:remote_control_web/features/remote_session/domain/entities/remote_session_technician.dart';
 import 'package:remote_control_web/features/remote_session/domain/repositories/remote_session_repository.dart';
+import 'package:remote_control_web/features/remote_session/domain/storage/pending_remote_session_close_store.dart';
 
 import 'console_test_doubles.dart';
 
@@ -72,6 +73,23 @@ class FakeRemoteSessionRepository implements RemoteSessionRepository {
 
   Failure? activateFailure;
 
+  /// What `GET /remote-sessions/:id` answers, by id. Unknown ids answer `404`.
+  final Map<String, RemoteSession> sessionsById = {};
+  Failure? loadFailure;
+  final List<String> loadedIds = [];
+
+  /// Scripted `POST /remote-sessions/:id/close` failures, one per attempt, in
+  /// order; [closeFailure] applies once they are used up.
+  final List<Failure?> closeFailures = [];
+
+  /// When set, a failed close is still committed server side: the response is
+  /// what got lost. This is how "the POST arrived, its answer did not" is
+  /// scripted.
+  bool commitCloseDespiteFailure = false;
+
+  /// Called the moment a close request reaches the backend, before its gate.
+  void Function(String id)? onClose;
+
   /// Keeps a call in flight so a second click can be attempted meanwhile.
   Future<void>? createGate;
   Future<void>? closeGate;
@@ -134,25 +152,48 @@ class FakeRemoteSessionRepository implements RemoteSessionRepository {
       supportRequestId: current?.supportRequestId ?? requestId,
       status: RemoteSessionStatus.active,
       connectedAt: DateTime.utc(2026, 3, 11, 9, 35, 12),
+      // Activating changes the status, never the device or its presence.
+      device: current?.device,
     );
     current = activated;
     return Success(activated);
   }
 
   @override
+  Future<Result<RemoteSession>> load({required String id}) async {
+    loadedIds.add(id);
+    final failure = loadFailure;
+    if (failure != null) return Failed(failure);
+    final live = current;
+    if (live != null && live.id == id) return Success(live);
+    final known = sessionsById[id];
+    if (known == null) return const Failed(NotFoundFailure());
+    return Success(known);
+  }
+
+  @override
   Future<Result<RemoteSession>> close({required String id}) async {
     closedIds.add(id);
+    onClose?.call(id);
     final gate = closeGate;
     if (gate != null) await gate;
-    final failure = closeFailure;
-    if (failure != null) return Failed(failure);
+    final failure = closeFailures.isNotEmpty
+        ? closeFailures.removeAt(0)
+        : closeFailure;
+    final alreadyClosed = sessionsById[id]?.isClosed ?? false;
+    if (failure == null && alreadyClosed) {
+      return const Failed(ConflictFailure());
+    }
+    if (failure != null && !commitCloseDespiteFailure) return Failed(failure);
     final closed = buildRemoteSession(
       id: id,
       status: RemoteSessionStatus.closed,
       endedAt: DateTime.utc(2026, 3, 11, 9, 40),
       endedBy: RemoteSessionEndedBy.technician,
     );
-    current = null;
+    sessionsById[id] = closed;
+    if (current?.id == id) current = null;
+    if (failure != null) return Failed(failure);
     return Success(closed);
   }
 }
@@ -174,6 +215,9 @@ class FakeRemoteSessionsRemoteDataSource
   final List<String> currentTokens = [];
   final List<({String id, String token})> closeCalls = [];
   final List<({String id, String token})> activateCalls = [];
+  final List<({String id, String token})> fetchCalls = [];
+  RemoteSession? fetchResponse;
+  Object? fetchError;
 
   @override
   Future<RemoteSession> create({
@@ -192,6 +236,17 @@ class FakeRemoteSessionsRemoteDataSource
     final error = currentError;
     if (error != null) throw error;
     return current;
+  }
+
+  @override
+  Future<RemoteSession> fetch({
+    required String id,
+    required String token,
+  }) async {
+    fetchCalls.add((id: id, token: token));
+    final error = fetchError;
+    if (error != null) throw error;
+    return fetchResponse ?? buildRemoteSession(id: id);
   }
 
   @override
@@ -224,5 +279,34 @@ class FakeRemoteSessionsRemoteDataSource
           status: RemoteSessionStatus.closed,
           endedBy: RemoteSessionEndedBy.technician,
         );
+  }
+}
+
+/// In-memory [PendingRemoteSessionCloseStore]. Shared between two BLoCs, it is
+/// what an F5 or a browser restart looks like: the page is new, the store is
+/// not.
+class InMemoryPendingRemoteSessionCloseStore
+    implements PendingRemoteSessionCloseStore {
+  final Set<String> ids = {};
+  int readCount = 0;
+  final List<String> added = [];
+  final List<String> removed = [];
+
+  @override
+  Future<Set<String>> read() async {
+    readCount++;
+    return {...ids};
+  }
+
+  @override
+  Future<void> add(String remoteSessionId) async {
+    added.add(remoteSessionId);
+    ids.add(remoteSessionId);
+  }
+
+  @override
+  Future<void> remove(String remoteSessionId) async {
+    removed.add(remoteSessionId);
+    ids.remove(remoteSessionId);
   }
 }

@@ -56,6 +56,7 @@ void main() {
           deviceRepository: devices,
           supportRequestRepository: supportRequests,
           remoteSessionRepository: remoteSessions,
+          pendingRemoteSessionCloseStore: InMemoryPendingRemoteSessionCloseStore(),
           technicianRealtimeClient: realtime,
           technicianSignalingClient: TechnicianSignalingClientImpl(
             transport: realtime,
