@@ -21,6 +21,13 @@ abstract interface class RemoteSessionsRemoteDataSource {
   /// Returns `null` when the documented envelope carries `remoteSession: null`.
   Future<RemoteSession?> fetchCurrent({required String token});
 
+  /// `GET /remote-sessions/:id` — one session of this technician, closed ones
+  /// included.
+  ///
+  /// It is what tells a close that was answered `409` — or whose answer never
+  /// arrived — apart: `CLOSED` means it is over, a live status means it is not.
+  Future<RemoteSession> fetch({required String id, required String token});
+
   /// `POST /remote-sessions/:id/activate` — empty body.
   ///
   /// Moves the session from `CONNECTING` to `ACTIVE` and lets the backend set
@@ -47,6 +54,8 @@ class RemoteSessionsRemoteDataSourceImpl
   /// `technicianId` is a `400`, not an ignored property.
   static const String supportRequestIdField = 'supportRequestId';
 
+  static String sessionPath(String id) => '$remoteSessionsPath/$id';
+
   static String activatePath(String id) =>
       '$remoteSessionsPath/$id/activate';
 
@@ -71,6 +80,15 @@ class RemoteSessionsRemoteDataSourceImpl
   Future<RemoteSession?> fetchCurrent({required String token}) async {
     final response = await _apiClient.get(currentPath, bearerToken: token);
     return RemoteSessionDto.currentFromJson(response.data);
+  }
+
+  @override
+  Future<RemoteSession> fetch({
+    required String id,
+    required String token,
+  }) async {
+    final response = await _apiClient.get(sessionPath(id), bearerToken: token);
+    return RemoteSessionDto.fromJson(response.data);
   }
 
   @override

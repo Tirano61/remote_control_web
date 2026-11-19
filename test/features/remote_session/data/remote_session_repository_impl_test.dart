@@ -252,4 +252,35 @@ void main() {
       expect((result as Failed<RemoteSession>).failure, isA<ServerFailure>());
     });
   });
+
+  group('load by id', () {
+    test('reads the session by id with the User JWT', () async {
+      remote.fetchResponse = buildRemoteSession(
+        status: RemoteSessionStatus.closed,
+      );
+
+      final result = await repository.load(id: remoteSessionId);
+
+      expect(remote.fetchCalls.single.id, remoteSessionId);
+      expect(remote.fetchCalls.single.token, 'user-jwt');
+      final session = (result as Success<RemoteSession>).value;
+      expect(session.isClosed, isTrue);
+    });
+
+    test('404 becomes a NotFoundFailure', () async {
+      remote.fetchError = const HttpApiException(404);
+
+      final result = await repository.load(id: remoteSessionId);
+
+      expect((result as Failed<RemoteSession>).failure, isA<NotFoundFailure>());
+    });
+
+    test('no response at all becomes a NetworkFailure', () async {
+      remote.fetchError = const NetworkApiException();
+
+      final result = await repository.load(id: remoteSessionId);
+
+      expect((result as Failed<RemoteSession>).failure, isA<NetworkFailure>());
+    });
+  });
 }

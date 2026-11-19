@@ -22,6 +22,13 @@ abstract interface class RemoteSessionRepository {
   /// page reload or a missed realtime event.
   Future<Result<RemoteSession?>> loadCurrent();
 
+  /// `GET /remote-sessions/:id` — one session of the authenticated technician,
+  /// `CLOSED` ones included.
+  ///
+  /// A session that does not exist and one that belongs to somebody else both
+  /// answer `404`, on purpose.
+  Future<Result<RemoteSession>> load({required String id});
+
   /// `POST /remote-sessions/:id/activate` — the technician end reached the
   /// device, so the assistance really started.
   ///
