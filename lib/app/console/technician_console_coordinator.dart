@@ -43,6 +43,12 @@ const String kRealtimeSessionRejectedNotice =
 /// joined without the peer            -> wait: an offer would reach nobody
 /// signaling room lost                -> incomplete negotiations are dropped
 /// live session gone                  -> the peer connection is released
+/// FINALIZAR                          -> the session stops being live at once:
+///                                       control, room, data channel and peer
+///                                       connection go before the close is
+///                                       even sent, and never come back
+/// socket reconnected + close pending -> the close is asked for again
+/// close confirmed                    -> GET /support-requests
 /// CONNECTING + connected + control   -> POST /remote-sessions/:id/activate
 /// ACTIVE, not closing, confirmed by a
 ///   read since the socket came back,
@@ -157,6 +163,10 @@ class TechnicianConsoleCoordinator {
   /// which is when the support request queue is worth re-reading: its request
   /// has just become `COMPLETED`.
   bool _hadLiveSession = false;
+
+  /// Whether the last remote session state was [RemoteSessionEnding], to
+  /// notice the close being confirmed.
+  bool _wasEnding = false;
 
   /// The last socket connection seen while signed in, or `null` before the
   /// first one.
@@ -302,6 +312,7 @@ class TechnicianConsoleCoordinator {
     _supportRequestsBloc.add(const SupportRequestsPendingRefreshDiscarded());
     _devicesBloc.add(const DevicesPendingRefreshDiscarded());
     _hadLiveSession = false;
+    _wasEnding = false;
     _lastConnectionId = null;
     _requestedNegotiation = null;
     _heldRemoteSessionId = null;
@@ -342,6 +353,11 @@ class TechnicianConsoleCoordinator {
         // The remote session is too: a `remote-session:closed` sent while the
         // socket was down — a `SYSTEM` close above all — is lost for good.
         _reconcilePresenceAndQueue();
+        // A close FINALIZAR could not get confirmed is worth one more try on
+        // a network that came back. Nothing is reopened for it.
+        if (_remoteSessionBloc.state is RemoteSessionEnding) {
+          _remoteSessionBloc.add(const RemoteSessionCloseRetryRequested());
+        }
       }
       _publishControlAuthority();
       _resetRelayGuards(connectionId: status.connectionId);
@@ -386,9 +402,13 @@ class TechnicianConsoleCoordinator {
     }
     _heldRemoteSessionId = liveId;
 
-    // Remote control stops the moment the close is asked for, not when the
-    // backend confirms it, and comes back only if that close fails.
+    // Remote control stops the moment FINALIZAR is pressed — the session is no
+    // longer live from then on — and nothing the backend answers gives it
+    // back.
     _publishControlAuthority();
+
+    final wasEnding = _wasEnding;
+    _wasEnding = state is RemoteSessionEnding;
 
     if (state.hasLiveSession) {
       _hadLiveSession = true;
@@ -404,15 +424,23 @@ class TechnicianConsoleCoordinator {
     }
 
     _signalingJoinBloc.add(const SignalingJoinReset());
-    // No live session — closed from here, closed by the tablet, or never
-    // there. Whatever WebRTC still holds belongs to an assistance that is
-    // over: peer connection, data channel and both candidate queues go.
+    // No live session — finalized here (confirmed or not), closed by the
+    // tablet or the backend, or never there. Whatever WebRTC still holds
+    // belongs to an assistance that is over: peer connection, data channel
+    // and both candidate queues go, and with the generation they belonged to,
+    // whatever callback of theirs is still on its way.
     _requestedNegotiation = null;
     _requestedActivation = null;
     _webRtcSessionBloc.add(const WebRtcSessionTerminated());
     _forgetWebRtcRecovery();
 
-    if (_hadLiveSession && state is! RemoteSessionLoading) {
+    // While FINALIZAR waits for the backend, the support request is not
+    // `COMPLETED` yet: the queue is re-read once the close is confirmed —
+    // including a close resumed after an F5, which never had a live session
+    // in this page.
+    if ((_hadLiveSession || wasEnding) &&
+        state is! RemoteSessionLoading &&
+        state is! RemoteSessionEnding) {
       // The assistance is over — closed from here or from the tablet. Its
       // support request is `COMPLETED` now, so the queue is stale.
       _hadLiveSession = false;
@@ -827,7 +855,7 @@ class TechnicianConsoleCoordinator {
   ///
   /// ```text
   /// signed in
-  /// + RemoteSession ACTIVE, and no close in flight
+  /// + RemoteSession ACTIVE — which a session finalized here never is again
   /// + its last read succeeded (isVerified)
   /// + a read made after the socket last came back answered (authority check)
   /// + the /technicians socket is connected
@@ -847,7 +875,6 @@ class TechnicianConsoleCoordinator {
     final isAuthorized =
         _userSessionBloc.state is UserSessionAuthenticated &&
         state is RemoteSessionActive &&
-        !state.isClosing &&
         state.isVerified &&
         state.answeredAuthorityCheck >= _requiredAuthorityCheck &&
         _technicianRealtimeBloc.state.isConnected;

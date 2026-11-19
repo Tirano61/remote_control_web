@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:equatable/equatable.dart';
@@ -7,6 +8,8 @@ import '../../../../../core/error/failure.dart';
 import '../../../../../core/error/result.dart';
 import '../../../../../core/logging/debug_log.dart';
 import '../../../domain/entities/remote_session.dart';
+import '../../../domain/entities/remote_session_close_outcome.dart';
+import '../../../domain/storage/pending_remote_session_close_store.dart';
 import '../../../domain/usecases/activate_remote_session.dart';
 import '../../../domain/usecases/close_remote_session.dart';
 import '../../../domain/usecases/create_remote_session.dart';
@@ -20,9 +23,20 @@ part 'remote_session_state.dart';
 const String kRemoteSessionRefreshFailedNotice =
     'No se pudo actualizar el estado de la asistencia.';
 
-/// Shown when a close was refused but the session is still live.
-const String kRemoteSessionStillLiveNotice =
-    'La asistencia sigue activa. Vuelve a intentarlo.';
+/// Shown once the backend confirmed that an assistance finalized here is over.
+const String kRemoteSessionFinishedNotice = 'Asistencia finalizada.';
+
+/// Shown while the close of an assistance finalized here is being confirmed.
+const String kRemoteSessionCloseConfirmingNotice =
+    'La asistencia se detuvo en esta consola. Confirmando el cierre con el '
+    'servidor...';
+
+/// Shown when the backend could not confirm the close of an assistance
+/// finalized here. Nothing in it says the assistance is over server side: it
+/// was not confirmed.
+const String kRemoteSessionCloseUnconfirmedNotice =
+    'La asistencia se detuvo en esta consola, pero no se pudo confirmar su '
+    'cierre en el servidor.';
 
 /// Shown when the activation could not be confirmed with the backend.
 ///
@@ -34,10 +48,20 @@ const String kRemoteSessionActivationFailedNotice =
 
 /// Owns the remote session of the signed-in technician.
 ///
-/// REST is the source of truth. The BLoC never promotes a session to `ACTIVE`
-/// on its own, and only ends one locally on a backend confirmation that it is
-/// over: a successful `POST /remote-sessions/:id/close`, a
+/// REST is the source of truth for what the backend holds. The BLoC never
+/// promotes a session to `ACTIVE` on its own, and only calls one *closed* on a
+/// backend confirmation: a successful `POST /remote-sessions/:id/close` (or a
+/// `GET /remote-sessions/:id` answering `CLOSED` after a `409`), a
 /// `remote-session:closed` naming it, or a read that no longer returns it.
+///
+/// FINALIZAR is the one decision that does not wait for the backend. The
+/// technician said the assistance is over, so it is over **for this console**
+/// at once: the session leaves the live states before the close is even sent
+/// ([RemoteSessionEnding]), everything keyed on a live session lets go of it,
+/// and no answer brings it back — not a failed close, not a read that still
+/// lists it, not an F5, not signing in again. Its id is remembered in memory
+/// and in a [PendingRemoteSessionCloseStore] until the backend confirms the
+/// close, which is asked for again on a bounded, spaced schedule.
 ///
 /// The four operations are kept apart on purpose — create, load current,
 /// activate and close fail differently and are recovered differently — and
@@ -68,10 +92,14 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     required CreateRemoteSession createRemoteSession,
     required ActivateRemoteSession activateRemoteSession,
     required CloseRemoteSession closeRemoteSession,
+    required PendingRemoteSessionCloseStore pendingCloseStore,
+    List<Duration> closeRetryDelays = defaultCloseRetryDelays,
   }) : _loadCurrentRemoteSession = loadCurrentRemoteSession,
        _createRemoteSession = createRemoteSession,
        _activateRemoteSession = activateRemoteSession,
        _closeRemoteSession = closeRemoteSession,
+       _pendingCloseStore = pendingCloseStore,
+       _closeRetryDelays = closeRetryDelays,
        super(const RemoteSessionInitial()) {
     on<RemoteSessionStarted>(_onStarted);
     on<RemoteSessionRefreshRequested>(_onRefreshRequested);
@@ -80,6 +108,8 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     on<RemoteSessionCreateRequested>(_onCreateRequested);
     on<RemoteSessionActivationRequested>(_onActivationRequested);
     on<RemoteSessionCloseRequested>(_onCloseRequested);
+    on<RemoteSessionCloseRetryRequested>(_onCloseRetryRequested);
+    on<_RemoteSessionCloseRetryDue>(_onCloseRetryDue);
     on<RemoteSessionNoticeDismissed>(_onNoticeDismissed);
     on<RemoteSessionCleared>(_onCleared);
   }
@@ -88,6 +118,41 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
   final CreateRemoteSession _createRemoteSession;
   final ActivateRemoteSession _activateRemoteSession;
   final CloseRemoteSession _closeRemoteSession;
+  final PendingRemoteSessionCloseStore _pendingCloseStore;
+
+  /// When each automatic retry of an unconfirmed close starts, counted from
+  /// the attempt that could not confirm it. One entry per retry, so the list is
+  /// also the budget: with the first attempt, five requests over about a
+  /// minute — never a storm. Past it the console says the close is
+  /// unconfirmed and waits for REINTENTAR, a socket that comes back, or the
+  /// backend itself (`remote-session:closed`, a read that no longer lists the
+  /// session).
+  static const List<Duration> defaultCloseRetryDelays = [
+    Duration(seconds: 2),
+    Duration(seconds: 5),
+    Duration(seconds: 15),
+    Duration(seconds: 30),
+  ];
+
+  final List<Duration> _closeRetryDelays;
+
+  /// Sessions FINALIZAR was pressed for, in this page or — read from the
+  /// [PendingRemoteSessionCloseStore] — before it was reloaded. Never shown as
+  /// an assistance again, whatever any answer says. Kept across a sign out.
+  final Set<String> _finalizedRemoteSessionIds = {};
+
+  /// The ids of [_finalizedRemoteSessionIds] that are still written in the
+  /// store, so that a read showing they are over can forget them there.
+  final Set<String> _storedFinalizationIds = {};
+  Future<void>? _storedFinalizationsLoaded;
+  bool _areStoredFinalizationsLoaded = false;
+
+  /// The close this console is still trying to get confirmed, if any.
+  _PendingClose? _pendingClose;
+
+  /// "Asistencia finalizada.", from the confirmation until it is dismissed or
+  /// a new assistance starts.
+  String? _finishedNotice;
 
   /// Events are processed concurrently by default, so a refresh arriving while
   /// a read is in flight would fire a duplicate request. It is folded into the
@@ -112,17 +177,21 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
   /// Whether the last read about the session on screen succeeded.
   bool _isVerified = true;
 
-  /// The session a close or an activation is in flight for.
+  /// The session an activation is in flight for.
   ///
   /// Held here rather than read back from the state, so that a read answered
-  /// meanwhile — a refresh, an authority check — keeps saying so instead of
-  /// handing remote control back in the middle of FINALIZAR.
-  String? _closingRemoteSessionId;
+  /// meanwhile — a refresh, an authority check — keeps saying so.
   String? _activatingRemoteSessionId;
 
   /// Sessions the backend confirmed are over. A closed session never reopens,
   /// so an answer that still shows one of these live is an old answer.
   final Set<String> _closedRemoteSessionIds = {};
+
+  @override
+  Future<void> close() {
+    _pendingClose?.cancelRetry();
+    return super.close();
+  }
 
   /// The support request a `POST /remote-sessions` is in flight for. A read
   /// answered meanwhile keeps saying so, or a second click could go out.
@@ -132,7 +201,7 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     RemoteSessionStarted event,
     Emitter<RemoteSessionState> emit,
   ) async {
-    if (!state.hasLiveSession && !_isReading) {
+    if (!state.hasLiveSession && !_isReading && state is! RemoteSessionEnding) {
       emit(const RemoteSessionLoading());
     }
     await _readCurrent(
@@ -178,13 +247,18 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     // the console from an answer that predates the close.
     _closedRemoteSessionIds.add(id);
 
-    if (state.session?.id == id) {
+    final pending = _pendingClose;
+    if (pending != null && pending.remoteSessionId == id) {
+      // The close FINALIZAR asked for is confirmed — by this event, whoever
+      // won the race to close it. Nothing more is sent for it.
+      _settlePendingClose(pending);
+      _emitNoLiveSession(emit);
+    } else if (state.session?.id == id) {
       // Ended here and now. Waiting for REST would leave a closed assistance
       // on screen — and, if REST failed, preserved as if it were still open.
-      if (_closingRemoteSessionId == id) _closingRemoteSessionId = null;
       if (_activatingRemoteSessionId == id) _activatingRemoteSessionId = null;
       _isVerified = true;
-      emit(const RemoteSessionIdle());
+      _emitNoLiveSession(emit);
     }
 
     // REST is still asked: it may have something to say beyond this id.
@@ -204,9 +278,14 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     if (current.hasLiveSession) return;
     // One creation at a time: a second click is dropped before the network.
     if (current is RemoteSessionIdle && current.isStarting) return;
+    // The close of the previous assistance comes first: until the backend
+    // confirms it, it may still hold that session, and one live session per
+    // technician is the rule.
+    if (_pendingClose != null) return;
 
     final epoch = _epoch;
     _startingSupportRequestId = event.supportRequestId;
+    _finishedNotice = null;
     emit(RemoteSessionIdle(startingSupportRequestId: event.supportRequestId));
 
     final result = await _createRemoteSession(
@@ -234,7 +313,7 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
             ),
           );
         } else {
-          emit(RemoteSessionIdle(failure: failure));
+          _emitNoLiveSession(emit, failure: failure);
         }
     }
   }
@@ -304,66 +383,202 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     }
   }
 
+  /// FINALIZAR.
+  ///
+  /// Everything local happens first, in this order and before anything is
+  /// awaited: the session is finalized for good in memory, [RemoteSessionEnding]
+  /// is emitted — which is what makes the console withdraw remote control,
+  /// cancel a finger still down with a `touch_cancel`, drop what is pending and
+  /// release the room, the data channel and the peer connection — and the
+  /// decision is written to the store. Only then, one turn of the event loop
+  /// later so that the revocation — all of it local — has run, is the backend
+  /// asked. Its answer decides what the technician is told, never whether the
+  /// assistance comes back.
   Future<void> _onCloseRequested(
     RemoteSessionCloseRequested event,
     Emitter<RemoteSessionState> emit,
   ) async {
     final current = state;
     if (current is! RemoteSessionLive) return;
-    // One close at a time: the button is disabled too, this is the safety net.
-    if (current.isClosing) return;
 
     final session = current.session;
     final epoch = _epoch;
-    _closingRemoteSessionId = session.id;
-    // An activation that is still in flight keeps its flag: closing does not
-    // make its guard disappear.
-    _emitSession(emit, session);
+    logDebug('remote session finalized locally ${session.id}');
+    _finalizedRemoteSessionIds.add(session.id);
+    if (_activatingRemoteSessionId == session.id) {
+      _activatingRemoteSessionId = null;
+    }
+    _isVerified = true;
+    _finishedNotice = null;
+    _pendingClose?.cancelRetry();
+    final pending = _PendingClose.of(session)..isPreparing = true;
+    _pendingClose = pending;
+    _emitNoLiveSession(emit);
 
-    final result = await _closeRemoteSession(remoteSessionId: session.id);
-    if (epoch != _epoch) return;
-    if (_closingRemoteSessionId == session.id) _closingRemoteSessionId = null;
+    await _rememberFinalization(session.id);
+    await Future<void>(() {});
+    pending.isPreparing = false;
+    if (isClosed || epoch != _epoch || !identical(_pendingClose, pending)) {
+      return;
+    }
+    await _attemptClose(emit, pending);
+  }
 
-    switch (result) {
-      case Success<RemoteSession>():
-        // Confirmed by the backend: the assistance is over, whatever any read
-        // answers next. It ends on screen now — not after a GET that may fail
-        // and, failing, must not be what decides.
-        _closedRemoteSessionIds.add(session.id);
-        _isVerified = true;
-        emit(const RemoteSessionIdle());
+  Future<void> _onCloseRetryRequested(
+    RemoteSessionCloseRetryRequested event,
+    Emitter<RemoteSessionState> emit,
+  ) async {
+    final pending = _pendingClose;
+    if (pending == null || pending.isInFlight || pending.isPreparing) return;
+    // A fresh schedule: something genuinely new happened — the user asked, or
+    // the network came back.
+    pending
+      ..cancelRetry()
+      ..retriesUsed = 0;
+    await _attemptClose(emit, pending);
+  }
+
+  Future<void> _onCloseRetryDue(
+    _RemoteSessionCloseRetryDue event,
+    Emitter<RemoteSessionState> emit,
+  ) async {
+    final pending = _pendingClose;
+    if (pending == null || pending.remoteSessionId != event.remoteSessionId) {
+      return;
+    }
+    pending.retryTimer = null;
+    await _attemptClose(emit, pending);
+  }
+
+  /// One `POST /remote-sessions/:id/close` for exactly [pending]'s session,
+  /// and what its outcome means.
+  Future<void> _attemptClose(
+    Emitter<RemoteSessionState> emit,
+    _PendingClose pending,
+  ) async {
+    if (!identical(_pendingClose, pending) || pending.isInFlight) return;
+    pending
+      ..cancelRetry()
+      ..isInFlight = true
+      ..attempts += 1;
+    final id = pending.remoteSessionId;
+    final epoch = _epoch;
+    _emitNoLiveSession(emit);
+    logDebug('remote session close attempt ${pending.attempts} $id');
+
+    final outcome = await _closeRemoteSession(remoteSessionId: id);
+    if (isClosed || epoch != _epoch) return;
+    pending.isInFlight = false;
+    // Settled meanwhile — `remote-session:closed`, or a read that no longer
+    // lists it. Whatever this answer says, nothing is left to do.
+    if (!identical(_pendingClose, pending)) return;
+
+    switch (outcome) {
+      case RemoteSessionCloseConfirmed():
+        logDebug('remote session close confirmed $id');
+        _settlePendingClose(pending);
+        _emitNoLiveSession(emit);
         // REST is still read, as everywhere: it is the source of truth for
         // what comes next, never for bringing this session back.
         await _readCurrent(
           emit,
           (result, check) => _applyAfterConfirmedClose(emit, result, check),
         );
-      case Failed<RemoteSession>(:final failure):
-        if (failure is ConflictFailure || failure is NotFoundFailure) {
-          // The session probably stopped being live on its own — the tablet
-          // or the backend closed it first. Reconcile instead of blocking.
-          await _readCurrent(
-            emit,
-            (result, check) =>
-                _applyAfterCloseConflict(emit, result, check, session: session),
-          );
-        } else {
-          _emitSession(emit, session, failure: failure);
-        }
+      case RemoteSessionCloseRefused(:final failure):
+        // The same request would get the same answer: nothing retries it on
+        // its own. Still finalized here.
+        logDebug('remote session close refused $id');
+        _emitNoLiveSession(emit, failure: failure);
+      case RemoteSessionCloseUnconfirmed(:final failure):
+        if (failure is! AuthFailure) _scheduleCloseRetry(pending);
+        _emitNoLiveSession(emit, failure: failure);
     }
   }
+
+  void _scheduleCloseRetry(_PendingClose pending) {
+    if (pending.retriesUsed >= _closeRetryDelays.length) {
+      logDebug(
+        'remote session close unconfirmed, retries exhausted '
+        '${pending.remoteSessionId}',
+      );
+      return;
+    }
+    final delay = _closeRetryDelays[pending.retriesUsed];
+    pending.retriesUsed++;
+    logDebug(
+      'remote session close retry ${pending.retriesUsed}/'
+      '${_closeRetryDelays.length} in ${delay.inMilliseconds} ms '
+      '${pending.remoteSessionId}',
+    );
+    pending.retryTimer = Timer(delay, () {
+      if (!isClosed) add(_RemoteSessionCloseRetryDue(pending.remoteSessionId));
+    });
+  }
+
+  /// The backend holds no live session by [pending]'s id for this technician
+  /// any more: the close is over, and so is its retry schedule.
+  void _settlePendingClose(_PendingClose pending) {
+    pending.cancelRetry();
+    if (identical(_pendingClose, pending)) _pendingClose = null;
+    _closedRemoteSessionIds.add(pending.remoteSessionId);
+    _forgetStoredFinalization(pending.remoteSessionId);
+    _isVerified = true;
+    _finishedNotice = kRemoteSessionFinishedNotice;
+  }
+
+  /// A read showed [session] — finalized here — still live: the backend never
+  /// got, or never committed, the close. It is asked for again, at once,
+  /// unless this console is already on it.
+  void _resumePendingClose(RemoteSession session) {
+    final pending = _pendingClose;
+    if (pending != null && pending.remoteSessionId == session.id) return;
+    // One live session per technician: another one being live means the
+    // previous pending close is over.
+    if (pending != null) _settlePendingClose(pending);
+    logDebug('remote session finalized here is still live ${session.id}');
+    final resumed = _PendingClose.of(session);
+    _pendingClose = resumed;
+    _finishedNotice = null;
+    unawaited(_rememberFinalization(session.id));
+    resumed.retryTimer = Timer(Duration.zero, () {
+      if (!isClosed) add(_RemoteSessionCloseRetryDue(session.id));
+    });
+  }
+
+  Future<void> _rememberFinalization(String remoteSessionId) async {
+    _storedFinalizationIds.add(remoteSessionId);
+    await _pendingCloseStore.add(remoteSessionId);
+  }
+
+  void _forgetStoredFinalization(String remoteSessionId) {
+    if (!_storedFinalizationIds.remove(remoteSessionId)) return;
+    unawaited(_pendingCloseStore.remove(remoteSessionId));
+  }
+
+  /// Reads, once, the sessions finalized before this page was loaded.
+  Future<void> _loadStoredFinalizations() =>
+      _storedFinalizationsLoaded ??= () async {
+        final ids = await _pendingCloseStore.read();
+        _areStoredFinalizationsLoaded = true;
+        if (ids.isEmpty) return;
+        logDebug('remote sessions finalized before this page: ${ids.length}');
+        _finalizedRemoteSessionIds.addAll(ids);
+        _storedFinalizationIds.addAll(ids);
+      }();
 
   void _onNoticeDismissed(
     RemoteSessionNoticeDismissed event,
     Emitter<RemoteSessionState> emit,
   ) {
     final current = state;
-    if (current.failure == null) return;
     if (current is RemoteSessionLive) {
+      if (current.failure == null) return;
       // The retry offer goes with the banner it belonged to; what is in
       // flight, and whether the session is confirmed, do not.
       _emitSession(emit, current.session);
     } else if (current is RemoteSessionIdle) {
+      if (current.failure == null && current.notice == null) return;
+      _finishedNotice = null;
       emit(
         RemoteSessionIdle(
           startingSupportRequestId: current.startingSupportRequestId,
@@ -380,10 +595,15 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     _epoch++;
     _isReading = false;
     _isReadStale = false;
-    _closingRemoteSessionId = null;
     _activatingRemoteSessionId = null;
     _startingSupportRequestId = null;
     _isVerified = true;
+    // The schedule belongs to the console that signed out. What was finalized
+    // stays finalized: signing in again resumes the close when the backend
+    // still lists the session, and never shows it as an assistance.
+    _pendingClose?.cancelRetry();
+    _pendingClose = null;
+    _finishedNotice = null;
     emit(const RemoteSessionInitial());
   }
 
@@ -408,6 +628,10 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     final epoch = _epoch;
     _isReading = true;
     try {
+      if (!_areStoredFinalizationsLoaded) {
+        await _loadStoredFinalizations();
+        if (isClosed || epoch != _epoch) return;
+      }
       while (true) {
         _isReadStale = false;
         final check = _requestedAuthorityCheck;
@@ -441,6 +665,11 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
   /// Returns the live session it showed, if any. A session REST no longer
   /// returns — gone, or replaced by another one — is remembered as closed:
   /// one live session per technician, and a closed session never reopens.
+  ///
+  /// A session finalized here is never shown, whatever the read says: still
+  /// listed, its close is asked for again; no longer listed, its close is
+  /// confirmed — this read, ownership scoped, says this technician has no such
+  /// live session.
   RemoteSession? _applySuccessfulRead(
     Emitter<RemoteSessionState> emit,
     RemoteSession? value,
@@ -449,30 +678,47 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
   }) {
     _answeredAuthorityCheck = math.max(_answeredAuthorityCheck, check);
     final known = state.session;
-    final live =
-        value != null &&
-            value.isLive &&
-            !_closedRemoteSessionIds.contains(value.id)
-        ? value
+    final listed = value != null && value.isLive ? value : null;
+
+    for (final id in _storedFinalizationIds.toList()) {
+      if (id != listed?.id) _forgetStoredFinalization(id);
+    }
+
+    // Finalized here and not known to be closed: the backend still holds it.
+    // Known to be closed, an answer that lists it is only an old one.
+    if (listed != null &&
+        _finalizedRemoteSessionIds.contains(listed.id) &&
+        !_closedRemoteSessionIds.contains(listed.id)) {
+      _resumePendingClose(listed);
+      _isVerified = true;
+      _emitNoLiveSession(emit);
+      return null;
+    }
+
+    final pending = _pendingClose;
+    if (pending != null && pending.remoteSessionId != listed?.id) {
+      logDebug(
+        'remote session close confirmed by a read ${pending.remoteSessionId}',
+      );
+      _settlePendingClose(pending);
+    }
+
+    final live = listed != null && !_closedRemoteSessionIds.contains(listed.id)
+        ? listed
         : null;
-    if (value != null && value.isLive && live == null) {
+    if (listed != null && live == null) {
       // An answer that predates a close this console already knows about.
-      logDebug('closed remote session ignored in a read ${value.id}');
+      logDebug('closed remote session ignored in a read ${listed.id}');
     }
     if (known != null && known.id != live?.id) {
       _closedRemoteSessionIds.add(known.id);
     }
+    _isVerified = true;
     if (live == null) {
-      _isVerified = true;
-      emit(
-        RemoteSessionIdle(
-          failure: failureIfNone,
-          startingSupportRequestId: _startingSupportRequestId,
-        ),
-      );
+      _emitNoLiveSession(emit, failure: failureIfNone);
       return null;
     }
-    _isVerified = true;
+    _finishedNotice = null;
     _emitSession(emit, live);
     return live;
   }
@@ -503,7 +749,7 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
       case Success<RemoteSession?>(:final value):
         _applySuccessfulRead(emit, value, check);
       case Failed<RemoteSession?>(:final failure):
-        if (failure is AuthFailure) emit(RemoteSessionIdle(failure: failure));
+        if (failure is AuthFailure) _emitNoLiveSession(emit, failure: failure);
       // Anything else: the close stands, and nothing is shown for a read
       // that only wanted to confirm it.
     }
@@ -523,10 +769,9 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
       case Failed<RemoteSession?>(:final failure):
         // A rejected token must reach the console; anything else is reported as
         // the conflict the user actually triggered.
-        emit(
-          RemoteSessionIdle(
-            failure: failure is AuthFailure ? failure : conflict,
-          ),
+        _emitNoLiveSession(
+          emit,
+          failure: failure is AuthFailure ? failure : conflict,
         );
     }
   }
@@ -551,50 +796,26 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     }
   }
 
-  void _applyAfterCloseConflict(
-    Emitter<RemoteSessionState> emit,
-    Result<RemoteSession?> result,
-    int check, {
-    required RemoteSession session,
-  }) {
-    switch (result) {
-      case Success<RemoteSession?>(:final value):
-        // Gone: the close the console asked for already happened. Nothing to
-        // report — the assistance is over either way.
-        final live = _applySuccessfulRead(emit, value, check);
-        if (live != null) {
-          _emitSession(
-            emit,
-            live,
-            failure: const ConflictFailure(kRemoteSessionStillLiveNotice),
-          );
-        }
-      case Failed<RemoteSession?>(:final failure):
-        // The close was refused and nobody can say why: the session is kept,
-        // but not as a confirmed one.
-        _emitUnverified(emit, failure);
-    }
-  }
-
-  /// Emits [session] with what this BLoC knows about it — close or activation
-  /// in flight, confirmed or not — unless the backend already said it is over.
+  /// Emits [session] with what this BLoC knows about it — activation in
+  /// flight, confirmed or not — unless the backend already said it is over or
+  /// the technician finalized it here.
   void _emitSession(
     Emitter<RemoteSessionState> emit,
     RemoteSession session, {
     Failure? failure,
     bool canRetryActivation = false,
   }) {
-    if (_closedRemoteSessionIds.contains(session.id)) {
+    if (_closedRemoteSessionIds.contains(session.id) ||
+        _finalizedRemoteSessionIds.contains(session.id)) {
       // A late answer about an assistance that is over. Nothing brings it
       // back; whatever is on screen now already says so.
-      logDebug('closed remote session not restored ${session.id}');
-      if (state.session?.id == session.id) emit(const RemoteSessionIdle());
+      logDebug('ended remote session not restored ${session.id}');
+      if (state.session?.id == session.id) _emitNoLiveSession(emit);
       return;
     }
     emit(
       RemoteSessionState.fromSession(
         session,
-        isClosing: _closingRemoteSessionId == session.id,
         isActivating: _activatingRemoteSessionId == session.id,
         canRetryActivation: canRetryActivation,
         isVerified: _isVerified,
@@ -617,16 +838,42 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
       _emitSession(emit, known, failure: reported);
       return;
     }
-    if (previous is RemoteSessionIdle) {
+    if (_pendingClose != null || previous is RemoteSessionIdle) {
+      _emitNoLiveSession(emit, failure: reported);
+      return;
+    }
+    emit(RemoteSessionFailure(reported));
+  }
+
+  /// No assistance on screen: [RemoteSessionEnding] while a close this console
+  /// asked for is not confirmed, [RemoteSessionIdle] otherwise.
+  ///
+  /// While ending, only an [AuthFailure] is carried — the console must hear
+  /// it; the state itself says what happened to the close.
+  void _emitNoLiveSession(
+    Emitter<RemoteSessionState> emit, {
+    Failure? failure,
+  }) {
+    final pending = _pendingClose;
+    if (pending != null) {
       emit(
-        RemoteSessionIdle(
-          failure: reported,
-          startingSupportRequestId: _startingSupportRequestId,
+        RemoteSessionEnding(
+          remoteSessionId: pending.remoteSessionId,
+          deviceLabel: pending.deviceLabel,
+          devicePublicId: pending.devicePublicId,
+          isConfirming: pending.isConfirming,
+          failure: failure is AuthFailure ? failure : null,
         ),
       );
       return;
     }
-    emit(RemoteSessionFailure(reported));
+    emit(
+      RemoteSessionIdle(
+        failure: failure,
+        startingSupportRequestId: _startingSupportRequestId,
+        notice: failure == null ? _finishedNotice : null,
+      ),
+    );
   }
 
   /// Whether a new attempt could plausibly succeed.
@@ -635,4 +882,37 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
   /// and a rejected token needs a new login, so neither offers a retry.
   static bool _isRetryable(Failure failure) =>
       failure is NetworkFailure || failure is ServerFailure;
+}
+
+/// The close of one session finalized here, until the backend confirms it.
+class _PendingClose {
+  _PendingClose({
+    required this.remoteSessionId,
+    this.deviceLabel,
+    this.devicePublicId,
+  });
+
+  factory _PendingClose.of(RemoteSession session) => _PendingClose(
+    remoteSessionId: session.id,
+    deviceLabel: session.deviceLabel,
+    devicePublicId: session.devicePublicId,
+  );
+
+  final String remoteSessionId;
+  final String? deviceLabel;
+  final String? devicePublicId;
+
+  /// Between FINALIZAR and its first request: the revocation is running.
+  bool isPreparing = false;
+  bool isInFlight = false;
+  Timer? retryTimer;
+  int retriesUsed = 0;
+  int attempts = 0;
+
+  bool get isConfirming => isPreparing || isInFlight || retryTimer != null;
+
+  void cancelRetry() {
+    retryTimer?.cancel();
+    retryTimer = null;
+  }
 }
