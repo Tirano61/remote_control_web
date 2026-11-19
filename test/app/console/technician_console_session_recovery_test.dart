@@ -51,6 +51,7 @@ Future<void> settle() async {
 /// over a scripted backend, socket and peer connection.
 void main() {
   late FakeRemoteSessionRepository remoteSessions;
+  late InMemoryPendingRemoteSessionCloseStore pendingCloses;
   late FakeSupportRequestRepository supportRequests;
   late FakeDeviceRepository devices;
   late FakeTechnicianRealtimeClient realtime;
@@ -85,6 +86,7 @@ void main() {
       ..checkStatusResponse = technicianSession;
     final storage = InMemoryUserTokenStorage()..token = 'stored-user-jwt';
     remoteSessions = FakeRemoteSessionRepository();
+    pendingCloses = InMemoryPendingRemoteSessionCloseStore();
     supportRequests = FakeSupportRequestRepository();
     devices = FakeDeviceRepository();
     realtime = FakeTechnicianRealtimeClient();
@@ -109,6 +111,11 @@ void main() {
       createRemoteSession: CreateRemoteSession(repository: remoteSessions),
       activateRemoteSession: ActivateRemoteSession(repository: remoteSessions),
       closeRemoteSession: CloseRemoteSession(repository: remoteSessions),
+      pendingCloseStore: pendingCloses,
+      closeRetryDelays: const [
+        Duration(milliseconds: 5),
+        Duration(milliseconds: 5),
+      ],
     );
     realtimeBloc = TechnicianRealtimeBloc(client: realtime);
     signalingJoinBloc = SignalingJoinBloc(client: realtime);
@@ -645,6 +652,385 @@ void main() {
       // A tap aimed at the old session reaches nobody.
       await tap();
       expect(peers.last.sentRemoteControlCommands, hasLength(1));
+    });
+  });
+
+  group('FINALIZAR is irreversible locally', () {
+    /// Every remote session state from now on.
+    List<RemoteSessionState> recordSessions() {
+      final states = <RemoteSessionState>[];
+      final subscription = remoteSessionBloc.stream.listen(states.add);
+      addTearDown(subscription.cancel);
+      return states;
+    }
+
+    Future<void> holdAndDrag(FakeWebRtcPeerSession peer) async {
+      webRtcSessionBloc.add(
+        const WebRtcRemoteTouchHoldRequested(
+          remoteSessionId: remoteSessionId,
+          pointer: 1,
+          point: NormalizedRemotePoint(0.5, 0.5),
+        ),
+      );
+      await settle();
+      peer.emitRemoteControlAck(peer.sentRemoteControlCommands.single.id);
+      await settle();
+      webRtcSessionBloc.add(
+        const WebRtcRemoteTouchMoved(
+          remoteSessionId: remoteSessionId,
+          pointer: 1,
+          point: NormalizedRemotePoint(0.6, 0.6),
+        ),
+      );
+      await settle();
+      expect(webRtcSessionBloc.state.remoteControl.isTouchActive, isTrue);
+    }
+
+    test('peer connection and data channel close before the POST', () async {
+      await signInWithWorkingAssistance();
+      final peer = peers.last;
+      bool? peerClosedWhenSent;
+      bool? channelOpenWhenSent;
+      bool? controlWhenSent;
+      remoteSessions.onClose = (_) {
+        peerClosedWhenSent = peer.isClosed;
+        channelOpenWhenSent = webRtcSessionBloc.state.isControlChannelOpen;
+        controlWhenSent = webRtcSessionBloc.state.canSendRemoteControl;
+      };
+      final gate = Completer<void>();
+      remoteSessions.closeGate = gate.future;
+
+      remoteSessionBloc.add(const RemoteSessionCloseRequested());
+      await settle();
+
+      expect(remoteSessions.closedIds, [remoteSessionId]);
+      expect(peerClosedWhenSent, isTrue);
+      expect(channelOpenWhenSent, isFalse);
+      expect(controlWhenSent, isFalse);
+      // Released while the POST is still unanswered.
+      expect(remoteSessionBloc.state, isA<RemoteSessionEnding>());
+      expect(webRtcSessionBloc.state, isA<WebRtcIdle>());
+      expect(signalingJoinBloc.state, isA<SignalingIdle>());
+
+      gate.complete();
+      await settle();
+      expect(remoteSessionBloc.state, isA<RemoteSessionIdle>());
+      expect(
+        (remoteSessionBloc.state as RemoteSessionIdle).notice,
+        kRemoteSessionFinishedNotice,
+      );
+    });
+
+    test('a drag under way gets a touch_cancel and never a release', () async {
+      await signInWithWorkingAssistance();
+      final peer = peers.last;
+      await holdAndDrag(peer);
+      final beforeClose = peer.sentRemoteControlCommands.length;
+      final gate = Completer<void>();
+      remoteSessions.closeGate = gate.future;
+
+      remoteSessionBloc.add(const RemoteSessionCloseRequested());
+      await settle();
+
+      final afterClose = peer.sentRemoteControlCommands
+          .skip(beforeClose)
+          .map((command) => command.kind)
+          .toList();
+      expect(afterClose, [RemoteCommandKind.touchCancel]);
+      expect(webRtcSessionBloc.state.remoteControl.isTouchActive, isFalse);
+
+      // The pointer keeps moving and goes up: nothing reaches anybody.
+      webRtcSessionBloc
+        ..add(
+          const WebRtcRemoteTouchMoved(
+            remoteSessionId: remoteSessionId,
+            pointer: 1,
+            point: NormalizedRemotePoint(0.8, 0.8),
+          ),
+        )
+        ..add(
+          const WebRtcRemoteTouchReleased(
+            remoteSessionId: remoteSessionId,
+            pointer: 1,
+            point: NormalizedRemotePoint(0.8, 0.8),
+          ),
+        );
+      await settle();
+      gate.complete();
+      await settle();
+      expect(
+        peer.sentRemoteControlCommands.map((command) => command.kind),
+        isNot(contains(RemoteCommandKind.touchRelease)),
+      );
+      expect(peer.sentRemoteControlCommands, hasLength(beforeClose + 1));
+    });
+
+    test(
+      'pending commands are dropped and their answers revive nothing',
+      () async {
+        await signInWithWorkingAssistance();
+        final peer = peers.last;
+        await tap();
+        expect(webRtcSessionBloc.state.remoteControl.pendingCommands, 1);
+        final gate = Completer<void>();
+        remoteSessions.closeGate = gate.future;
+
+        remoteSessionBloc.add(const RemoteSessionCloseRequested());
+        await settle();
+
+        expect(webRtcSessionBloc.state.remoteControl.pendingCommands, 0);
+        expect(webRtcSessionBloc.state.remoteControl.lastCommand, isNull);
+        peer.emitRemoteControlAck(peer.sentRemoteControlCommands.single.id);
+        await settle();
+        await tap();
+        expect(peer.sentRemoteControlCommands, hasLength(1));
+        expect(webRtcSessionBloc.state.canSendRemoteControl, isFalse);
+        gate.complete();
+        await settle();
+      },
+    );
+
+    test('a close that times out never brings the assistance back', () async {
+      await signInWithWorkingAssistance();
+      final peer = peers.last;
+      final states = recordSessions();
+      remoteSessions.closeFailure = const NetworkFailure();
+
+      remoteSessionBloc.add(const RemoteSessionCloseRequested());
+      await settle();
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      await settle();
+
+      // The first attempt and both retries, then the console stops asking.
+      expect(remoteSessions.closedIds, hasLength(3));
+      final ending = remoteSessionBloc.state as RemoteSessionEnding;
+      expect(ending.isUnconfirmed, isTrue);
+      expect(states.any((state) => state.hasLiveSession), isFalse);
+      expect(peer.isClosed, isTrue);
+      expect(peers.sessions, hasLength(1));
+      expect(webRtcSessionBloc.state.canSendRemoteControl, isFalse);
+      await tap();
+      expect(peer.sentRemoteControlCommands, isEmpty);
+    });
+
+    test('a 500 then a confirmed retry ends it normally', () async {
+      await signInWithWorkingAssistance();
+      final queueLoadsBefore = supportRequests.loadCount;
+      remoteSessions.closeFailures.add(const ServerFailure());
+
+      remoteSessionBloc.add(const RemoteSessionCloseRequested());
+      await settle();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      await settle();
+
+      expect(remoteSessions.closedIds, hasLength(2));
+      expect(remoteSessionBloc.state, isA<RemoteSessionIdle>());
+      // Re-read once, when the backend had completed the support request.
+      expect(supportRequests.loadCount, queueLoadsBefore + 1);
+    });
+
+    test('a POST whose answer was lost is confirmed, not repeated', () async {
+      await signInWithWorkingAssistance();
+      remoteSessions
+        ..commitCloseDespiteFailure = true
+        ..closeFailures.add(const NetworkFailure());
+
+      remoteSessionBloc.add(const RemoteSessionCloseRequested());
+      await settle();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      await settle();
+
+      expect(remoteSessions.closedIds, hasLength(2));
+      expect(remoteSessions.loadedIds, [remoteSessionId]);
+      expect(remoteSessionBloc.state, isA<RemoteSessionIdle>());
+      expect(pendingCloses.ids, isEmpty);
+    });
+
+    test('a socket reconnection asks again and rejoins nothing', () async {
+      await signInWithWorkingAssistance();
+      remoteSessions.closeFailure = const NetworkFailure();
+      remoteSessionBloc.add(const RemoteSessionCloseRequested());
+      await settle();
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      await settle();
+      expect(remoteSessions.closedIds, hasLength(3));
+      final joinsBefore = realtime.joinedSessionIds.length;
+      final states = recordSessions();
+
+      // The network comes back: the authority check still reads ACTIVE.
+      await reconnect();
+
+      expect(remoteSessions.closedIds.length, greaterThan(3));
+      expect(states.any((state) => state.hasLiveSession), isFalse);
+      expect(remoteSessionBloc.state, isA<RemoteSessionEnding>());
+      expect(realtime.joinedSessionIds, hasLength(joinsBefore));
+      expect(peers.sessions, hasLength(1));
+      expect(offers(), 1);
+      expect(webRtcSessionBloc.state.canSendRemoteControl, isFalse);
+
+      // The backend is reachable again: the next attempt confirms it.
+      remoteSessions.closeFailure = null;
+      remoteSessionBloc.add(const RemoteSessionCloseRetryRequested());
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      await settle();
+      expect(remoteSessionBloc.state, isA<RemoteSessionIdle>());
+    });
+
+    test(
+      'FINALIZAR with the socket down still ends everything at once',
+      () async {
+        await signInWithWorkingAssistance();
+        final peer = peers.last;
+        realtime.emitReconnecting();
+        await settle();
+
+        remoteSessionBloc.add(const RemoteSessionCloseRequested());
+        await settle();
+
+        expect(peer.isClosed, isTrue);
+        expect(remoteSessions.closedIds, [remoteSessionId]);
+        expect(remoteSessionBloc.state, isA<RemoteSessionIdle>());
+      },
+    );
+
+    test('remote-session:closed during FINALIZAR settles it once', () async {
+      await signInWithWorkingAssistance();
+      final gate = Completer<void>();
+      remoteSessions
+        ..closeGate = gate.future
+        ..closeFailure = const NetworkFailure();
+
+      remoteSessionBloc.add(const RemoteSessionCloseRequested());
+      await settle();
+      remoteSessions.current = null;
+      realtime.emitRemoteSessionClosed(remoteSessionId, endedBy: 'DEVICE');
+      await settle();
+      expect(remoteSessionBloc.state, isA<RemoteSessionIdle>());
+
+      gate.complete();
+      await settle();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      await settle();
+      expect(remoteSessions.closedIds, hasLength(1));
+      expect(remoteSessionBloc.state, isA<RemoteSessionIdle>());
+    });
+
+    test('an old peer generation cannot give the control back', () async {
+      await signInWithWorkingAssistance();
+      final peer = peers.last;
+      final gate = Completer<void>();
+      remoteSessions.closeGate = gate.future;
+
+      remoteSessionBloc.add(const RemoteSessionCloseRequested());
+      await settle();
+      // Whatever the old negotiation or the backend still says about it.
+      peer
+        ..emitPeerState(WebRtcPeerConnectionState.connected)
+        ..emitControlChannelState(WebRtcDataChannelState.open);
+      realtime
+        ..emitPeerJoined(remoteSessionId)
+        ..emitRemoteSessionActive(remoteSessionId);
+      await settle();
+
+      expect(webRtcSessionBloc.state, isA<WebRtcIdle>());
+      expect(webRtcSessionBloc.state.canSendRemoteControl, isFalse);
+      expect(peers.sessions, hasLength(1));
+      expect(offers(), 1);
+      expect(remoteSessionBloc.state, isA<RemoteSessionEnding>());
+      gate.complete();
+      await settle();
+    });
+
+    test(
+      'a negotiation still being built is dropped by its generation',
+      () async {
+        remoteSessions.current = activeSession;
+        realtime.peerJoinedOnJoin = true;
+        final creation = Completer<void>();
+        peers.createGate = creation.future;
+        await signIn();
+        realtime.emitConnected();
+        await settle();
+        expect(peers.configurations, hasLength(1));
+
+        remoteSessionBloc.add(const RemoteSessionCloseRequested());
+        await settle();
+        creation.complete();
+        await settle();
+
+        // The peer connection that finished building after FINALIZAR is closed
+        // on arrival, and no offer is made for it.
+        expect(peers.sessions.every((session) => session.isClosed), isTrue);
+        expect(offers(), 0);
+        expect(webRtcSessionBloc.state, isA<WebRtcIdle>());
+      },
+    );
+
+    test('an F5 with the close unconfirmed never shows it again', () async {
+      await signInWithWorkingAssistance();
+      remoteSessions.closeFailure = const NetworkFailure();
+      remoteSessionBloc.add(const RemoteSessionCloseRequested());
+      await settle();
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      await settle();
+      expect(pendingCloses.ids, {remoteSessionId});
+
+      // A new page: new BLoCs, the same browser storage, and a backend that
+      // still holds the session as ACTIVE.
+      remoteSessions.closeFailure = null;
+      final reloaded = RemoteSessionBloc(
+        loadCurrentRemoteSession: LoadCurrentRemoteSession(
+          repository: remoteSessions,
+        ),
+        createRemoteSession: CreateRemoteSession(repository: remoteSessions),
+        activateRemoteSession: ActivateRemoteSession(
+          repository: remoteSessions,
+        ),
+        closeRemoteSession: CloseRemoteSession(repository: remoteSessions),
+        pendingCloseStore: pendingCloses,
+      );
+      addTearDown(reloaded.close);
+      final states = <RemoteSessionState>[];
+      final subscription = reloaded.stream.listen(states.add);
+      addTearDown(subscription.cancel);
+
+      reloaded.add(const RemoteSessionStarted());
+      await settle();
+
+      expect(states.any((state) => state.hasLiveSession), isFalse);
+      expect(states.whereType<RemoteSessionEnding>(), isNotEmpty);
+      expect(remoteSessions.closedIds.last, remoteSessionId);
+      expect(reloaded.state, isA<RemoteSessionIdle>());
+      expect(pendingCloses.ids, isEmpty);
+    });
+
+    test('a new assistance after a confirmed close works normally', () async {
+      await signInWithWorkingAssistance();
+      remoteSessions.closeFailures.add(const NetworkFailure());
+      remoteSessionBloc.add(const RemoteSessionCloseRequested());
+      await settle();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      await settle();
+      expect(remoteSessionBloc.state, isA<RemoteSessionIdle>());
+
+      remoteSessions.createResponse = buildRemoteSession(
+        id: 'second-session',
+        supportRequestId: 'second-request',
+      );
+      remoteSessionBloc.add(
+        const RemoteSessionCreateRequested('second-request'),
+      );
+      await settle();
+      await deliverOffer(id: 'second-session');
+      await establish(id: 'second-session');
+
+      expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
+      expect(remoteSessionBloc.state.session!.id, 'second-session');
+      expect(webRtcSessionBloc.state.canSendRemoteControl, isTrue);
+      await tap(id: 'second-session');
+      expect(peers.last.sentRemoteControlCommands, hasLength(1));
+      // Only the first session was ever asked to close.
+      expect(remoteSessions.closedIds.toSet(), {remoteSessionId});
     });
   });
 

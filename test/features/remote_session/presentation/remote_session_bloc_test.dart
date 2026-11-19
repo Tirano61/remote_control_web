@@ -15,15 +15,23 @@ import '../../../support/remote_session_test_doubles.dart';
 
 void main() {
   late FakeRemoteSessionRepository repository;
+  late InMemoryPendingRemoteSessionCloseStore pendingCloses;
 
-  RemoteSessionBloc buildBloc() => RemoteSessionBloc(
+  RemoteSessionBloc buildBloc({
+    List<Duration> closeRetryDelays = RemoteSessionBloc.defaultCloseRetryDelays,
+  }) => RemoteSessionBloc(
     loadCurrentRemoteSession: LoadCurrentRemoteSession(repository: repository),
     createRemoteSession: CreateRemoteSession(repository: repository),
     activateRemoteSession: ActivateRemoteSession(repository: repository),
     closeRemoteSession: CloseRemoteSession(repository: repository),
+    pendingCloseStore: pendingCloses,
+    closeRetryDelays: closeRetryDelays,
   );
 
-  setUp(() => repository = FakeRemoteSessionRepository());
+  setUp(() {
+    repository = FakeRemoteSessionRepository();
+    pendingCloses = InMemoryPendingRemoteSessionCloseStore();
+  });
 
   group('startup', () {
     test('no live session ends in Idle', () async {
@@ -470,123 +478,427 @@ void main() {
     });
   });
 
-  group('close', () {
-    test('closing ends in Idle after re-reading GET current', () async {
-      repository.current = buildRemoteSession();
-      final bloc = buildBloc();
-      bloc.add(const RemoteSessionStarted());
-      await bloc.stream.firstWhere((state) => state is RemoteSessionConnecting);
+  group('FINALIZAR is final for this console', () {
+    final active = buildRemoteSession(
+      status: RemoteSessionStatus.active,
+      connectedAt: DateTime.utc(2026, 3, 11, 9, 35, 12),
+    );
+
+    /// A bloc whose automatic close retries are short enough for a test.
+    RemoteSessionBloc quickBloc() => buildBloc(
+      closeRetryDelays: const [
+        Duration(milliseconds: 5),
+        Duration(milliseconds: 5),
+      ],
+    );
+
+    Future<RemoteSessionBloc> activeBloc({RemoteSessionBloc? bloc}) async {
+      repository.current = active;
+      final started = (bloc ?? buildBloc())..add(const RemoteSessionStarted());
+      await started.stream.firstWhere((state) => state is RemoteSessionActive);
+      return started;
+    }
+
+    /// Every state emitted from now on.
+    List<RemoteSessionState> record(RemoteSessionBloc bloc) {
+      final states = <RemoteSessionState>[];
+      final subscription = bloc.stream.listen(states.add);
+      addTearDown(subscription.cancel);
+      return states;
+    }
+
+    test('the session stops being live before the POST answers', () async {
+      final bloc = await activeBloc();
+      final gate = Completer<void>();
+      repository.closeGate = gate.future;
+
+      bloc.add(const RemoteSessionCloseRequested());
+      await pumpEventQueue();
+
+      expect(bloc.state, isA<RemoteSessionEnding>());
+      final ending = bloc.state as RemoteSessionEnding;
+      expect(ending.remoteSessionId, remoteSessionId);
+      expect(ending.isConfirming, isTrue);
+      expect(bloc.state.hasLiveSession, isFalse);
+      expect(bloc.state.session, isNull);
+      expect(repository.closedIds, [remoteSessionId]);
+
+      gate.complete();
+      await bloc.stream.firstWhere((state) => state is RemoteSessionIdle);
+
+      expect(
+        (bloc.state as RemoteSessionIdle).notice,
+        kRemoteSessionFinishedNotice,
+      );
+      // REST is still the source of truth: the close is followed by a read.
+      expect(repository.currentCount, 2);
+      expect(pendingCloses.ids, isEmpty);
+      await bloc.close();
+    });
+
+    test('the decision is written down before the POST leaves', () async {
+      final bloc = await activeBloc();
+      Set<String>? storedWhenSent;
+      repository.onClose = (_) => storedWhenSent = {...pendingCloses.ids};
 
       bloc.add(const RemoteSessionCloseRequested());
       await bloc.stream.firstWhere((state) => state is RemoteSessionIdle);
 
-      expect(repository.closedIds, [remoteSessionId]);
-      // REST is the source of truth: the close is followed by a read.
-      expect(repository.currentCount, 2);
-      expect(bloc.state.hasLiveSession, isFalse);
+      expect(storedWhenSent, {remoteSessionId});
+      // Confirmed: nothing is left behind.
+      expect(pendingCloses.ids, isEmpty);
+      expect(pendingCloses.removed, [remoteSessionId]);
+      await bloc.close();
+    });
+
+    test(
+      'only the exact session is ever sent, and only once per press',
+      () async {
+        final bloc = await activeBloc();
+        final gate = Completer<void>();
+        repository.closeGate = gate.future;
+
+        bloc.add(const RemoteSessionCloseRequested());
+        await pumpEventQueue();
+        bloc.add(const RemoteSessionCloseRequested());
+        await pumpEventQueue();
+
+        expect(repository.closedIds, [remoteSessionId]);
+        gate.complete();
+        await bloc.stream.firstWhere((state) => state is RemoteSessionIdle);
+        await bloc.close();
+      },
+    );
+
+    test('a timeout never brings the session back, and is retried', () async {
+      final bloc = await activeBloc(bloc: quickBloc());
+      final states = record(bloc);
+      repository.closeFailure = const NetworkFailure();
+
+      bloc.add(const RemoteSessionCloseRequested());
+      await bloc.stream.firstWhere(
+        (state) => state is RemoteSessionEnding && state.isUnconfirmed,
+      );
+
+      // The first attempt and both retries, then the console stops asking.
+      expect(repository.closedIds, hasLength(3));
+      expect(states.any((state) => state.hasLiveSession), isFalse);
+      expect(states.whereType<RemoteSessionEnding>(), isNotEmpty);
+      expect(bloc.state.failure, isNull);
+      expect(pendingCloses.ids, {remoteSessionId});
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      expect(repository.closedIds, hasLength(3));
+      await bloc.close();
+    });
+
+    test('a 500 is retried and the retry confirms the close', () async {
+      final bloc = await activeBloc(bloc: quickBloc());
+      final states = record(bloc);
+      repository.closeFailures.add(const ServerFailure());
+
+      bloc.add(const RemoteSessionCloseRequested());
+      await bloc.stream.firstWhere((state) => state is RemoteSessionIdle);
+
+      expect(repository.closedIds, hasLength(2));
+      expect(states.any((state) => state.hasLiveSession), isFalse);
+      expect(
+        (bloc.state as RemoteSessionIdle).notice,
+        kRemoteSessionFinishedNotice,
+      );
+      expect(pendingCloses.ids, isEmpty);
+      await bloc.close();
+    });
+
+    test('a close whose answer was lost is confirmed by reading it', () async {
+      final bloc = await activeBloc(bloc: quickBloc());
+      // The POST reaches the backend and commits; the answer never arrives.
+      repository
+        ..commitCloseDespiteFailure = true
+        ..closeFailures.add(const NetworkFailure());
+
+      bloc.add(const RemoteSessionCloseRequested());
+      await bloc.stream.firstWhere((state) => state is RemoteSessionIdle);
+
+      // The retry got `409`, and only `CLOSED` from GET /remote-sessions/:id
+      // was taken as "it is over".
+      expect(repository.closedIds, hasLength(2));
+      expect(repository.loadedIds, [remoteSessionId]);
+      expect(
+        (bloc.state as RemoteSessionIdle).notice,
+        kRemoteSessionFinishedNotice,
+      );
+      await bloc.close();
+    });
+
+    test(
+      'a 409 while the session is still live is refused, not retried',
+      () async {
+        final bloc = await activeBloc(bloc: quickBloc());
+        repository.closeFailure = const ConflictFailure(kCloseConflictMessage);
+
+        bloc.add(const RemoteSessionCloseRequested());
+        await bloc.stream.firstWhere(
+          (state) => state is RemoteSessionEnding && state.isUnconfirmed,
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+
+        expect(repository.closedIds, hasLength(1));
+        expect(repository.loadedIds, [remoteSessionId]);
+        expect(bloc.state.hasLiveSession, isFalse);
+        expect((bloc.state as RemoteSessionEnding).canRetryClose, isTrue);
+
+        // The technician may still ask: one request per press.
+        repository.closeFailure = null;
+        bloc.add(const RemoteSessionCloseRetryRequested());
+        await bloc.stream.firstWhere((state) => state is RemoteSessionIdle);
+        expect(repository.closedIds, hasLength(2));
+        await bloc.close();
+      },
+    );
+
+    test('a 409 for a session already closed elsewhere confirms it', () async {
+      final bloc = await activeBloc();
+      // The tablet closed it first: the backend reads it as CLOSED by id.
+      repository
+        ..current = null
+        ..sessionsById[remoteSessionId] = buildRemoteSession(
+          status: RemoteSessionStatus.closed,
+        );
+
+      bloc.add(const RemoteSessionCloseRequested());
+      await bloc.stream.firstWhere((state) => state is RemoteSessionIdle);
+
+      expect(
+        (bloc.state as RemoteSessionIdle).notice,
+        kRemoteSessionFinishedNotice,
+      );
       expect(bloc.state.failure, isNull);
       await bloc.close();
     });
 
-    test('a second close while one is in flight is dropped', () async {
-      repository.current = buildRemoteSession();
-      final gate = Completer<void>();
-      repository.closeGate = gate.future;
-      final bloc = buildBloc();
-      bloc.add(const RemoteSessionStarted());
-      await bloc.stream.firstWhere((state) => state is RemoteSessionConnecting);
+    test('a 404 leaves nothing to close', () async {
+      final bloc = await activeBloc();
+      repository.closeFailure = const NotFoundFailure();
 
+      bloc.add(const RemoteSessionCloseRequested());
+      await bloc.stream.firstWhere((state) => state is RemoteSessionIdle);
+
+      expect(pendingCloses.ids, isEmpty);
+      await bloc.close();
+    });
+
+    test('a 401 reaches the console and is not retried', () async {
+      final bloc = await activeBloc(bloc: quickBloc());
+      repository.closeFailure = const AuthFailure();
+
+      bloc.add(const RemoteSessionCloseRequested());
+      await bloc.stream.firstWhere((state) => state.lastFailure != null);
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+
+      expect(bloc.state, isA<RemoteSessionEnding>());
+      expect(bloc.state.lastFailure, isA<AuthFailure>());
+      expect(repository.closedIds, hasLength(1));
+      // Still finalized, and still written down for the next sign in.
+      expect(pendingCloses.ids, {remoteSessionId});
+      await bloc.close();
+    });
+
+    test('an old GET that still answers ACTIVE never restores it', () async {
+      final bloc = await activeBloc();
+      // A read leaves before FINALIZAR and comes back after it, still ACTIVE.
+      final readGate = Completer<void>();
+      repository.currentGate = readGate.future;
+      bloc.add(const RemoteSessionRefreshRequested());
+      await pumpEventQueue();
+      final closeGate = Completer<void>();
+      repository.closeGate = closeGate.future;
+
+      bloc.add(const RemoteSessionCloseRequested());
+      await pumpEventQueue();
+      repository.currentGate = null;
+      readGate.complete();
+      await pumpEventQueue();
+
+      expect(bloc.state, isA<RemoteSessionEnding>());
+      expect(bloc.state.hasLiveSession, isFalse);
+
+      closeGate.complete();
+      await bloc.stream.firstWhere((state) => state is RemoteSessionIdle);
+      await bloc.close();
+    });
+
+    test('a failed close then a read without it is reconciled', () async {
+      final bloc = await activeBloc(bloc: quickBloc());
+      repository.closeFailure = const NetworkFailure();
       bloc.add(const RemoteSessionCloseRequested());
       await bloc.stream.firstWhere(
-        (state) => state is RemoteSessionLive && state.isClosing,
+        (state) => state is RemoteSessionEnding && state.isUnconfirmed,
       );
+
+      // Whoever closed it — the backend after its grace period, most likely —
+      // GET /remote-sessions/current no longer lists it.
+      repository.current = null;
+      bloc.add(const RemoteSessionRefreshRequested());
+      await bloc.stream.firstWhere((state) => state is RemoteSessionIdle);
+
+      expect(
+        (bloc.state as RemoteSessionIdle).notice,
+        kRemoteSessionFinishedNotice,
+      );
+      expect(pendingCloses.ids, isEmpty);
+      await bloc.close();
+    });
+
+    test('remote-session:closed during FINALIZAR confirms it once', () async {
+      final bloc = await activeBloc(bloc: quickBloc());
+      final gate = Completer<void>();
+      repository
+        ..closeGate = gate.future
+        ..closeFailure = const NetworkFailure();
+
       bloc.add(const RemoteSessionCloseRequested());
-      await Future<void>.delayed(Duration.zero);
+      await pumpEventQueue();
+      repository.current = null;
+      bloc.add(
+        const RemoteSessionClosedReported(remoteSessionId, endedBy: 'DEVICE'),
+      );
+      await bloc.stream.firstWhere((state) => state is RemoteSessionIdle);
 
-      expect(repository.closedIds, [remoteSessionId]);
+      // The POST in flight fails afterwards: nothing is retried for it.
+      gate.complete();
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      expect(repository.closedIds, hasLength(1));
+      expect(bloc.state, isA<RemoteSessionIdle>());
+      expect(pendingCloses.ids, isEmpty);
+      await bloc.close();
+    });
 
+    test('an F5 after FINALIZAR keeps it finalized and closes it', () async {
+      final first = await activeBloc(bloc: quickBloc());
+      repository.closeFailure = const NetworkFailure();
+      first.add(const RemoteSessionCloseRequested());
+      await first.stream.firstWhere(
+        (state) => state is RemoteSessionEnding && state.isUnconfirmed,
+      );
+      await first.close();
+
+      // The page reloads: a new BLoC, the same browser storage, and a backend
+      // that still holds the session as ACTIVE.
+      expect(repository.current, active);
+      repository.closeFailure = null;
+      final reloaded = buildBloc();
+      final states = record(reloaded);
+      reloaded.add(const RemoteSessionStarted());
+      await reloaded.stream.firstWhere((state) => state is RemoteSessionIdle);
+
+      expect(states.any((state) => state.hasLiveSession), isFalse);
+      expect(states.whereType<RemoteSessionEnding>(), isNotEmpty);
+      expect(repository.closedIds.last, remoteSessionId);
+      expect(pendingCloses.ids, isEmpty);
+      await reloaded.close();
+    });
+
+    test('signing in again never brings it back', () async {
+      final bloc = await activeBloc(bloc: quickBloc());
+      repository.closeFailure = const NetworkFailure();
+      bloc.add(const RemoteSessionCloseRequested());
+      await bloc.stream.firstWhere(
+        (state) => state is RemoteSessionEnding && state.isUnconfirmed,
+      );
+      final states = record(bloc);
+
+      bloc
+        ..add(const RemoteSessionCleared())
+        ..add(const RemoteSessionStarted());
+      await bloc.stream.firstWhere((state) => state is RemoteSessionEnding);
+
+      expect(states.any((state) => state.hasLiveSession), isFalse);
+      repository.closeFailure = null;
+      await bloc.stream.firstWhere((state) => state is RemoteSessionIdle);
+      expect(repository.current, isNull);
+      await bloc.close();
+    });
+
+    test(
+      'an activation answered after FINALIZAR never reactivates it',
+      () async {
+        repository.current = buildRemoteSession();
+        final bloc = buildBloc()..add(const RemoteSessionStarted());
+        await bloc.stream.firstWhere(
+          (state) => state is RemoteSessionConnecting,
+        );
+        final activation = Completer<void>();
+        final close = Completer<void>();
+        repository
+          ..activateGate = activation.future
+          ..closeGate = close.future;
+        final states = record(bloc);
+
+        bloc.add(const RemoteSessionActivationRequested(remoteSessionId));
+        await pumpEventQueue();
+        bloc.add(const RemoteSessionCloseRequested());
+        await pumpEventQueue();
+        // The activation commits and its GET answers ACTIVE.
+        activation.complete();
+        await pumpEventQueue();
+
+        expect(bloc.state, isA<RemoteSessionEnding>());
+        final afterClose = states.skipWhile(
+          (state) => state is! RemoteSessionEnding,
+        );
+        expect(afterClose.any((state) => state.hasLiveSession), isFalse);
+        close.complete();
+        await bloc.stream.firstWhere((state) => state is RemoteSessionIdle);
+        await bloc.close();
+      },
+    );
+
+    test('no new assistance starts while the close is pending', () async {
+      final bloc = await activeBloc();
+      final gate = Completer<void>();
+      repository.closeGate = gate.future;
+      bloc.add(const RemoteSessionCloseRequested());
+      await pumpEventQueue();
+
+      bloc.add(const RemoteSessionCreateRequested(requestId));
+      await pumpEventQueue();
+
+      expect(repository.createdSupportRequestIds, isEmpty);
       gate.complete();
       await bloc.stream.firstWhere((state) => state is RemoteSessionIdle);
       await bloc.close();
     });
 
-    test('a 409 reconciles instead of blocking the UI', () async {
-      // The tablet closed it first, so the close conflicts and the session is
-      // already gone.
-      repository.current = buildRemoteSession();
-      final bloc = buildBloc();
-      bloc.add(const RemoteSessionStarted());
-      await bloc.stream.firstWhere((state) => state is RemoteSessionConnecting);
-
-      repository
-        ..closeFailure = const ConflictFailure(kCloseConflictMessage)
-        ..current = null;
+    test('a confirmed close lets a new assistance start normally', () async {
+      final bloc = await activeBloc();
       bloc.add(const RemoteSessionCloseRequested());
       await bloc.stream.firstWhere((state) => state is RemoteSessionIdle);
+      await pumpEventQueue();
 
-      expect(bloc.state.hasLiveSession, isFalse);
-      // Reconciled to the same outcome the user asked for: no error shown.
-      expect(bloc.state.failure, isNull);
-      expect(repository.currentCount, 2);
+      const newSessionId = '5a6b7c8d-1111-4222-8333-944455556666';
+      repository.createResponse = buildRemoteSession(
+        id: newSessionId,
+        supportRequestId: 'another-request',
+      );
+      bloc.add(const RemoteSessionCreateRequested('another-request'));
+      await bloc.stream.firstWhere((state) => state is RemoteSessionConnecting);
+
+      expect(bloc.state.session!.id, newSessionId);
+      expect(repository.closedIds, [remoteSessionId]);
       await bloc.close();
     });
 
-    test('a 409 with the session still live tells the user', () async {
-      repository.current = buildRemoteSession();
-      final bloc = buildBloc();
-      bloc.add(const RemoteSessionStarted());
-      await bloc.stream.firstWhere((state) => state is RemoteSessionConnecting);
-
-      repository.closeFailure = const ConflictFailure(kCloseConflictMessage);
+    test('the notice can be dismissed', () async {
+      final bloc = await activeBloc();
       bloc.add(const RemoteSessionCloseRequested());
       await bloc.stream.firstWhere(
-        (state) => state is RemoteSessionLive && !state.isClosing,
+        (state) => state is RemoteSessionIdle && state.notice != null,
       );
 
-      expect(bloc.state.hasLiveSession, isTrue);
-      expect(bloc.state.failure, isA<ConflictFailure>());
-      await bloc.close();
-    });
-
-    test(
-      'a network failure keeps the known session and offers a retry',
-      () async {
-        repository.current = buildRemoteSession();
-        final bloc = buildBloc();
-        bloc.add(const RemoteSessionStarted());
-        await bloc.stream.firstWhere(
-          (state) => state is RemoteSessionConnecting,
-        );
-
-        repository.closeFailure = const NetworkFailure();
-        bloc.add(const RemoteSessionCloseRequested());
-        await bloc.stream.firstWhere(
-          (state) => state is RemoteSessionLive && state.failure != null,
-        );
-
-        expect(bloc.state.hasLiveSession, isTrue);
-        expect(bloc.state.session!.id, remoteSessionId);
-        expect(bloc.state.failure, isA<NetworkFailure>());
-        // The session is not promoted to CLOSED locally.
-        expect(bloc.state.session!.status, RemoteSessionStatus.connecting);
-        await bloc.close();
-      },
-    );
-
-    test('the notice can be dismissed without losing the session', () async {
-      repository.current = buildRemoteSession();
-      final bloc = buildBloc();
-      bloc.add(const RemoteSessionStarted());
-      await bloc.stream.firstWhere((state) => state is RemoteSessionConnecting);
-
-      repository.closeFailure = const NetworkFailure();
-      bloc.add(const RemoteSessionCloseRequested());
-      await bloc.stream.firstWhere((state) => state.failure != null);
-
       bloc.add(const RemoteSessionNoticeDismissed());
-      await bloc.stream.firstWhere((state) => state.failure == null);
-
-      expect(bloc.state.hasLiveSession, isTrue);
+      await bloc.stream.firstWhere(
+        (state) => state is RemoteSessionIdle && state.notice == null,
+      );
       await bloc.close();
     });
   });
@@ -921,7 +1233,7 @@ void main() {
       await bloc.close();
     });
 
-    test('a read during a close in flight keeps the close visible', () async {
+    test('a read during a close in flight keeps the session ended', () async {
       repository.current = buildRemoteSession(
         status: RemoteSessionStatus.active,
       );
@@ -935,9 +1247,10 @@ void main() {
       bloc.add(const RemoteSessionRefreshRequested());
       await pumpEventQueue();
 
-      // The read answered ACTIVE, and that does not cancel FINALIZAR.
+      // The read answered ACTIVE, and that does not undo FINALIZAR.
       expect(repository.currentCount, 2);
-      expect((bloc.state as RemoteSessionLive).isClosing, isTrue);
+      expect(bloc.state, isA<RemoteSessionEnding>());
+      expect((bloc.state as RemoteSessionEnding).isConfirming, isTrue);
 
       gate.complete();
       await bloc.stream.firstWhere((state) => state is RemoteSessionIdle);

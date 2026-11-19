@@ -10,7 +10,6 @@ sealed class RemoteSessionState extends Equatable {
   /// The console never invents a transition the backend did not make.
   static RemoteSessionState fromSession(
     RemoteSession session, {
-    bool isClosing = false,
     bool isActivating = false,
     bool canRetryActivation = false,
     bool isVerified = true,
@@ -21,7 +20,6 @@ sealed class RemoteSessionState extends Equatable {
     if (session.isConnecting) {
       return RemoteSessionConnecting(
         session: session,
-        isClosing: isClosing,
         isActivating: isActivating,
         canRetryActivation: canRetryActivation,
         isVerified: isVerified,
@@ -33,7 +31,6 @@ sealed class RemoteSessionState extends Equatable {
     if (session.isActive) {
       return RemoteSessionActive(
         session: session,
-        isClosing: isClosing,
         isVerified: isVerified,
         answeredAuthorityCheck: answeredAuthorityCheck,
         failedAuthorityCheck: failedAuthorityCheck,
@@ -112,10 +109,19 @@ final class RemoteSessionLoading extends RemoteSessionState {
 /// This is the normal state of the console: the dashboard is shown as usual and
 /// an accepted request may be started.
 final class RemoteSessionIdle extends RemoteSessionState {
-  const RemoteSessionIdle({this.failure, this.startingSupportRequestId});
+  const RemoteSessionIdle({
+    this.failure,
+    this.startingSupportRequestId,
+    this.notice,
+  });
 
   @override
   final Failure? failure;
+
+  /// Something the technician is told that is not a problem — today only
+  /// "Asistencia finalizada.", once the backend confirmed the close FINALIZAR
+  /// asked for. It stays until it is dismissed or a new assistance starts.
+  final String? notice;
 
   /// Id of the support request whose `POST /remote-sessions` is in flight.
   final String? startingSupportRequestId;
@@ -129,14 +135,71 @@ final class RemoteSessionIdle extends RemoteSessionState {
   bool get isBusy => isStarting;
 
   @override
-  List<Object?> get props => [failure, startingSupportRequestId];
+  List<Object?> get props => [failure, startingSupportRequestId, notice];
+}
+
+/// FINALIZAR was pressed: the assistance is over **for this console**, whatever
+/// the backend answers, and the close is being — or could not be — confirmed.
+///
+/// It is not live on purpose. Everything that keys on a live session — the
+/// signaling room, the peer connection, its data channel, remote control, the
+/// WebRTC recovery — lets go of it the moment this state appears, before any
+/// HTTP answer, and nothing brings the session back: not a failed close, not a
+/// read that still lists it, not an F5.
+///
+/// The id is kept, and only the id is ever sent again: `POST
+/// /remote-sessions/:id/close` for exactly this session, so no retry can close
+/// a newer one by mistake.
+final class RemoteSessionEnding extends RemoteSessionState {
+  const RemoteSessionEnding({
+    required this.remoteSessionId,
+    this.deviceLabel,
+    this.devicePublicId,
+    this.isConfirming = true,
+    this.failure,
+  });
+
+  /// The session this console finalized. Never adopted as a live one again.
+  final String remoteSessionId;
+
+  /// What the technician was assisting, for the message on screen. Absent when
+  /// the session was finalized before a reload and only its id is known.
+  final String? deviceLabel;
+  final String? devicePublicId;
+
+  /// A close is in flight, or one more is planned.
+  ///
+  /// `false` means the console stopped asking on its own: the backend could
+  /// not be reached for long enough, or it refused. The technician may still
+  /// ask again — see [canRetryClose].
+  final bool isConfirming;
+
+  /// Only ever an [AuthFailure]: the console has to hear it to sign out. The
+  /// state itself says what happened to the close.
+  @override
+  final Failure? failure;
+
+  bool get isUnconfirmed => !isConfirming;
+
+  bool get canRetryClose => !isConfirming;
+
+  @override
+  bool get isBusy => isConfirming;
+
+  @override
+  List<Object?> get props => [
+    remoteSessionId,
+    deviceLabel,
+    devicePublicId,
+    isConfirming,
+    failure,
+  ];
 }
 
 /// There is a live session: `CONNECTING` or `ACTIVE`.
 sealed class RemoteSessionLive extends RemoteSessionState {
   const RemoteSessionLive({
     required this.session,
-    this.isClosing = false,
     this.isVerified = true,
     this.answeredAuthorityCheck = 0,
     this.failedAuthorityCheck = 0,
@@ -145,9 +208,6 @@ sealed class RemoteSessionLive extends RemoteSessionState {
 
   @override
   final RemoteSession session;
-
-  /// `POST /remote-sessions/:id/close` is in flight.
-  final bool isClosing;
 
   @override
   final bool isVerified;
@@ -162,12 +222,11 @@ sealed class RemoteSessionLive extends RemoteSessionState {
   final Failure? failure;
 
   @override
-  bool get isBusy => isClosing || isActivating;
+  bool get isBusy => isActivating;
 
   @override
   List<Object?> get props => [
     session,
-    isClosing,
     isActivating,
     canRetryActivation,
     isVerified,
@@ -185,7 +244,6 @@ sealed class RemoteSessionLive extends RemoteSessionState {
 final class RemoteSessionConnecting extends RemoteSessionLive {
   const RemoteSessionConnecting({
     required super.session,
-    super.isClosing,
     this.isActivating = false,
     this.canRetryActivation = false,
     super.isVerified,
@@ -209,7 +267,6 @@ final class RemoteSessionConnecting extends RemoteSessionLive {
 final class RemoteSessionActive extends RemoteSessionLive {
   const RemoteSessionActive({
     required super.session,
-    super.isClosing,
     super.isVerified,
     super.answeredAuthorityCheck,
     super.failedAuthorityCheck,

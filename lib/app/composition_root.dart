@@ -20,7 +20,9 @@ import '../features/devices/domain/usecases/load_devices.dart';
 import '../features/devices/presentation/bloc/devices/devices_bloc.dart';
 import '../features/remote_session/data/datasources/remote_sessions_remote_data_source.dart';
 import '../features/remote_session/data/repositories/remote_session_repository_impl.dart';
+import '../features/remote_session/data/storage/browser_pending_remote_session_close_store.dart';
 import '../features/remote_session/domain/repositories/remote_session_repository.dart';
+import '../features/remote_session/domain/storage/pending_remote_session_close_store.dart';
 import '../features/remote_session/domain/usecases/activate_remote_session.dart';
 import '../features/remote_session/domain/usecases/close_remote_session.dart';
 import '../features/remote_session/domain/usecases/create_remote_session.dart';
@@ -57,6 +59,7 @@ class AppDependencies {
     required this.deviceRepository,
     required this.supportRequestRepository,
     required this.remoteSessionRepository,
+    required this.pendingRemoteSessionCloseStore,
     required this.technicianRealtimeClient,
     required this.technicianSignalingClient,
     required this.webRtcPeerClient,
@@ -112,6 +115,9 @@ class AppDependencies {
         ),
         tokenProvider: tokenProvider,
       ),
+      // Remote session ids only — never the token — so that FINALIZAR stays
+      // final across an F5 or a browser restart.
+      pendingRemoteSessionCloseStore: BrowserPendingRemoteSessionCloseStore(),
       // The only implementation that knows `flutter_webrtc` exists.
       webRtcPeerClient: const FlutterWebRtcPeerClient(),
       // The only renderer that knows `RTCVideoRenderer` and `RTCVideoView`.
@@ -124,6 +130,9 @@ class AppDependencies {
   final DeviceRepository deviceRepository;
   final SupportRequestRepository supportRequestRepository;
   final RemoteSessionRepository remoteSessionRepository;
+
+  /// Where the sessions finalized here wait for their close to be confirmed.
+  final PendingRemoteSessionCloseStore pendingRemoteSessionCloseStore;
 
   /// Single `/technicians` connection of the application.
   ///
@@ -212,6 +221,7 @@ class AppDependencies {
     createRemoteSession: createRemoteSession,
     activateRemoteSession: activateRemoteSession,
     closeRemoteSession: closeRemoteSession,
+    pendingCloseStore: pendingRemoteSessionCloseStore,
   );
 
   TechnicianRealtimeBloc createTechnicianRealtimeBloc() =>

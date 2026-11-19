@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_web/app/console/technician_console_coordinator.dart';
 import 'package:remote_control_web/app/composition_root.dart';
@@ -15,6 +16,7 @@ import 'package:remote_control_web/features/remote_control/presentation/widgets/
 import 'package:remote_control_web/features/remote_control/presentation/widgets/remote_text_dialog.dart';
 import 'package:remote_control_web/features/remote_session/data/repositories/remote_session_repository_impl.dart';
 import 'package:remote_control_web/features/remote_session/domain/entities/remote_session_status.dart';
+import 'package:remote_control_web/features/remote_session/presentation/bloc/remote_session/remote_session_bloc.dart';
 import 'package:remote_control_web/features/remote_session/presentation/widgets/active_assistance_section.dart';
 import 'package:remote_control_web/features/signaling/data/technician_signaling_client_impl.dart';
 import 'package:remote_control_web/features/support/domain/entities/support_request_status.dart';
@@ -89,6 +91,8 @@ void main() {
           deviceRepository: devices,
           supportRequestRepository: supportRequests,
           remoteSessionRepository: remoteSessions,
+          pendingRemoteSessionCloseStore:
+              InMemoryPendingRemoteSessionCloseStore(),
           technicianRealtimeClient: realtime,
           technicianSignalingClient: TechnicianSignalingClientImpl(
             transport: realtime,
@@ -263,7 +267,9 @@ void main() {
   });
 
   group('FINALIZAR ASISTENCIA', () {
-    testWidgets('is disabled while the close is in flight', (tester) async {
+    testWidgets('ends the assistance view at the press, before the backend', (
+      tester,
+    ) async {
       withAcceptedRequest();
       await pumpConsole(tester);
       await startAssistance(tester);
@@ -272,16 +278,26 @@ void main() {
       remoteSessions.closeGate = gate.future;
       final button = find.byKey(const Key('close_remote_session_button'));
       await tester.tap(button);
-      await tester.pump();
+      await settleUi(tester);
 
-      expect(tester.widget<FilledButton>(button).onPressed, isNull);
-      // A second click cannot produce a second close.
-      await tester.tap(button, warnIfMissed: false);
-      await tester.pump();
+      // The backend has not answered, and the assistance is already over here.
+      expect(find.byKey(const Key('active_assistance_section')), findsNothing);
+      expect(
+        find.byKey(const Key('ending_assistance_section')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('remote_session_close_confirming_notice')),
+        findsOneWidget,
+      );
+      // There is no button left for a second close.
+      expect(button, findsNothing);
       expect(remoteSessions.closedIds, [remoteSessionId]);
 
       gate.complete();
       await settleUi(tester);
+      expect(find.byKey(const Key('ending_assistance_section')), findsNothing);
+      expect(find.text(kRemoteSessionFinishedNotice), findsOneWidget);
     });
 
     testWidgets('ends the assistance and reloads the queue', (tester) async {
@@ -307,7 +323,7 @@ void main() {
       expect(find.text('HISTORIAL (1)'), findsOneWidget);
     });
 
-    testWidgets('a network failure keeps the assistance and offers a retry', (
+    testWidgets('a network failure never brings the assistance back', (
       tester,
     ) async {
       withAcceptedRequest();
@@ -318,15 +334,33 @@ void main() {
       await tester.tap(find.byKey(const Key('close_remote_session_button')));
       await settleUi(tester);
 
+      expect(find.byKey(const Key('active_assistance_section')), findsNothing);
       expect(
-        find.byKey(const Key('active_assistance_section')),
+        find.byKey(const Key('ending_assistance_section')),
         findsOneWidget,
       );
-      expect(
-        find.byKey(const Key('remote_session_retry_button')),
-        findsOneWidget,
+      expect(find.text('FINALIZAR ASISTENCIA'), findsNothing);
+
+      // Every automatic retry fails too: the console says so, and says only
+      // what it knows.
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(const Duration(seconds: 31));
+      }
+      await settleUi(tester);
+      expect(remoteSessions.closedIds, hasLength(5));
+      expect(find.text(kRemoteSessionCloseUnconfirmedNotice), findsOneWidget);
+      expect(find.text(kRemoteSessionFinishedNotice), findsNothing);
+      expect(find.byKey(const Key('active_assistance_section')), findsNothing);
+
+      // REINTENTAR CIERRE asks once more, and this time the backend answers.
+      remoteSessions.closeFailure = null;
+      await tester.tap(
+        find.byKey(const Key('remote_session_close_retry_button')),
       );
-      expect(find.text('FINALIZAR ASISTENCIA'), findsOneWidget);
+      await settleUi(tester);
+      expect(remoteSessions.closedIds, hasLength(6));
+      expect(find.text(kRemoteSessionFinishedNotice), findsOneWidget);
+      expect(find.byKey(const Key('ending_assistance_section')), findsNothing);
     });
   });
 
@@ -1220,12 +1254,14 @@ void main() {
       await tester.tap(find.byKey(const Key('close_remote_session_button')));
       await settleUi(tester);
 
-      // The backend has not answered and the picture is still there, but the
-      // technician asked to stop.
-      expect(surface, findsOneWidget);
+      // The backend has not answered, and the technician asked to stop: the
+      // picture and everything that operates it are gone already.
+      expect(surface, findsNothing);
       expect(gestureLayer, findsNothing);
-      expect(statusLine(tester), 'Control remoto: no disponible');
-      await clickCentre(tester);
+      expect(
+        find.byKey(const Key('ending_assistance_section')),
+        findsOneWidget,
+      );
       expect(peers.last.sentRemoteControlCommands, hasLength(1));
 
       gate.complete();
@@ -1235,20 +1271,29 @@ void main() {
       expect(peers.last.sentRemoteControlCommands, hasLength(1));
     });
 
-    testWidgets('a close that failed gives the control back', (tester) async {
+    testWidgets('a close that failed never gives the control back', (
+      tester,
+    ) async {
       await pumpAssistance(tester);
+      final session = peers.last;
       remoteSessions.closeFailure = const NetworkFailure();
 
       await tester.tap(find.byKey(const Key('close_remote_session_button')));
       await settleUi(tester);
 
-      // The assistance goes on, so does the control.
-      expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
-      expect(statusLine(tester), 'Control remoto: listo');
-
-      await clickCentre(tester);
-
-      expect(peers.last.sentRemoteControlCommands, hasLength(1));
+      // FINALIZAR is final here: the failure only says the backend did not
+      // confirm it.
+      expect(find.text('Estado: Asistencia en curso'), findsNothing);
+      expect(
+        find.byKey(const Key('ending_assistance_section')),
+        findsOneWidget,
+      );
+      expect(surface, findsNothing);
+      expect(gestureLayer, findsNothing);
+      expect(session.sentRemoteControlCommands, isEmpty);
+      // Releasing a peer connection resumes outside this test's clock.
+      await tester.runAsync(pumpEventQueue);
+      expect(session.isClosed, isTrue);
     });
 
     testWidgets('signing out with a tap in flight leaves nothing behind', (
@@ -1435,7 +1480,7 @@ void main() {
 
       await tester.tap(find.byKey(const Key('close_remote_session_button')));
       await settleUi(tester);
-      expect(surface, findsOneWidget);
+      expect(surface, findsNothing);
       expect(gestureLayer, findsNothing);
 
       await drag.moveBy(const Offset(0, -40));
@@ -1463,12 +1508,19 @@ void main() {
       await tester.tap(find.byKey(const Key('close_remote_session_button')));
       await settleUi(tester);
 
-      expect(statusLine(tester), 'Control remoto: no disponible');
+      expect(
+        find.byKey(const Key('ending_assistance_section')),
+        findsOneWidget,
+      );
 
       // An answer that arrives now has nothing left to speak about.
       session.emitRemoteControlAck('swipe-1');
       await settleUi(tester);
-      expect(statusLine(tester), 'Control remoto: no disponible');
+      expect(
+        find.byKey(const Key('ending_assistance_section')),
+        findsOneWidget,
+      );
+      expect(surface, findsNothing);
 
       gate.complete();
       await settleUi(tester);
@@ -1651,11 +1703,18 @@ void main() {
         await tester.tap(closeButton);
         await settleUi(tester);
         expect(remoteSessions.closedIds, hasLength(1));
-        expect(statusLine(tester), 'Control remoto: no disponible');
+        expect(
+          find.byKey(const Key('ending_assistance_section')),
+          findsOneWidget,
+        );
 
         session.emitRemoteControlAck('long-3');
         await settleUi(tester);
-        expect(statusLine(tester), 'Control remoto: no disponible');
+        expect(
+          find.byKey(const Key('ending_assistance_section')),
+          findsOneWidget,
+        );
+        expect(surface, findsNothing);
 
         gate.complete();
         await settleUi(tester);
@@ -2535,12 +2594,16 @@ void main() {
 
           await tester.tap(closeButton);
           await tester.pump();
-          await tester.pump();
+          // The close leaves one turn of the event loop after the revocation.
+          await tester.pump(const Duration(milliseconds: 1));
           await tester.pump();
 
-          // The backend has not answered yet.
+          // The backend has not answered yet, and the assistance is over here.
           expect(remoteSessions.closedIds, hasLength(1));
-          expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
+          expect(
+            find.byKey(const Key('ending_assistance_section')),
+            findsOneWidget,
+          );
           expect(dialog, findsNothing);
 
           gate.complete();
@@ -2599,12 +2662,16 @@ void main() {
           await tester.tap(closeButton);
           await settleUi(tester);
 
-          expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
+          // Nothing comes back: not the assistance, not the text, not a way
+          // to type it again.
+          expect(find.text('Estado: Asistencia en curso'), findsNothing);
+          expect(
+            find.byKey(const Key('ending_assistance_section')),
+            findsOneWidget,
+          );
           expect(dialog, findsNothing);
-          expect(isTextEnabled(tester), isTrue);
-
-          await openDialog(tester);
-          expect(tester.widget<TextField>(field).controller!.text, isEmpty);
+          expect(textButton, findsNothing);
+          expect(find.textContaining(sentinel), findsNothing);
         });
       });
 
@@ -2672,12 +2739,13 @@ void main() {
           await press(tester, sendButton);
           await tester.tap(closeButton);
           await tester.pump();
-          await tester.pump();
+          // The close leaves one turn of the event loop after the revocation.
+          await tester.pump(const Duration(milliseconds: 1));
           await tester.pump();
 
           expect(remoteSessions.closedIds, hasLength(1));
           expect(actionStatus, findsNothing);
-          expect(isTextEnabled(tester), isFalse);
+          expect(textButton, findsNothing);
 
           session.emitRemoteControlAck('text-1');
           await settleUi(tester);
@@ -3179,12 +3247,13 @@ void main() {
           await press(tester, imeButton);
           await tester.tap(closeButton);
           await tester.pump();
-          await tester.pump();
+          // The close leaves one turn of the event loop after the revocation.
+          await tester.pump(const Duration(milliseconds: 1));
           await tester.pump();
 
           expect(remoteSessions.closedIds, hasLength(1));
           expect(actionStatus, findsNothing);
-          expect(isImeEnabled(tester), isFalse);
+          expect(imeButton, findsNothing);
 
           session.emitRemoteControlAck('enter-1');
           await settleUi(tester);
@@ -3737,13 +3806,14 @@ void main() {
 
         await tester.tap(find.byKey(const Key('close_remote_session_button')));
         await tester.pump();
-        await tester.pump();
+        // The close leaves one turn of the event loop after the revocation.
+        await tester.pump(const Duration(milliseconds: 1));
         await tester.pump();
 
         expect(remoteSessions.closedIds, hasLength(1));
         expect(navigationStatus, findsNothing);
-        expect(isEnabled(tester, backButton), isFalse);
-        expect(isEnabled(tester, homeButton), isFalse);
+        expect(backButton, findsNothing);
+        expect(homeButton, findsNothing);
 
         // An answer that arrives now has nothing left to speak about.
         session.emitRemoteControlAck('back-1');
@@ -3759,7 +3829,7 @@ void main() {
         expect(session.sentRemoteControlCommands, hasLength(1));
       });
 
-      testWidgets('a close that failed gives Back and Home back', (
+      testWidgets('a close that failed never gives Back and Home back', (
         tester,
       ) async {
         await pumpAssistance(tester);
@@ -3769,9 +3839,13 @@ void main() {
         await tester.tap(find.byKey(const Key('close_remote_session_button')));
         await settleUi(tester);
 
-        expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
-        expect(isEnabled(tester, backButton), isTrue);
-        expect(isEnabled(tester, homeButton), isTrue);
+        expect(find.text('Estado: Asistencia en curso'), findsNothing);
+        expect(
+          find.byKey(const Key('ending_assistance_section')),
+          findsOneWidget,
+        );
+        expect(backButton, findsNothing);
+        expect(homeButton, findsNothing);
       });
 
       group('Recents', () {
@@ -3940,14 +4014,14 @@ void main() {
             find.byKey(const Key('close_remote_session_button')),
           );
           await tester.pump();
-          await tester.pump();
+          // The close leaves one turn of the event loop after the revocation.
+          await tester.pump(const Duration(milliseconds: 1));
           await tester.pump();
 
           expect(remoteSessions.closedIds, hasLength(1));
           expect(navigationStatus, findsNothing);
-          expect(isEnabled(tester, recentsButton), isFalse);
+          expect(recentsButton, findsNothing);
 
-          await tester.tap(recentsButton, warnIfMissed: false);
           session.emitRemoteControlAck('recents-1');
           await settleUi(tester);
           expect(navigationStatus, findsNothing);
@@ -4091,9 +4165,11 @@ void main() {
           await pumpInWindow(tester, viewSize, aspectRatio: 800 / 1280);
           final before = tester.getSize(surface).height;
           final renderer = renderers.last;
-          remoteSessions.closeFailure = const NetworkFailure();
-
-          await tester.tap(closeButton);
+          // A read that fails keeps the assistance on screen, with its banner.
+          remoteSessions.currentFailure = const NetworkFailure();
+          BlocProvider.of<RemoteSessionBloc>(
+            tester.element(surface),
+          ).add(const RemoteSessionRefreshRequested());
           await settleUi(tester);
 
           expect(

@@ -51,6 +51,7 @@ void main() {
   late FakeAuthRemoteDataSource auth;
   late InMemoryUserTokenStorage storage;
   late FakeRemoteSessionRepository remoteSessions;
+  late InMemoryPendingRemoteSessionCloseStore pendingCloses;
   late FakeSupportRequestRepository supportRequests;
   late FakeDeviceRepository devices;
   late FakeTechnicianRealtimeClient realtime;
@@ -70,6 +71,7 @@ void main() {
     auth = FakeAuthRemoteDataSource()..checkStatusResponse = technicianSession;
     storage = InMemoryUserTokenStorage()..token = 'stored-user-jwt';
     remoteSessions = FakeRemoteSessionRepository();
+    pendingCloses = InMemoryPendingRemoteSessionCloseStore();
     supportRequests = FakeSupportRequestRepository();
     devices = FakeDeviceRepository();
     realtime = FakeTechnicianRealtimeClient();
@@ -97,6 +99,7 @@ void main() {
       createRemoteSession: CreateRemoteSession(repository: remoteSessions),
       activateRemoteSession: ActivateRemoteSession(repository: remoteSessions),
       closeRemoteSession: CloseRemoteSession(repository: remoteSessions),
+      pendingCloseStore: pendingCloses,
     );
     realtimeBloc = TechnicianRealtimeBloc(client: realtime);
     signalingJoinBloc = SignalingJoinBloc(client: realtime);
@@ -766,15 +769,22 @@ void main() {
       expect(session.sentRemoteControlCommands, hasLength(1));
     });
 
-    test('a close that failed gives it back', () async {
+    test('a close that failed never gives it back', () async {
       await signInReady();
+      final session = peers.last;
       remoteSessions.closeFailure = const NetworkFailure();
 
       remoteSessionBloc.add(const RemoteSessionCloseRequested());
       await settle();
 
-      expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
-      expect(webRtcSessionBloc.state.canSendRemoteControl, isTrue);
+      // FINALIZAR is final for this console: the failure is only about
+      // whether the backend heard it.
+      expect(remoteSessionBloc.state, isA<RemoteSessionEnding>());
+      expect(webRtcSessionBloc.state, isA<WebRtcIdle>());
+      expect(webRtcSessionBloc.state.canSendRemoteControl, isFalse);
+      expect(session.isClosed, isTrue);
+      await tap();
+      expect(session.sentRemoteControlCommands, isEmpty);
     });
 
     test('session_not_active reads REST and resends nothing', () async {
