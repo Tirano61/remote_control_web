@@ -134,6 +134,8 @@ class FakeRemoteSessionRepository implements RemoteSessionRepository {
       supportRequestId: current?.supportRequestId ?? requestId,
       status: RemoteSessionStatus.active,
       connectedAt: DateTime.utc(2026, 3, 11, 9, 35, 12),
+      // Activating changes the status, never the device or its presence.
+      device: current?.device,
     );
     current = activated;
     return Success(activated);

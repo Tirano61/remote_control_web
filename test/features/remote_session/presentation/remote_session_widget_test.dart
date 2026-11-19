@@ -892,8 +892,13 @@ void main() {
         .data!;
 
     /// An ACTIVE assistance with the picture of the tablet on screen.
-    Future<void> pumpAssistance(WidgetTester tester) async {
-      remoteSessions.current = buildRemoteSession();
+    Future<void> pumpAssistance(
+      WidgetTester tester, {
+      bool isDeviceOnline = true,
+    }) async {
+      remoteSessions.current = buildRemoteSession(
+        isDeviceOnline: isDeviceOnline,
+      );
       realtime.peerJoinedOnJoin = true;
       await pumpConsole(tester);
       await connectSocket(tester);
@@ -1088,6 +1093,121 @@ void main() {
       await settleUi(tester);
 
       expect(peers.last.sentRemoteControlCommands, isEmpty);
+    });
+
+    group('presence in the header', () {
+      final presence = find.byKey(const Key('remote_session_device_presence'));
+
+      String header(WidgetTester tester) {
+        final texts = tester
+            .widgetList<Text>(
+              find.descendant(of: presence, matching: find.byType(Text)),
+            )
+            .map((text) => text.data)
+            .toList();
+        return texts.contains('Online') ? 'Online' : 'Offline';
+      }
+
+      testWidgets('Offline -> Online follows device:presence-updated', (
+        tester,
+      ) async {
+        // The tablet was offline when the session was read.
+        devices.devices = [buildDevice(isOnline: false)];
+        await pumpAssistance(tester, isDeviceOnline: false);
+        expect(header(tester), 'Offline');
+        final readsBefore = remoteSessions.currentCount;
+        final renderer = renderers.last;
+
+        devices.devices = [buildDevice()];
+        realtime.emitDevicePresenceUpdated(deviceId);
+        await settleUi(tester);
+
+        expect(header(tester), 'Online');
+        // No REST beyond the device list, and the assistance is untouched.
+        expect(remoteSessions.currentCount, readsBefore);
+        expect(renderers.created, [same(renderer)]);
+        expect(statusLine(tester), 'Control remoto: listo');
+      });
+
+      testWidgets('Online -> Offline follows device:presence-updated', (
+        tester,
+      ) async {
+        devices.devices = [buildDevice()];
+        await pumpAssistance(tester);
+        expect(header(tester), 'Online');
+
+        devices.devices = [buildDevice(isOnline: false)];
+        realtime.emitDevicePresenceUpdated(deviceId);
+        await settleUi(tester);
+
+        expect(header(tester), 'Offline');
+        // Presence is not authority, in either direction: nothing else moves.
+        expect(find.text('Estado: Asistencia en curso'), findsOneWidget);
+      });
+
+      testWidgets('another device going offline changes nothing here', (
+        tester,
+      ) async {
+        const otherId = '9b2e4f10-0000-4000-8000-000000000001';
+        devices.devices = [
+          buildDevice(),
+          buildDevice(id: otherId, publicId: '900-000-001'),
+        ];
+        await pumpAssistance(tester);
+        final readsBefore = remoteSessions.currentCount;
+
+        devices.devices = [
+          buildDevice(),
+          buildDevice(id: otherId, publicId: '900-000-001', isOnline: false),
+        ];
+        realtime.emitDevicePresenceUpdated(otherId);
+        await settleUi(tester);
+
+        expect(header(tester), 'Online');
+        expect(remoteSessions.currentCount, readsBefore);
+      });
+
+      testWidgets('a GET /devices that left before the change never wins', (
+        tester,
+      ) async {
+        devices.devices = [buildDevice(isOnline: false)];
+        await pumpAssistance(tester, isDeviceOnline: false);
+        final gate = Completer<void>();
+        devices.loadGate = gate.future;
+
+        // A GET leaves while the tablet is still offline ...
+        realtime.emitDevicePresenceUpdated(deviceId);
+        await settleUi(tester);
+        // ... the tablet comes back, and says so while that GET is out.
+        devices
+          ..devices = [buildDevice()]
+          ..loadGate = null;
+        realtime.emitDevicePresenceUpdated(deviceId);
+        await settleUi(tester);
+        gate.complete();
+        await settleUi(tester);
+
+        expect(header(tester), 'Online');
+      });
+
+      testWidgets('Online with the control suspended stays only information', (
+        tester,
+      ) async {
+        devices.devices = [buildDevice()];
+        await pumpAssistance(tester);
+
+        realtime.emitReconnecting();
+        await settleUi(tester);
+
+        expect(header(tester), 'Online');
+        expect(
+          find.byKey(const Key('remote_control_paused_notice')),
+          findsOneWidget,
+        );
+        expect(statusLine(tester), isNot('Control remoto: listo'));
+        await clickCentre(tester);
+        expect(peers.last.sentRemoteControlCommands, isEmpty);
+      });
     });
 
     testWidgets('pressing FINALIZAR stops the clicks at once', (tester) async {

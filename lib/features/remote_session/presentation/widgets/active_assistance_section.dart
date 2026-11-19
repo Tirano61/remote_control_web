@@ -8,6 +8,7 @@ import '../../../../core/presentation/format/elapsed_label.dart';
 import '../../../../core/presentation/widgets/console_feedback.dart';
 import '../../../../core/presentation/widgets/console_section.dart';
 import '../../../../core/presentation/widgets/presence_indicator.dart';
+import '../../../devices/presentation/bloc/devices/devices_bloc.dart';
 import '../../../remote_control/domain/entities/remote_control_command.dart';
 import '../../../remote_control/domain/entities/remote_control_status.dart';
 import '../../../remote_control/presentation/widgets/remote_control_gesture_layer.dart';
@@ -20,7 +21,9 @@ import '../../../webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dar
 import '../../../webrtc/presentation/remote_screen/remote_video_renderer.dart';
 import '../../../webrtc/presentation/widgets/remote_screen_view.dart';
 import '../../domain/entities/remote_session.dart';
+import '../../domain/entities/remote_session_device.dart';
 import '../bloc/remote_session/remote_session_bloc.dart';
+import '../presence/session_device_presence.dart';
 
 /// "ASISTENCIA REMOTA" block of the console.
 ///
@@ -107,9 +110,7 @@ class _LiveAssistance extends StatelessWidget {
       child: ConsoleSection(
         title: 'ASISTENCIA REMOTA',
         subtitle: session.status.label,
-        trailing: device == null
-            ? null
-            : PresenceIndicator(isOnline: device.isOnline, compact: true),
+        trailing: device == null ? null : _SessionDevicePresence(device: device),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -1255,6 +1256,26 @@ class _RemoteConnectionStatus extends StatelessWidget {
     WebRtcDataChannelState.closing => 'cerrando',
     WebRtcDataChannelState.closed => 'cerrado',
   };
+}
+
+/// Presence of the assisted device, in the header — see [isSessionDeviceOnline]
+/// for where it comes from. Information only: it enables nothing.
+class _SessionDevicePresence extends StatelessWidget {
+  const _SessionDevicePresence({required this.device});
+
+  final RemoteSessionDevice device;
+
+  @override
+  Widget build(BuildContext context) {
+    return BlocSelector<DevicesBloc, DevicesState, bool>(
+      selector: (devices) => isSessionDeviceOnline(device, devices),
+      builder: (context, isOnline) => PresenceIndicator(
+        key: const Key('remote_session_device_presence'),
+        isOnline: isOnline,
+        compact: true,
+      ),
+    );
+  }
 }
 
 /// Compact error shown when the state of the assistance could not be read or a
