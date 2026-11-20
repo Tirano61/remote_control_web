@@ -46,6 +46,7 @@ class RemoteScreenView extends StatefulWidget {
     this.onRemoteTouch,
     this.controlStatusBuilder,
     this.onPictureChanged,
+    this.overlay,
     super.key,
   }) : assert(
          (onRemoteTap == null) == (onRemoteSwipe == null) &&
@@ -88,6 +89,11 @@ class RemoteScreenView extends StatefulWidget {
   /// something new to say and, with `false`, when this surface goes away. It may
   /// be called during a build, so whoever listens must not rebuild from it directly.
   final ValueChanged<bool>? onPictureChanged;
+
+  /// Drawn over the picture, and never in the way of the pointer: whatever it
+  /// says, it receives no gesture and takes none away from the picture. Remote
+  /// control is decided elsewhere, and a notice never grants or withdraws it.
+  final Widget? overlay;
 
   /// Proportions of the empty frame before the video has said what its own
   /// are. Only the placeholder uses it: the picture is always laid out with
@@ -200,6 +206,11 @@ class _RemoteScreenViewState extends State<RemoteScreenView> {
                                   onSwipe: onRemoteSwipe,
                                   onLongPress: onRemoteLongPress,
                                   onTouch: onRemoteTouch,
+                                ),
+                              if (widget.overlay case final overlay?)
+                                Positioned.fill(
+                                  key: const Key('remote_screen_overlay'),
+                                  child: IgnorePointer(child: overlay),
                                 ),
                             ],
                           ),

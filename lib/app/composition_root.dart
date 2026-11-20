@@ -28,6 +28,7 @@ import '../features/remote_session/domain/usecases/close_remote_session.dart';
 import '../features/remote_session/domain/usecases/create_remote_session.dart';
 import '../features/remote_session/domain/usecases/load_current_remote_session.dart';
 import '../features/remote_session/presentation/bloc/remote_session/remote_session_bloc.dart';
+import '../features/remote_session/presentation/bloc/remote_transmission/remote_transmission_cubit.dart';
 import '../features/signaling/data/technician_signaling_client_impl.dart';
 import '../features/signaling/domain/client/technician_signaling_client.dart';
 import '../features/support/data/datasources/support_remote_data_source.dart';
@@ -239,6 +240,23 @@ class AppDependencies {
     peerClient: webRtcPeerClient,
     signalingClient: technicianSignalingClient,
     iceConfiguration: iceConfiguration,
+  );
+
+  /// What the console can say about the tablet's screen. It only reads the
+  /// other BLoCs and `remote-session:peer-joined`; it never writes to them.
+  RemoteTransmissionCubit createRemoteTransmissionCubit({
+    required RemoteSessionBloc remoteSessionBloc,
+    required WebRtcSessionBloc webRtcSessionBloc,
+    required TechnicianRealtimeBloc technicianRealtimeBloc,
+    required DevicesBloc devicesBloc,
+    required SignalingJoinBloc signalingJoinBloc,
+  }) => RemoteTransmissionCubit(
+    remoteSessionBloc: remoteSessionBloc,
+    webRtcSessionBloc: webRtcSessionBloc,
+    technicianRealtimeBloc: technicianRealtimeBloc,
+    devicesBloc: devicesBloc,
+    signalingJoinBloc: signalingJoinBloc,
+    peerJoined: technicianRealtimeClient.peerJoined,
   );
 
   /// Rules that only exist at the level of the whole console.
