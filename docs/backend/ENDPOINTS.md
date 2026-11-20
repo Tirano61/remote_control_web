@@ -108,6 +108,40 @@ A global `ValidationPipe` runs with `whitelist: true` and
 Clients must branch on the **HTTP status code**, not on the `message` string.
 Message texts are not part of this contract and may change.
 
+Error bodies are the NestJS default (`statusCode`, `message`, and for 4xx
+`error`). Their shape is **not** part of this contract, with one exception: an
+endpoint may document a stable application error code in a `code` field. Where
+it does, that `code` is part of the contract and clients may branch on it.
+
+### Application error codes
+
+```text
+code                         status  endpoint
+DEVICE_CREDENTIAL_REJECTED   401     POST /device-auth/login
+```
+
+This is the only application error code the REST API emits today. Every other
+error response has no `code` field.
+
+The `/devices` Socket.IO handshake has its own codes (`DEVICE_AUTH_UNAUTHORIZED`,
+`DEVICE_AUTH_UNAVAILABLE`), carried in `connect_error`, not in an HTTP body. They
+are documented in [REALTIME.md](REALTIME.md#handshake-errors).
+
+`DEVICE_CREDENTIAL_REJECTED` means the backend looked up the presented device
+credential and refused it. See [POST /device-auth/login](#post-device-authlogin)
+for exactly when it is sent and when it is not.
+
+A `401` **without** this code — from this endpoint or any other — does not mean
+the device credential was revoked. It can come from an expired or revoked
+Device JWT on another route, or from something between the client and the
+backend (a proxy, a captive portal, a gateway).
+
+The code is an application-level signal carried in the JSON body. It is not a
+cryptographic proof of where the response came from: anything able to forge the
+HTTP response can forge the body too. How much it is worth depends on the
+transport, not on this backend: only a TLS connection with a validated
+certificate rules out a third party producing it.
+
 ---
 
 # Authentication — Web
@@ -707,13 +741,77 @@ Response 200:
 Errors:
 
 ```text
-400 — Validation failed.
-401 — Invalid device credentials.
+400 — Validation failed. No `code` field.
+401 — DEVICE_CREDENTIAL_REJECTED: the backend refused the device credential.
+500 — Unexpected server error, including the database being unreachable,
+      timing out or failing a query. No `code` field.
 ```
 
+Response 401 (confirmed rejection), exact body:
+
+```json
+{
+  "statusCode": 401,
+  "code": "DEVICE_CREDENTIAL_REJECTED",
+  "message": "Invalid device credentials",
+  "error": "Unauthorized"
+}
+```
+
+`code` is the contract. `statusCode`, `message` and `error` are the same values
+this endpoint returned before `code` existed and are kept for compatibility;
+clients should not match on `message`.
+
+When `DEVICE_CREDENTIAL_REJECTED` is sent — only after the database answered
+and the backend checked the credential against it:
+
+```text
+unknown deviceId
+device exists but isActive = false
+device has no unrevoked credential
+deviceSecret does not match the active credential, including a secret from a
+credential that a re-enrollment has since replaced
+```
+
+All of these answer the same body on purpose. The response never says which one
+happened and never contains the device, the secret or its hash.
+
+When it is **not** sent:
+
+```text
+400   validation failure (bad UUID, bad secret format, unknown field)
+500   PostgreSQL unreachable, connection timeout, failed query,
+      or any unexpected exception — the credential was not checked
+any   errors from every other endpoint, including a 401 from
+      GET /device-auth/check-status or any other @DeviceAuth() route
+```
+
+What the tablet can conclude:
+
+```text
+401 with code DEVICE_CREDENTIAL_REJECTED   the backend refused this credential
+                                           now
+401 without that code                      not a confirmed rejection; nothing
+                                           can be concluded about the stored
+                                           credential
+5xx, timeout, no response                  not a rejection
+```
+
+In none of the non-`200` cases is the tablet authenticated: holding a stored
+credential never authorizes anything by itself, only a Device JWT from a `200`
+does.
+
+A confirmed rejection is not necessarily permanent. Because the reasons are not
+disclosed, the tablet cannot tell a replaced credential (re-enrollment needed)
+from a deactivated device: if an admin reactivates the device, the **same**
+credential is accepted again.
+
+The code is an application signal, not a proof of origin — see
+[Application error codes](#application-error-codes).
+
 Notes:
-All rejection reasons (unknown device, inactive device, revoked credential,
-wrong secret) answer the same `401`.
+A `200` does not depend on anything the client stored: the backend re-checks
+the device and the active credential on every login.
 
 The returned token is the credential for every `@DeviceAuth()` route and for the
 `/devices` Socket.IO namespace. It expires after `DEVICE_JWT_EXPIRES_IN`
@@ -752,6 +850,10 @@ Errors:
 401 — Token missing, invalid, expired or of the wrong type; device deactivated;
       credential revoked by a re-enrollment.
 ```
+
+This `401` never carries `code: DEVICE_CREDENTIAL_REJECTED`. It says the Device
+JWT is not accepted; the tablet renews it through `POST /device-auth/login`, and
+only that endpoint can confirm the permanent credential is refused.
 
 Notes:
 Unlike `GET /auth/check-status`, this endpoint does **not** renew the token.
@@ -1267,35 +1369,54 @@ Request:
 Empty body.
 
 Response 200:
-The closed session, same shape as above, with `status: "CLOSED"`, `endedAt` set
-and `endedBy: "DEVICE"`.
+The session as it is now, same shape as above, with `status: "CLOSED"` and
+`endedAt` set. It is returned both when this request closed the session and when
+the session was already closed — see [Idempotent close](#idempotent-close).
+
+```text
+endedBy: "DEVICE"      this request closed it, or an earlier close by this
+                       same device did (for example one whose response was
+                       lost)
+endedBy: "TECHNICIAN"  the technician had already closed it
+endedBy: "SYSTEM"      the backend had already closed it automatically
+```
 
 Errors:
 
 ```text
 400 — id is not a valid UUID.
 401 — Not authenticated as a device.
-404 — The session does not exist, or belongs to another device.
-409 — The session is already closed (by the technician, by the device or
-      automatically by the backend), or its support request is not in a state
-      that can be completed.
+404 — The session does not exist, or belongs to another device. Also when that
+      other device's session is already CLOSED.
+409 — The session is still live but its support request is not in a state that
+      can be completed. Nothing is written.
 ```
+
+An already `CLOSED` session of this device is **not** an error: it answers `200`.
 
 Notes:
 Closing the session also closes the support request. The two updates are
 committed together: a `CLOSED` session with an `ACCEPTED` request cannot remain.
 
+The close is idempotent. Repeating it — after a lost response, from a retry
+queue, after a restart — answers `200` with the closed session, and changes
+nothing: `endedAt`, `endedBy` and the support request keep the values of the
+first close, and no event is emitted. A late close does **not** claim the close:
+if the technician or the backend closed first, `endedBy` stays theirs.
+
 If the technician, the device and the backend's automatic close happen at the
-same instant, only one wins; the others receive `409` (or, for the backend, do
-nothing), and the recorded `endedBy` / `endedAt` are those of the first. For the
-tablet a `409` here means "already over": the local session must end anyway.
+same instant, exactly one performs the transition; the other device and
+technician requests answer `200` with that winning close, and the recorded
+`endedBy` / `endedAt` are the winner's. For the tablet, a `200` with
+`status: "CLOSED"` means "over", whoever closed it.
 
 The device does **not** receive `remote-session:closed` for its own close — the
 closing side already has the closed session in this HTTP response.
 
-The technician **is** notified: after the transaction commits, the backend emits
-`remote-session:closed` to that technician on the `/technicians` namespace. It is
-a change notification, not state: the web app answers it with
+The technician **is** notified, only when this request performed the close:
+after the transaction commits, the backend emits `remote-session:closed` to that
+technician on the `/technicians` namespace. A repeated close emits nothing. The
+event is a change notification, not state: the web app answers it with
 `GET /remote-sessions/current`. Delivery is best-effort and never rolls the close
 back — if the technician is not connected the event is lost and the session is
 still `CLOSED`.
@@ -1648,8 +1769,18 @@ Request:
 Empty body.
 
 Response 200:
-The closed session, with `status: "CLOSED"`, `endedAt` set and
-`endedBy: "TECHNICIAN"`.
+The session as it is now (same shape as `GET /remote-sessions/:id`), with
+`status: "CLOSED"` and `endedAt` set. It is returned both when this request
+closed the session and when the session was already closed — see
+[Idempotent close](#idempotent-close).
+
+```text
+endedBy: "TECHNICIAN"  this request closed it, or an earlier close by this
+                       same technician did (for example one whose response
+                       was lost)
+endedBy: "DEVICE"      the tablet had already closed it
+endedBy: "SYSTEM"      the backend had already closed it automatically
+```
 
 Errors:
 
@@ -1657,11 +1788,14 @@ Errors:
 400 — id is not a valid UUID.
 401 — Not authenticated.
 403 — Authenticated without role admin/tecnico.
-404 — The session does not exist, or belongs to another technician.
-409 — The session is already closed (by the device or automatically by the
-      backend), or its support request is not in a state that can be
-      completed.
+404 — The session does not exist, or belongs to another technician. Also when
+      that other technician's session is already CLOSED, and also for admin.
+409 — The session is still live but its support request is not in a state that
+      can be completed. Nothing is written.
 ```
+
+An already `CLOSED` session of this technician is **not** an error: it answers
+`200`.
 
 Notes:
 Both live states close the same way: a session still `CONNECTING` and one
@@ -1669,9 +1803,17 @@ already `ACTIVE` both become `CLOSED`. A session that was activated keeps its
 `connectedAt` — closing never rewrites it — so the response carries
 `connectedAt` and `endedAt` together.
 
-On success the backend emits `remote-session:closed` to the device over
-Socket.IO. No echo is sent back to the technician who closed: this HTTP response
-already carries the closed session.
+The close is idempotent. A retry after a lost response answers `200` with the
+same body as the first close and changes nothing: `endedAt`, `endedBy` and the
+support request keep the values of the first close, and no event is emitted. The
+client can confirm `CLOSED` from this response alone; it does not need a
+follow-up `GET /remote-sessions/:id`. A late close does **not** claim the close:
+if the tablet or the backend closed first, `endedBy` stays theirs.
+
+When this request performs the close, the backend emits `remote-session:closed`
+to the device over Socket.IO. No echo is sent back to the technician who closed:
+this HTTP response already carries the closed session. A repeated close emits
+nothing.
 
 Closing the session immediately cuts signaling: the backend re-checks the session
 on every `webrtc:*` message, so a closed session starts answering `UNAUTHORIZED`.
@@ -1751,11 +1893,17 @@ user
 4. POST   /device-auth/login              (public, from the tablet)
           body: deviceId + deviceSecret
           -> Device JWT (24h by default)
+          -> 401 code DEVICE_CREDENTIAL_REJECTED: credential refused,
+             re-enroll; any other failure is not a rejection
 
 5. GET    /device-auth/check-status       (Device JWT)
           -> validates the token; does NOT renew it
 
 6. Socket.IO connect to /devices with auth.token = Device JWT
+          -> connect_error data.code DEVICE_AUTH_UNAUTHORIZED: token refused,
+             renew it with step 4
+          -> connect_error data.code DEVICE_AUTH_UNAVAILABLE: token not
+             checked, retry with the same token (see REALTIME.md)
 ```
 
 Re-enrollment repeats steps 2–4: it revokes the previous credential, invalidates
@@ -1828,6 +1976,9 @@ and the web app reads GET /support-requests.
 
 5. In every case the SupportRequest becomes COMPLETED in the same transaction.
    A session closed after step 3 keeps its connectedAt.
+
+6. 4a and 4b are idempotent: on an already CLOSED session of the caller they
+   answer 200 with the original close and emit nothing (see Idempotent close).
 ```
 
 Once the session exists, WebRTC negotiation happens over Socket.IO — see
@@ -1841,3 +1992,65 @@ participation (`remote-session:join`), so a session driven only through REST —
 for example from Postman, with no Socket.IO client joined — is closed by the
 backend about one grace period after `/activate`, or at the CONNECTING TTL if
 it is never activated.
+
+### Idempotent close
+
+Applies to `POST /remote-sessions/:id/close` (technician) and
+`POST /device/remote-sessions/:id/close` (device). A session is closed once; a
+legitimate close repeated on the same session confirms that close and changes
+nothing.
+
+```text
+Situation                                         Status  Body / effect
+------------------------------------------------  ------  ----------------------------------
+Own live session (CONNECTING or ACTIVE)           200     CLOSED, endedBy = caller,
+                                                          endedAt = now; request COMPLETED;
+                                                          event to the other side
+Own session already CLOSED (by anyone)            200     CLOSED with the ORIGINAL endedBy
+                                                          and endedAt; nothing written,
+                                                          no event
+Session of another technician / device,           404     same body as a missing session;
+  live or CLOSED (admin included)                         nothing revealed, nothing written
+Session that does not exist                       404
+Own live session whose request cannot complete    409     nothing written
+id is not a UUID                                  400
+Missing, invalid or expired JWT                   401
+Technician route without admin/tecnico role       403
+Database or unexpected error                      500     nothing written; retrying is safe
+```
+
+Authorization is never skipped: being `CLOSED` does not make a session visible.
+Ownership is checked on the session row itself — `technicianId` from the User
+JWT, `deviceId` from the Device JWT — never from anything the client sends.
+
+Who closed it:
+
+```text
+First close           Later close from     Later close answers
+--------------------  -------------------  -------------------
+TECHNICIAN            technician (retry)   endedBy TECHNICIAN
+TECHNICIAN            device               endedBy TECHNICIAN
+DEVICE                device (retry)       endedBy DEVICE
+DEVICE                technician           endedBy DEVICE
+SYSTEM                technician / device  endedBy SYSTEM
+```
+
+The late caller is never recorded as the closer. A client that needs to know
+whether *it* closed the session compares `endedBy` with its own side; neither
+current client needs to.
+
+Concurrency: every close — technician, device and the automatic `SYSTEM` close —
+starts by locking the session row (`SELECT ... FOR UPDATE`) inside its
+transaction. The first one to get the lock performs the transition; the others
+wait for it and then read `CLOSED`. So, however many arrive together, there is
+exactly one transition, one `endedAt`, one `endedBy`, one `COMPLETED` support
+request and one set of `remote-session:closed` events. Waiting is bounded by the
+first close's transaction, which is two `UPDATE`s.
+
+The close always targets the session in the path. A delayed close of an old
+session never affects a newer session of the same device or technician.
+
+Signaling and presence are not involved: the close does not touch the session
+room or any socket. Once `CLOSED`, `webrtc:*` for that session answer
+`UNAUTHORIZED`, and nothing — including a repeated close or `/activate` — moves
+a `CLOSED` session back to a live state.
