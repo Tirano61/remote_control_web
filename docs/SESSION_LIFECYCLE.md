@@ -206,21 +206,42 @@ FINALIZAR button disappears with the view, so there is no second press.
 
 ### What the backend said
 
-`POST /remote-sessions/:id/close` is not idempotent: a session already closed
-answers `409`, and `409` also means "its support request could not be
-completed". `CloseRemoteSession` therefore returns a typed outcome and never
-decides from a `409` alone:
+`POST /remote-sessions/:id/close` is idempotent (`remote_control_backend`
+Prompt 34, `f5b8a1c`): the first close **and** any repetition on a session of
+this technician already `CLOSED` answer `200` with the session as it was
+closed. The repetition writes nothing, emits nothing, and keeps the original
+`endedBy` and `endedAt` — which may be `DEVICE` or `SYSTEM` when the tablet or
+the backend closed it first. A late close never claims it. `404` is a session
+that does not exist or is not this technician's (live or `CLOSED`, admin
+included); `409` is now only a session still live whose support request cannot
+be completed.
+
+`CloseRemoteSession` returns a typed outcome:
 
 | Answer | Outcome |
 |---|---|
-| `200` | confirmed |
+| `200`, same id, `CLOSED`, `endedAt` set — any `endedBy` | confirmed, no further read |
+| `200` that does not describe that session as closed (another id, still live, no `endedAt`) | not trusted: `GET /remote-sessions/:id` decides (`CLOSED` → confirmed, live → unconfirmed and retried, another id → unconfirmed) |
 | `404` (not found / not this technician's) | confirmed: nothing left to close |
-| `409` → `GET /remote-sessions/:id` `CLOSED` | confirmed (a close whose answer was lost, or one by the tablet/backend) |
 | `409` → `GET /remote-sessions/:id` live | refused |
+| `409` → `GET /remote-sessions/:id` `CLOSED` | confirmed (only a backend predating the idempotent close answers this way) |
 | `409` → that read fails | unconfirmed |
 | `403`, `400` | refused |
 | no network, timeout, `5xx`, unreadable answer | unconfirmed |
 | `401` | unconfirmed, reported: the user session ends |
+
+`endedBy` is never required to be `TECHNICIAN`: the outcome carries the session
+exactly as answered and the console logs its `endedBy`; *Asistencia
+finalizada.* is shown whoever closed it.
+
+The `409` path still reads by id rather than trusting the status alone. With
+the current backend that costs one `GET` on a rare refusal; in exchange the
+console stays correct against a backend that still answers `409` to a closed
+session (compatibility). A valid `200` is not followed by any
+`GET /remote-sessions/:id` — the contract says the response alone confirms
+`CLOSED`. The `GET /remote-sessions/current` that follows any confirmation is
+unchanged: it is about what comes next (a newer session, the queue), never
+about bringing this one back.
 
 `GET /remote-sessions/:id` is documented in `docs/backend/ENDPOINTS.md` and
 returns closed sessions too. No contract was invented.
@@ -272,7 +293,11 @@ close — a new negotiation would hand remote control back.
 ### Closed elsewhere
 
 `DEVICE` and `SYSTEM` closes keep their path (`remote-session:closed` → the
-session ends at once, REST afterwards). Seen on the T10A: a tablet that lost its
+session ends at once, REST afterwards). When the console's own close races
+with them, or the event was missed, the close answers `200` with their
+`endedBy`, and that is a confirmation like any other; whichever arrives first
+— the event or the `200` — settles the pending close, and the other is
+ignored. Seen on the T10A: a tablet that lost its
 server stops the assistance on its own and closes it (`endedBy DEVICE`) when it
 comes back; a tablet away longer than the 60 s grace gets `endedBy SYSTEM`. Both
 end the console's view without a request of its own.
@@ -284,9 +309,9 @@ end the console's view without a request of its own.
   technician's participation, so while the close is unconfirmed and the socket
   stays up, the backend's automatic close does not start. Only the console's own
   retries close it then. A disconnection (F5, closed tab, network) does start the
-  60 s grace. A `remote-session:leave`, or an idempotent close answering `200`
-  for a session already `CLOSED` by the same technician, would make this
-  simpler; both are `remote_control_backend` changes and are only proposed here.
+  60 s grace. The idempotent close (`200` on a session already `CLOSED`) now
+  exists and is what the retries rely on; a `remote-session:leave` would still
+  make this simpler and remains only proposed (`remote_control_backend`).
 * The tablet receives `remote-session:closed` only when the close commits: until
   then it sees the peer connection and its channel go (at once), and decides on
   its own what to do with its capture.
@@ -545,7 +570,8 @@ SYSTEM` at 17:18:30, peer released at once.
 at +3 ms, the tablet's channel aborted at once. The client gave the first POST up
 after 10 s while the backend committed it at 10.5 s — a close that **arrived and
 lost its answer**, for real: retry 2 s later → `409` → `GET /remote-sessions/:id`
-`CLOSED` → confirmed. **F**: this session itself was a new assistance started
+`CLOSED` → confirmed. (Contract of that date. Since the idempotent close the
+retry answers `200` with the original close — see the 2026-11-20 runs below.) **F**: this session itself was a new assistance started
 normally right after B's confirmed close.
 
 **D/E/F5. Failing POST, reconnection, reload** (session `7485747a`, relay
@@ -571,6 +597,65 @@ schedule's *no se pudo confirmar* banner (the reconnection restarted it), a
 `500` from the backend, a drag held while pressing FINALIZAR — covered by tests.
 When the relay dropped a connection Chrome resent the same POST once by itself
 (two log lines per attempt); harmless, the close names one exact session.
+
+## Seen on the T10A (2026-11-20) — idempotent close
+
+T10A `LSTT10M2026081504`, Android 16, `remote_control_device` as installed.
+Backend `main` `f5b8a1c` (idempotent close), shared `nest start --watch` on
+`:3000`, Neon; not edited, not restarted, its branch untouched. This console in
+debug (`flutter run -d web-server`, `localhost:5173`) through an isolated relay
+on `127.0.0.1:3101` (control `3102`, scratchpad only, logs without headers or
+bodies) that could drop the answer of a close **after** the backend had
+committed it, and replay an authorized close with the console's User JWT held
+in memory only (never logged or shown). Only the console went through it.
+PERMITIR and every MediaProjection consent were given by hand; ADB only for
+`input tap` (SOLICITAR ASISTENCIA, the tablet's FINALIZAR ASISTENCIA) and
+`screencap`. No mobile-mcp, no UiAutomation. Times UTC.
+
+| Run | Session | What happened | Result |
+|---|---|---|---|
+| **E** SYSTEM | `085e2c82` | consent not given within the `CONNECTING` TTL: backend closed it 13:07:51.093 | console: `remote-session:closed endedBy=SYSTEM`, peer released; two authorized closes afterwards → `200`, `endedBy SYSTEM`, same `endedAt` |
+| **A** normal | `2d2f934b` | FINALIZAR 13:23:22: finalized locally, peer closed, attempt 1 in the same instant | `POST` `200` in 2.6 s → `close confirmed endedBy=TECHNICIAN`, no `GET /remote-sessions/:id`; tablet: *El técnico finalizó la asistencia.* |
+| **B** repeated | `2d2f934b` | two authorized closes on the `CLOSED` session | `200` both, `endedBy TECHNICIAN`, `endedAt` 13:23:24.553 unchanged; request `COMPLETED` |
+| **F** new assistance | `496fa1fc` | started normally after A; while `ACTIVE`, the old close of `2d2f934b` replayed | `200` describing `2d2f934b` only; `496fa1fc` stayed `ACTIVE`, video and control on screen |
+| **D** lost answer (browser resend) | `496fa1fc` | first answer dropped after commit (13:26:28.155); Chrome resent the same `POST` by itself | resend `200` with the original `endedAt` → confirmed at the first attempt, one transition |
+| **D** lost answer (console retry) | `e27e6143` | first answer **and** Chrome's resend dropped after commit (13:30:51.516) | `retry 1/4 in 2000 ms` → attempt 2 → `200` → confirmed; *Confirmando el cierre…* meanwhile, INICIAR disabled, no peer, offer or join; pending-close entry removed; one transition |
+| **C** DEVICE | `da749273` | tablet FINALIZAR 13:29:03.964 | console: `remote-session:closed endedBy=DEVICE`, peer closed; two authorized technician closes → `200`, `endedBy DEVICE`, same `endedAt` |
+
+After the runs: no live session (`GET /remote-sessions/current` → `null`),
+every request of the day `COMPLETED`, the tablet idle on SOLICITAR ASISTENCIA,
+the relay and the debug server stopped.
+
+Not reached on the device (covered by tests): a `409` on a live session, a
+`200` describing another session, a `500`, an F5 with a close pending against
+the new backend, a close racing with `remote-session:closed`.
+
+## Tests (Prompt 25)
+
+* `close_remote_session_test`: first close and repetition `200` (one transition,
+  no read by id), `endedBy DEVICE` / `SYSTEM` kept, retry after a lost answer,
+  a `200` about another session / still live / without `endedAt` not trusted,
+  a read by id answering another session, `404` missing / not this
+  technician's, `409` live → refused, `409` + `CLOSED` by id (older backend),
+  `409` + failed read, timeout / `5xx` / unreadable, `401`, `403` / `400`.
+* `remote_session_bloc_test` › *FINALIZAR is final for this console*: lost
+  answer confirmed by the retry `200` (no `GET` by id, store emptied), `409`
+  live refused and not retried, closed first by `DEVICE` / `SYSTEM`, a `200`
+  about another session never confirming (bounded retries, never live again),
+  one close per session, F5 with the close pending and the tablet closing
+  meanwhile; the Prompt 24 cases (old `GET` answering `ACTIVE`, new
+  assistance, `remote-session:closed` during the close, F5, sign in again)
+  unchanged.
+* `technician_console_session_recovery_test`: lost answer confirmed by the
+  `200` with control withdrawn throughout, no new peer connection, no rejoin;
+  closed first by the tablet.
+* `remote_session_contract_test`: an idempotent `200` with `endedBy DEVICE` /
+  `SYSTEM` and the original `endedAt`, parsed as sent; through the real
+  repository one `POST` and no `GET`; a `200` for another id followed by
+  `GET /remote-sessions/<exact id>`.
+* The fake repository models the idempotent close (an already `CLOSED` session
+  answers `200` with its original `endedBy` / `endedAt`) instead of the old
+  `409`; the tests asserting a `409` for a repeated close were replaced.
 
 ## Tests (Prompt 24)
 
@@ -601,6 +686,14 @@ When the relay dropped a connection Chrome resent the same POST once by itself
   the POST answers; the header reading the session's copy) the new tests fail.
 
 ## Residual risks
+
+* **The idempotent `200` is trusted only when it names the exact session as
+  `CLOSED` with `endedAt`.** Anything else goes to `GET /remote-sessions/:id`,
+  so a malformed backend answer costs a read and, at worst, the bounded retry
+  schedule — never a wrong confirmation.
+* **The `409` read by id is kept for compatibility.** Against the current
+  backend it only ever finds the session live (a refusal); it is one extra
+  `GET` on a rare path.
 
 * **An answer already on the wire** when the web replaces a negotiation can be
   taken by the new peer connection: neither end can tell answers apart without
@@ -682,7 +775,8 @@ Debug only, identifiers only: `remote session closed <id> endedBy=<value>`,
 `late answer accepted <id>`, `connection retry requested <id>`,
 `remote session finalized locally <id>`, `remote session close attempt <n> <id>`,
 `remote session close retry <n>/<max> in <ms> ms <id>`,
-`remote session close confirmed <id>`, `remote session close refused <id>`,
+`remote session close confirmed <id> endedBy=<value>`,
+`remote session close refused <id>`,
 `remote session close unconfirmed, retries exhausted <id>`,
 `remote session finalized here is still live <id>`,
 `remote session close confirmed by a read <id>`,
