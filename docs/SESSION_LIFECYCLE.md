@@ -630,6 +630,177 @@ Not reached on the device (covered by tests): a `409` on a live session, a
 `200` describing another session, a `500`, an F5 with a close pending against
 the new backend, a close racing with `remote-session:closed`.
 
+## Transmission indicator (Prompt 26)
+
+**Problem.** Since `remote_control_device` Prompt 40 the tablet drops its screen
+frames before the encoder whenever it loses its authority (its socket, or a
+check it could not confirm). MediaProjection, the peer connection and the
+`control` channel all stay up, so the console kept showing the last frame as if
+it were live — and tells the technician nothing.
+
+**What the tablet tells the console about it: nothing.** No DataChannel message,
+no Socket.IO event, no REST field says "paused" or "resumed"
+(`remote_control_device` `ScreenCaptureTransmission.kt`, docs/remote_session/
+LIFECYCLE.md, *Video during an authority loss*). The indicator is therefore built
+only from signals the console already has, and says *puede* / *podría* whenever
+it is inferring.
+
+### Signals
+
+| Signal | Source | What it proves |
+|---|---|---|
+| ICE `disconnected` / `failed` | this browser's peer connection | confirmed: nothing can arrive |
+| `/technicians` socket down | this browser's socket | the console cannot hear presence or closes: unknown |
+| tablet `OFFLINE` | `device:presence-updated` → `GET /devices` | confirmed by the backend; the tablet suspends the moment it loses its socket, so *inferred*: paused |
+| command answered `session_not_active` | the tablet, over `control` | the tablet does not hold the session confirmed: *inferred*: paused |
+| tablet in the room (`peer-joined`, join ACK `peerJoined: true`) | backend | the tablet rejoins **only with its authority confirmed** — the same moment it lets frames through again |
+| a new offer answered (`connected` after a negotiation) | peer connection | same: it answers only with its authority confirmed |
+| a command acknowledged `ok` | the tablet | same |
+| picture on screen | the renderer (`isPictureDisplayed`) | a track of this negotiation is being drawn |
+
+Never used: `framesReceived`, a timer, or "the picture has not changed". A still
+screen is a legitimate screen, and a working ICE connection says nothing about
+frames held back on the tablet.
+
+### States
+
+`RemoteTransmissionMonitor` (pure reducer) → `RemoteTransmissionCubit` (reads
+`RemoteSessionBloc`, `WebRtcSessionBloc`, `TechnicianRealtimeBloc`,
+`DevicesBloc`, `SignalingJoinBloc` and `remote-session:peer-joined`; writes to
+none of them). First match wins:
+
+```text
+no live session (Idle, Ending = FINALIZAR, closed)   hidden
+never connected in this page                          hidden (existing lines)
+WebRtcFailed, attempt planned                         recovering     (placeholder)
+WebRtcFailed, none left                               unavailable    (placeholder)
+ICE disconnected                                      interrupted    "Conexión interrumpida"            confirmed
+socket down                                           unconfirmed    "Sin conexión con el servidor"
+socket back, GET /devices or join not done yet        recovering     "Recuperando transmisión"
+socket back, GET /devices or join failed              unconfirmed    "Estado del dispositivo sin confirmar"
+tablet OFFLINE                                        interrupted    "Conexión interrumpida" (+ en pausa)  confirmed offline, inferred pause
+tablet back online / not in the room, no evidence     recovering
+command refused session_not_active, no evidence       possiblyPaused "Transmisión posiblemente pausada"
+after any of the above: not connected + channel + picture   recovering
+otherwise                                             available      (no notice)
+```
+
+* **Interrupted / unconfirmed / possibly paused**: a card in the middle of the
+  picture on a 35 % veil — the last frame stays visible. **Recovering**: a
+  discreet strip at the top. **Available**: nothing; no permanent badge.
+* With no peer connection (failed, being replaced) after a transmission was
+  seen, a black panel takes the place of the picture with the same words. No
+  renderer: no frame of the broken peer connection stays on screen.
+* *Recovered* is never "the socket came back": it needs presence and the room
+  read again on the new socket, the tablet back with evidence, and a connected
+  negotiation with its `control` channel open and a picture on screen.
+
+### Authority untouched
+
+The notice is drawn under an `IgnorePointer` (a click on it still reaches the
+tablet — tested by tapping the card), and the cubit adds no event to any BLoC.
+Remote control is still decided by `_publishControlAuthority` alone: a tablet
+reported offline does not pause it (the tablet refuses on its side), and a
+notice going away does not resume it. Command validation, DRAG, C2 locks,
+FINALIZAR, the idempotent close, the pending-close store and session recovery
+are unchanged.
+
+One behaviour changed next to it: **REINTENTAR** (the error banner's and the
+pause notice's) now re-reads `GET /devices` together with
+`GET /remote-sessions/current`, the two reads a reconnection makes. Found on the
+T10A (run D below): the session was confirmed but the notice stayed
+*sin confirmar* until the next presence read.
+
+### Identity
+
+Memory is per session id: another id — a new assistance, or REST answering
+another session — starts from nothing. A WebRTC state about another session is
+ignored, and callbacks of a replaced peer connection never get here (the WebRTC
+BLoC drops them by generation). `RemoteSessionEnding` hides everything at once,
+whatever arrives afterwards.
+
+### Limits
+
+* **A tablet suspended with its socket up** (a failed check after its own
+  reconnection) is visible only through `session_not_active` on a command. The
+  backend notices a half-open tablet socket late (seen: ~25 s); until then the
+  console may show no notice over a frozen frame.
+* **Presence lags.** `device:presence-updated` → `GET /devices` takes the
+  backend's detection time plus a round trip.
+* **A lost `peer-joined`** (best effort delivery) leaves *Recuperando
+  transmisión* until another evidence: an answered offer, an `ok` command, or
+  the next reconnection.
+* For an instant the strip can read *unavailable* before *recovering* (the
+  WebRTC BLoC reports `failed` before the coordinator plans its attempt, and
+  the coordinator clears the plan before the new negotiation). Same frame; seen
+  only in the log.
+
+### Proposed for another prompt (not implemented)
+
+A positive signal from the tablet would replace every inference above. The
+smallest one, in the `control` channel the tablet already owns:
+
+```json
+{ "type": "screen_state", "state": "paused" | "live", "reason": "authority" | "projection" }
+```
+
+sent by `remote_control_device` when its gate closes or opens (and once after
+the channel opens). It needs a `remote_control_device` change first, then
+docs/CONTROL_CHANNEL.md; nothing in the backend. Until then the console keeps
+saying *puede* / *podría*.
+
+### Seen on the T10A (2026-11-20) — transmission indicator
+
+T10A `LSTT10M2026081504`, Android 16, `remote_control_device` as installed.
+Backend `main` `f5b8a1c`, shared on `:3000`, Neon; not edited, not restarted.
+This console in debug (`flutter run -d web-server`, `localhost:5173`) through an
+isolated relay on `127.0.0.1:3101` (control `3102`, scratchpad only, logs
+without headers or bodies) that could cut the console's WebSocket and answer
+REST `503`. Only the console went through it. PERMITIR and both MediaProjection
+consents were given by hand; ADB only for `input tap` (SOLICITAR ASISTENCIA),
+`input keyevent`, `cmd wifi` and `screencap`. No mobile-mcp, no UiAutomation.
+The other device attached to ADB was not touched. Times local (UTC −3).
+
+| Run | Session | What was done | Seen |
+|---|---|---|---|
+| **A** normal | `16addf9c` | assistance started, Recientes + Atrás | `available` throughout, no notice; *Atrás enviado* |
+| **B** console socket cut (WebRTC up) | `16addf9c` | relay `socket=down` 14:45:55 | `unconfirmed/serverUnreachable` at once, *Sin conexión con el servidor*, control paused. The tablet's Recents (via ADB) **did** appear on the picture: the tablet kept transmitting, and the notice had only said *podría* |
+| **C** recovery | `16addf9c` | relay back 14:46:18 | socket back 14:46:24 → `recovering/reconnecting` → `available` 14:46:25 (`GET /devices` + join ACK `peerJoined: true`); control *listo* after its own check |
+| **D** REST 503 | `16addf9c` | `rest=503`, socket cut 6 s, socket back with REST still down | `unconfirmed/stateUnconfirmed` *Estado del dispositivo sin confirmar* + error banner, control paused; REST back + REINTENTAR → control back, notice stayed until ACTUALIZAR (→ the REINTENTAR fix above) |
+| **E** ICE cut | `16addf9c` | tablet Wi-Fi off 14:47:36–14:48:02 | 14:47:43 `interrupted/peerDisconnected` over the last frame; 14:47:53 `failed` → attempt 1, placeholder *Recuperando transmisión*, offer to a tablet still away; 14:48:08 backend reports it offline → `interrupted/deviceOffline`; 14:48:26 online → `recovering/awaitingDevice`; 14:48:28 `peer-joined` → `recovering/renegotiating`; 14:48:30 unanswered offer replaced; 14:48:35 connected, picture → `available`; no new consent |
+| **F** FINALIZAR during a cut | `16addf9c` | Wi-Fi off 14:49:01, FINALIZAR on *Conexión interrumpida* | *Finalizando* at once, no notice; close confirmed 14:49:17 `endedBy TECHNICIAN`; no transmission transition afterwards (Wi-Fi back 14:49:26) |
+| **G** new assistance | `03e5fb98` | requested, taken, accepted again | only `available/none` for the new id; FINALIZAR 14:51:13, confirmed `TECHNICIAN` |
+
+Not reached on the device (covered by tests): *Transmisión posiblemente
+pausada* (needs the tablet suspended while ICE and the console's socket stay
+up), a `SYSTEM` close during a recovery, a join refused after a reconnection,
+a `GET /devices` in flight across a reconnection.
+
+After the runs: no live session, the tablet idle on SOLICITAR ASISTENCIA with
+Wi-Fi on, relay and debug server stopped.
+
+### Tests (Prompt 26)
+
+* `remote_transmission_monitor_test` (31): healthy video, tablet without a
+  screen yet, still screen, never connected, offline, ICE `disconnected` /
+  `failed` with and without a planned attempt, socket down (and presence not
+  trusted meanwhile), `GET /devices` failing / in flight across a reconnection,
+  join refused then accepted, `session_not_active` and its evidence, socket back
+  with WebRTC pending, peer recovered, presence back waiting for the tablet, the
+  rejoin overtaking the offline answer, another session's `peer-joined`, ICE
+  back vs a new negotiation, several cuts, `CLOSED` / `SYSTEM`, FINALIZAR,
+  pending close, another session's WebRTC state, a new assistance.
+* `remote_transmission_widget_test` (11, the whole console wired as in
+  production): no notice while healthy (also after two minutes), ICE cut over
+  the picture, socket cut and recovery, REST failing, REINTENTAR re-reading
+  presence, offline → online → `peer-joined` with remote control unchanged and
+  a click on the card still sent, a paused control staying paused, ICE failed →
+  placeholder → replacement → an old generation's callback ignored, FINALIZAR
+  and a `SYSTEM` close during a cut.
+* Mutations: without the evidence (`peer-joined` & co.) 7 tests fail; without
+  the `IgnorePointer` the click test fails; without the `GET /devices` in
+  REINTENTAR its test fails.
+
 ## Tests (Prompt 25)
 
 * `close_remote_session_test`: first close and repetition `200` (one transition,
@@ -719,6 +890,9 @@ the new backend, a close racing with `remote-session:closed`.
   signing in on the same browser never sees it (ownership-scoped reads never list
   it) and its entry is dropped by their first read; the original technician's
   session, its socket gone, is closed by the backend's grace period.
+* **The transmission indicator infers.** The tablet never says it withholds
+  its screen; see *Transmission indicator* for what is confirmed, what is
+  inferred and the `screen_state` message proposed to `remote_control_device`.
 * **Header presence follows the device list.** If `GET /devices` keeps failing
   the header shows the last value that list applied, like the list itself.
 
@@ -780,5 +954,6 @@ Debug only, identifiers only: `remote session closed <id> endedBy=<value>`,
 `remote session close unconfirmed, retries exhausted <id>`,
 `remote session finalized here is still live <id>`,
 `remote session close confirmed by a read <id>`,
-`remote sessions finalized before this page: <count>`. No token, SDP, ICE
+`remote sessions finalized before this page: <count>`,
+`transmission <phase>/<cause> <id>`. No token, SDP, ICE
 candidate, coordinate or text.

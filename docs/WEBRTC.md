@@ -87,7 +87,12 @@ They fail independently, so they are tracked independently. In particular:
   that keeps working while the socket is down keeps its video, not its control;
 * **a failed peer connection is renegotiated, within a budget,** only after
   `GET /remote-sessions/current` confirms the same session is still live. See
-  [SESSION_LIFECYCLE.md](SESSION_LIFECYCLE.md#webrtc-failure).
+  [SESSION_LIFECYCLE.md](SESSION_LIFECYCLE.md#webrtc-failure);
+* **a connected peer connection is not a live picture.** The tablet may hold
+  its frames back while ICE stays connected (`remote_control_device`
+  Prompt 40) and says nothing about it; what the console can tell the
+  technician, and how it knows, is in
+  [SESSION_LIFECYCLE.md](SESSION_LIFECYCLE.md#transmission-indicator-prompt-26).
 
 ## ICE configuration
 
