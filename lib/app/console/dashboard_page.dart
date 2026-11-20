@@ -9,6 +9,7 @@ import '../../features/auth/presentation/bloc/user_session/user_session_bloc.dar
 import '../../features/devices/presentation/bloc/devices/devices_bloc.dart';
 import '../../features/devices/presentation/widgets/devices_section.dart';
 import '../../features/remote_session/presentation/bloc/remote_session/remote_session_bloc.dart';
+import '../../features/remote_session/presentation/bloc/remote_transmission/remote_transmission_cubit.dart';
 import '../../features/remote_session/presentation/widgets/active_assistance_section.dart';
 import '../../features/remote_session/presentation/widgets/start_assistance_button.dart';
 import '../../features/support/domain/entities/support_request_status.dart';
@@ -62,6 +63,18 @@ class DashboardPage extends StatelessWidget {
         ),
         BlocProvider<WebRtcSessionBloc>(
           create: (_) => dependencies.createWebRtcSessionBloc(),
+        ),
+        // Not lazy: what it says depends on what happened before the
+        // assistance view first asks for it (a connection, a lost socket).
+        BlocProvider<RemoteTransmissionCubit>(
+          lazy: false,
+          create: (context) => dependencies.createRemoteTransmissionCubit(
+            remoteSessionBloc: context.read<RemoteSessionBloc>(),
+            webRtcSessionBloc: context.read<WebRtcSessionBloc>(),
+            technicianRealtimeBloc: context.read<TechnicianRealtimeBloc>(),
+            devicesBloc: context.read<DevicesBloc>(),
+            signalingJoinBloc: context.read<SignalingJoinBloc>(),
+          ),
         ),
       ],
       child: _ConsoleCoordinatorScope(
