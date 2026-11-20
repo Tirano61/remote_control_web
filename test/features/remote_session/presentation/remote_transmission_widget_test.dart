@@ -198,6 +198,29 @@ void main() {
     expect(anyNotice, findsNothing);
   });
 
+  testWidgets('D (T10A). REINTENTAR after REST came back re-reads presence '
+      'too: the notice does not stay unconfirmed', (tester) async {
+    await pumpWorkingAssistance(tester);
+    realtime.emitReconnecting();
+    await settleUi(tester);
+    devices.failure = const NetworkFailure();
+    remoteSessions.currentFailure = const NetworkFailure();
+    realtime.emitConnected();
+    await settleUi(tester);
+    expect(noticeTitle(tester), kTransmissionUnconfirmedTitle);
+    expect(webRtcOf(tester).state.canSendRemoteNavigation, isFalse);
+
+    devices.failure = null;
+    remoteSessions.currentFailure = null;
+    final loadsBefore = devices.loadCount;
+    await tester.tap(find.byKey(const Key('remote_session_retry_button')));
+    await settleUi(tester);
+
+    expect(devices.loadCount, loadsBefore + 1);
+    expect(anyNotice, findsNothing);
+    expect(webRtcOf(tester).state.canSendRemoteNavigation, isTrue);
+  });
+
   testWidgets('16/17/20. the tablet offline and back: the notice follows the '
       'evidence and never touches remote control', (tester) async {
     await pumpWorkingAssistance(tester);

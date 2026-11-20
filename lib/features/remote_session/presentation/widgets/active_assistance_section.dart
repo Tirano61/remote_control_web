@@ -158,11 +158,15 @@ class _LiveAssistance extends StatelessWidget {
                         // as what it was. Everything else is recovered by
                         // re-reading the backend, which is the console's usual
                         // answer.
-                        onPressed: () => bloc.add(
-                          state.canRetryActivation
-                              ? RemoteSessionActivationRequested(session.id)
-                              : const RemoteSessionRefreshRequested(),
-                        ),
+                        onPressed: () {
+                          if (state.canRetryActivation) {
+                            bloc.add(
+                              RemoteSessionActivationRequested(session.id),
+                            );
+                            return;
+                          }
+                          _retryReads(context);
+                        },
                         icon: const Icon(Icons.refresh, size: 18),
                         label: const Text('REINTENTAR'),
                       ),
@@ -564,6 +568,17 @@ class _RemoteScreen extends StatelessWidget {
   static void _addIfOpen(WebRtcSessionBloc bloc, WebRtcSessionEvent event) {
     if (!bloc.isClosed) bloc.add(event);
   }
+}
+
+/// REINTENTAR on a live assistance whose reads failed: the session, and the
+/// device list that carries its presence — the two reads a reconnection makes.
+/// Without the second, the transmission notice would keep saying the tablet's
+/// state is unconfirmed after the session itself was confirmed (seen on the
+/// T10A, Prompt 26 run D). Neither read grants anything by itself: remote
+/// control still waits for the coordinator's own check.
+void _retryReads(BuildContext context) {
+  context.read<RemoteSessionBloc>().add(const RemoteSessionRefreshRequested());
+  context.read<DevicesBloc>().add(const DevicesRefreshRequested());
 }
 
 /// What a [RemoteTransmissionStatus] says, in the words of the technician.
@@ -1355,9 +1370,7 @@ class _ControlPauseNotice extends StatelessWidget {
               if (canRetry)
                 TextButton(
                   key: const Key('remote_control_paused_retry_button'),
-                  onPressed: () => context.read<RemoteSessionBloc>().add(
-                    const RemoteSessionRefreshRequested(),
-                  ),
+                  onPressed: () => _retryReads(context),
                   child: const Text('REINTENTAR'),
                 ),
             ],
