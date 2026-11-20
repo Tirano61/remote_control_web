@@ -50,9 +50,11 @@ const String kRemoteSessionActivationFailedNotice =
 ///
 /// REST is the source of truth for what the backend holds. The BLoC never
 /// promotes a session to `ACTIVE` on its own, and only calls one *closed* on a
-/// backend confirmation: a successful `POST /remote-sessions/:id/close` (or a
-/// `GET /remote-sessions/:id` answering `CLOSED` after a `409`), a
-/// `remote-session:closed` naming it, or a read that no longer returns it.
+/// backend confirmation: a `POST /remote-sessions/:id/close` answering `200`
+/// with that session `CLOSED` — the first close or an idempotent repetition,
+/// whoever closed it — (or a `GET /remote-sessions/:id` answering `CLOSED`
+/// when the close answer did not say so), a `remote-session:closed` naming
+/// it, or a read that no longer returns it.
 ///
 /// FINALIZAR is the one decision that does not wait for the backend. The
 /// technician said the assistance is over, so it is over **for this console**
@@ -474,8 +476,13 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     if (!identical(_pendingClose, pending)) return;
 
     switch (outcome) {
-      case RemoteSessionCloseConfirmed():
-        logDebug('remote session close confirmed $id');
+      case RemoteSessionCloseConfirmed(:final session):
+        // `endedBy` is whoever closed it first — this console, the tablet or
+        // the backend — and is reported as the backend answered it.
+        logDebug(
+          'remote session close confirmed $id '
+          'endedBy=${session?.endedBy?.wireValue}',
+        );
         _settlePendingClose(pending);
         _emitNoLiveSession(emit);
         // REST is still read, as everywhere: it is the source of truth for

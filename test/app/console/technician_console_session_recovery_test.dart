@@ -11,6 +11,7 @@ import 'package:remote_control_web/features/devices/domain/usecases/load_devices
 import 'package:remote_control_web/features/devices/presentation/bloc/devices/devices_bloc.dart';
 import 'package:remote_control_web/features/remote_control/domain/entities/normalized_remote_point.dart';
 import 'package:remote_control_web/features/remote_control/domain/entities/remote_control_command.dart';
+import 'package:remote_control_web/features/remote_session/domain/entities/remote_session_ended_by.dart';
 import 'package:remote_control_web/features/remote_session/domain/entities/remote_session_status.dart';
 import 'package:remote_control_web/features/remote_session/domain/usecases/activate_remote_session.dart';
 import 'package:remote_control_web/features/remote_session/domain/usecases/close_remote_session.dart';
@@ -829,8 +830,12 @@ void main() {
       expect(supportRequests.loadCount, queueLoadsBefore + 1);
     });
 
-    test('a POST whose answer was lost is confirmed, not repeated', () async {
+    test('a POST whose answer was lost is confirmed by the retry 200, '
+        'without bringing WebRTC back', () async {
       await signInWithWorkingAssistance();
+      final peersBefore = peers.sessions.length;
+      final joinsBefore = realtime.joinedSessionIds.length;
+      final states = recordSessions();
       remoteSessions
         ..commitCloseDespiteFailure = true
         ..closeFailures.add(const NetworkFailure());
@@ -841,9 +846,39 @@ void main() {
       await settle();
 
       expect(remoteSessions.closedIds, hasLength(2));
-      expect(remoteSessions.loadedIds, [remoteSessionId]);
+      expect(remoteSessions.closeTransitions, 1);
+      // The idempotent 200 is the confirmation: no GET /remote-sessions/:id.
+      expect(remoteSessions.loadedIds, isEmpty);
       expect(remoteSessionBloc.state, isA<RemoteSessionIdle>());
+      expect(states.any((state) => state.hasLiveSession), isFalse);
       expect(pendingCloses.ids, isEmpty);
+      // Control stayed withdrawn throughout and nothing was renegotiated.
+      expect(peers.last.isClosed, isTrue);
+      expect(peers.sessions, hasLength(peersBefore));
+      expect(realtime.joinedSessionIds, hasLength(joinsBefore));
+      expect(webRtcSessionBloc.state, isA<WebRtcIdle>());
+      expect(webRtcSessionBloc.state.canSendRemoteControl, isFalse);
+    });
+
+    test('closed first by the tablet: the 200 with endedBy DEVICE ends it '
+        'like any other confirmation', () async {
+      await signInWithWorkingAssistance();
+      final peersBefore = peers.sessions.length;
+      remoteSessions.closedElsewhere(RemoteSessionEndedBy.device);
+
+      remoteSessionBloc.add(const RemoteSessionCloseRequested());
+      await settle();
+
+      expect(remoteSessionBloc.state, isA<RemoteSessionIdle>());
+      expect(remoteSessions.closeTransitions, 0);
+      expect(
+        remoteSessions.sessionsById[remoteSessionId]!.endedBy,
+        RemoteSessionEndedBy.device,
+      );
+      expect(remoteSessions.loadedIds, isEmpty);
+      expect(pendingCloses.ids, isEmpty);
+      expect(peers.sessions, hasLength(peersBefore));
+      expect(webRtcSessionBloc.state, isA<WebRtcIdle>());
     });
 
     test('a socket reconnection asks again and rejoins nothing', () async {

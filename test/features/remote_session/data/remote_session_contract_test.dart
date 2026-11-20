@@ -1,9 +1,13 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_web/core/network/api_exception.dart';
 import 'package:remote_control_web/features/remote_session/data/datasources/remote_sessions_remote_data_source.dart';
+import 'package:remote_control_web/features/remote_session/data/repositories/remote_session_repository_impl.dart';
+import 'package:remote_control_web/features/remote_session/domain/entities/remote_session_close_outcome.dart';
 import 'package:remote_control_web/features/remote_session/domain/entities/remote_session_ended_by.dart';
 import 'package:remote_control_web/features/remote_session/domain/entities/remote_session_status.dart';
+import 'package:remote_control_web/features/remote_session/domain/usecases/close_remote_session.dart';
 
+import '../../../support/console_test_doubles.dart';
 import '../../../support/recording_api.dart';
 
 /// Response bodies copied verbatim from
@@ -499,6 +503,82 @@ void main() {
       expect(session.endedBy, RemoteSessionEndedBy.technician);
       expect(session.endedAt, DateTime.parse('2026-03-11T09:51:02.000Z'));
       expect(session.isLive, isFalse);
+    });
+
+    for (final (wire, endedBy) in [
+      ('DEVICE', RemoteSessionEndedBy.device),
+      ('SYSTEM', RemoteSessionEndedBy.system),
+    ]) {
+      test('an idempotent 200 keeps endedBy $wire and the original endedAt '
+          'as the backend answered them', () async {
+        final (:dataSource, adapter: _) = buildDataSource(
+          body: closedResponseBody
+              .replaceFirst('"TECHNICIAN"', '"$wire"')
+              .replaceFirst(
+                '2026-03-11T09:51:02.000Z',
+                '2026-03-11T09:47:30.000Z',
+              ),
+        );
+
+        final session = await dataSource.close(id: sessionId, token: 'jwt');
+
+        expect(session.id, sessionId);
+        expect(session.status, RemoteSessionStatus.closed);
+        expect(session.endedBy, endedBy);
+        expect(session.endedAt, DateTime.parse('2026-03-11T09:47:30.000Z'));
+      });
+
+      test('a 200 ending by $wire confirms the close with one request and '
+          'no read by id', () async {
+        final (:client, :adapter) = buildRecordingClient(
+          baseUrl: 'http://localhost:3000',
+          body: closedResponseBody.replaceFirst('"TECHNICIAN"', '"$wire"'),
+        );
+        final closeRemoteSession = CloseRemoteSession(
+          repository: RemoteSessionRepositoryImpl(
+            remoteDataSource: RemoteSessionsRemoteDataSourceImpl(
+              apiClient: client,
+            ),
+            tokenProvider: InMemoryUserTokenProvider(),
+          ),
+        );
+
+        final outcome = await closeRemoteSession(remoteSessionId: sessionId);
+
+        expect(outcome, isA<RemoteSessionCloseConfirmed>());
+        expect(
+          (outcome as RemoteSessionCloseConfirmed).session?.endedBy,
+          endedBy,
+        );
+        expect(adapter.callCount, 1);
+        expect(adapter.captured!.method, 'POST');
+      });
+    }
+
+    test('a 200 for another session id is not taken as this close', () async {
+      final (:client, :adapter) = buildRecordingClient(
+        baseUrl: 'http://localhost:3000',
+        body: closedResponseBody.replaceFirst(
+          sessionId,
+          '9a7c2f10-4b3e-4d21-8f6a-1c2d3e4f5a6b',
+        ),
+      );
+      final closeRemoteSession = CloseRemoteSession(
+        repository: RemoteSessionRepositoryImpl(
+          remoteDataSource: RemoteSessionsRemoteDataSourceImpl(
+            apiClient: client,
+          ),
+          tokenProvider: InMemoryUserTokenProvider(),
+        ),
+      );
+
+      final outcome = await closeRemoteSession(remoteSessionId: sessionId);
+
+      // The same canned body answers the GET by id: still another session.
+      expect(outcome, isA<RemoteSessionCloseUnconfirmed>());
+      expect(adapter.callCount, 2);
+      expect(adapter.captured!.method, 'GET');
+      expect(adapter.captured!.uri.path, '/remote-sessions/$sessionId');
     });
 
     test('surfaces 400, 401, 403, 404 and 409 as status codes', () async {
