@@ -23,7 +23,9 @@ import '../../../webrtc/presentation/widgets/remote_screen_view.dart';
 import '../../domain/entities/remote_session.dart';
 import '../../domain/entities/remote_session_device.dart';
 import '../bloc/remote_session/remote_session_bloc.dart';
+import '../bloc/remote_transmission/remote_transmission_cubit.dart';
 import '../presence/session_device_presence.dart';
+import '../transmission/remote_transmission_status.dart';
 
 /// "ASISTENCIA REMOTA" block of the console.
 ///
@@ -434,7 +436,11 @@ class _RemoteScreen extends StatelessWidget {
               current.remoteControl.isTextPending ||
           previous.remoteControl.lastTouch != current.remoteControl.lastTouch,
       builder: (context, state) {
-        if (!_isShown(state)) return const SizedBox.shrink();
+        // No peer connection for this session. After a transmission broke,
+        // the place of the picture says so; before any, it stays empty.
+        if (!_isShown(state)) {
+          return _TransmissionPlaceholder(remoteSessionId: remoteSessionId);
+        }
         final canSend = state.canSendRemoteControl;
         // Not listening while a global action, an IME action or a long press
         // settles: a press that starts on a picture on its way somewhere else is
@@ -460,6 +466,7 @@ class _RemoteScreen extends StatelessWidget {
             track: state.remoteVideoTrack,
             rendererFactory: rendererFactory,
             maxHeight: _maxHeight,
+            overlay: _TransmissionNotice(remoteSessionId: remoteSessionId),
             onRemoteTap: isListening
                 ? (point) => context.read<WebRtcSessionBloc>().add(
                     WebRtcRemoteTapRequested(
@@ -556,6 +563,254 @@ class _RemoteScreen extends StatelessWidget {
 
   static void _addIfOpen(WebRtcSessionBloc bloc, WebRtcSessionEvent event) {
     if (!bloc.isClosed) bloc.add(event);
+  }
+}
+
+/// What a [RemoteTransmissionStatus] says, in the words of the technician.
+///
+/// "Puede" / "podría": the console never knows the tablet withholds its
+/// screen, it only knows the signals that make it likely.
+({String title, String body}) transmissionNoticeText(
+  RemoteTransmissionStatus status,
+) => switch (status.cause) {
+  RemoteTransmissionCause.peerDisconnected => (
+    title: kTransmissionInterruptedTitle,
+    body: kTransmissionPeerInterruptedNotice,
+  ),
+  RemoteTransmissionCause.deviceOffline => (
+    title: kTransmissionInterruptedTitle,
+    body: kTransmissionDeviceOfflineNotice,
+  ),
+  RemoteTransmissionCause.serverUnreachable => (
+    title: kTransmissionServerUnreachableTitle,
+    body: kTransmissionServerUnreachableNotice,
+  ),
+  RemoteTransmissionCause.stateUnconfirmed => (
+    title: kTransmissionUnconfirmedTitle,
+    body: kTransmissionUnconfirmedNotice,
+  ),
+  RemoteTransmissionCause.deviceRefusedCommand => (
+    title: kTransmissionPossiblyPausedTitle,
+    body: kTransmissionPossiblyPausedNotice,
+  ),
+  RemoteTransmissionCause.connectionFailed
+      when status.phase == RemoteTransmissionPhase.unavailable =>
+    (
+      title: kTransmissionUnavailableTitle,
+      body: kTransmissionUnavailableNotice,
+    ),
+  RemoteTransmissionCause.reconnecting ||
+  RemoteTransmissionCause.awaitingDevice ||
+  RemoteTransmissionCause.renegotiating ||
+  RemoteTransmissionCause.connectionFailed ||
+  RemoteTransmissionCause.none => (
+    title: kTransmissionRecoveringTitle,
+    body: kTransmissionRecoveringNotice,
+  ),
+};
+
+const String kTransmissionInterruptedTitle = 'Conexión interrumpida';
+const String kTransmissionPeerInterruptedNotice =
+    'La imagen puede no estar actualizada. Esperando recuperar la '
+    'comunicación con el dispositivo.';
+const String kTransmissionDeviceOfflineNotice =
+    'El dispositivo perdió la conexión con el servidor. La transmisión puede '
+    'estar en pausa y la imagen puede no estar actualizada.';
+const String kTransmissionServerUnreachableTitle =
+    'Sin conexión con el servidor';
+const String kTransmissionServerUnreachableNotice =
+    'No se puede confirmar el estado del dispositivo. La imagen podría no '
+    'estar actualizada.';
+const String kTransmissionUnconfirmedTitle =
+    'Estado del dispositivo sin confirmar';
+const String kTransmissionUnconfirmedNotice =
+    'No se pudo confirmar la conexión del dispositivo. La imagen podría no '
+    'estar actualizada.';
+const String kTransmissionPossiblyPausedTitle =
+    'Transmisión posiblemente pausada';
+const String kTransmissionPossiblyPausedNotice =
+    'El dispositivo indicó que la asistencia no está confirmada de su lado. '
+    'La imagen podría no estar actualizada.';
+const String kTransmissionRecoveringTitle = 'Recuperando transmisión';
+const String kTransmissionRecoveringNotice =
+    'Restableciendo la comunicación con el dispositivo.';
+const String kTransmissionUnavailableTitle = 'Transmisión no disponible';
+const String kTransmissionUnavailableNotice =
+    'No se pudo restablecer la conexión con el dispositivo.';
+
+/// Over the picture, while the transmission of this session is in doubt.
+///
+/// A confirmed interruption or a doubt is a card in the middle on a light veil:
+/// the last picture stays visible behind it. A recovery is a discreet strip at
+/// the top. Nothing at all while the transmission is fine: no permanent badge
+/// takes room from the picture. The surface draws it under an `IgnorePointer`:
+/// it never takes a gesture and never decides remote control.
+class _TransmissionNotice extends StatelessWidget {
+  const _TransmissionNotice({required this.remoteSessionId});
+
+  final String remoteSessionId;
+
+  @override
+  Widget build(BuildContext context) {
+    return BlocBuilder<RemoteTransmissionCubit, RemoteTransmissionStatus>(
+      builder: (context, status) {
+        if (!status.isNoticeFor(remoteSessionId)) {
+          return const SizedBox.shrink();
+        }
+        final text = transmissionNoticeText(status);
+        if (!status.isProminent) {
+          return Align(
+            alignment: Alignment.topCenter,
+            child: Padding(
+              padding: const EdgeInsets.all(8),
+              child: _TransmissionCard(
+                key: const Key('remote_transmission_recovering'),
+                title: text.title,
+                body: text.body,
+                isBusy: true,
+                isCompact: true,
+              ),
+            ),
+          );
+        }
+        return ColoredBox(
+          key: const Key('remote_transmission_interrupted'),
+          color: Colors.black.withValues(alpha: 0.35),
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: _TransmissionCard(
+                title: text.title,
+                body: text.body,
+                isBusy: false,
+                isCompact: false,
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// In the place of the picture when the peer connection is gone (it failed,
+/// or it is being replaced) after a transmission of this session was seen.
+/// No renderer: no frame of the broken peer connection can stay on screen.
+class _TransmissionPlaceholder extends StatelessWidget {
+  const _TransmissionPlaceholder({required this.remoteSessionId});
+
+  final String remoteSessionId;
+
+  static const double _height = 220;
+
+  @override
+  Widget build(BuildContext context) {
+    return BlocBuilder<RemoteTransmissionCubit, RemoteTransmissionStatus>(
+      builder: (context, status) {
+        if (!status.isNoticeFor(remoteSessionId)) {
+          return const SizedBox.shrink();
+        }
+        final text = transmissionNoticeText(status);
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: ColoredBox(
+              key: const Key('remote_transmission_placeholder'),
+              color: Colors.black,
+              child: SizedBox(
+                height: _height,
+                width: double.infinity,
+                child: Center(
+                  child: _TransmissionCard(
+                    title: text.title,
+                    body: text.body,
+                    isBusy: status.phase == RemoteTransmissionPhase.recovering,
+                    isCompact: false,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _TransmissionCard extends StatelessWidget {
+  const _TransmissionCard({
+    required this.title,
+    required this.body,
+    required this.isBusy,
+    required this.isCompact,
+    super.key,
+  });
+
+  final String title;
+  final String body;
+  final bool isBusy;
+  final bool isCompact;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return ConstrainedBox(
+      constraints: BoxConstraints(maxWidth: isCompact ? 420 : 380),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.72),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Padding(
+          padding: EdgeInsets.symmetric(
+            horizontal: 14,
+            vertical: isCompact ? 8 : 12,
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (isBusy)
+                const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.white70,
+                  ),
+                )
+              else
+                const Icon(Icons.wifi_off, color: Colors.white70, size: 20),
+              const SizedBox(width: 12),
+              Flexible(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      key: const Key('remote_transmission_title'),
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      body,
+                      key: const Key('remote_transmission_body'),
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: Colors.white70,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 
