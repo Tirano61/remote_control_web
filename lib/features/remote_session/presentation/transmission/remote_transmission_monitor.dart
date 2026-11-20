@@ -304,7 +304,9 @@ final class RemoteTransmissionMonitor {
           previous is SignalingJoined &&
           previous.remoteSessionId == id &&
           previous.peerJoined;
-      if (_isJoinPending) {
+      // The first join on the connection that came back, or the one that
+      // finally got through after a refused one.
+      if (_isJoinPending || _hasJoinFailed) {
         _isJoinPending = false;
         _hasJoinFailed = false;
         // The ACK of this new connection says whether the tablet is in the
