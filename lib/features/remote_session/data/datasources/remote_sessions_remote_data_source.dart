@@ -24,8 +24,9 @@ abstract interface class RemoteSessionsRemoteDataSource {
   /// `GET /remote-sessions/:id` — one session of this technician, closed ones
   /// included.
   ///
-  /// It is what tells a close that was answered `409` — or whose answer never
-  /// arrived — apart: `CLOSED` means it is over, a live status means it is not.
+  /// It reconciles a close whose answer did not say it is over — a `409`, or a
+  /// `200` that did not describe this session as `CLOSED` — and the recovery
+  /// of a session: `CLOSED` means it is over, a live status means it is not.
   Future<RemoteSession> fetch({required String id, required String token});
 
   /// `POST /remote-sessions/:id/activate` — empty body.
@@ -36,6 +37,10 @@ abstract interface class RemoteSessionsRemoteDataSource {
   Future<RemoteSession> activate({required String id, required String token});
 
   /// `POST /remote-sessions/:id/close` — empty body.
+  ///
+  /// Idempotent: on a session of this technician already `CLOSED` it answers
+  /// `200` with the original `endedBy` and `endedAt`, which may be another
+  /// actor's.
   Future<RemoteSession> close({required String id, required String token});
 }
 

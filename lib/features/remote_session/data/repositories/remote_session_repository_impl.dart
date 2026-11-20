@@ -33,7 +33,10 @@ const String kActivateConflictMessage =
 const String kActivateFailedMessage =
     'No se pudo confirmar el inicio de la asistencia.';
 
-/// Shown when `POST /remote-sessions/:id/close` is refused with a `409`.
+/// Shown when `POST /remote-sessions/:id/close` is refused with a `409`: the
+/// session is still live but its support request cannot be completed. A
+/// session already closed is not a `409` — the close is idempotent and
+/// answers `200`.
 const String kCloseConflictMessage =
     'La asistencia ya no estaba activa.';
 

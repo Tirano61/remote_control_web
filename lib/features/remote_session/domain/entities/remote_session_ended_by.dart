@@ -2,8 +2,9 @@ import 'package:equatable/equatable.dart';
 
 /// The `RemoteSessionEndedBy` enum of the backend, typed.
 ///
-/// `SYSTEM` is documented as reserved: no backend code path writes it today,
-/// but it is part of the contract and is modelled here.
+/// `endedBy` names whoever closed the session **first**: a later close —
+/// a retry, the other side, the backend — never rewrites it, so a close
+/// confirmed from this console may carry `DEVICE` or `SYSTEM`.
 class RemoteSessionEndedBy extends Equatable {
   const RemoteSessionEndedBy._(this.wireValue);
 
@@ -23,7 +24,7 @@ class RemoteSessionEndedBy extends Equatable {
   /// Closed through `POST /device/remote-sessions/:id/close`.
   static const RemoteSessionEndedBy device = RemoteSessionEndedBy._('DEVICE');
 
-  /// Reserved. No code path writes it today.
+  /// The backend's automatic close.
   static const RemoteSessionEndedBy system = RemoteSessionEndedBy._('SYSTEM');
 
   static const List<RemoteSessionEndedBy> known = [technician, device, system];
