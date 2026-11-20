@@ -180,21 +180,53 @@ class FakeRemoteSessionRepository implements RemoteSessionRepository {
     final failure = closeFailures.isNotEmpty
         ? closeFailures.removeAt(0)
         : closeFailure;
-    final alreadyClosed = sessionsById[id]?.isClosed ?? false;
-    if (failure == null && alreadyClosed) {
-      return const Failed(ConflictFailure());
+    final scripted = closeResponse;
+    if (failure == null && scripted != null) return Success(scripted);
+    // Idempotent, like the backend: an own session already CLOSED — by this
+    // console, the tablet or the backend — answers 200 with the ORIGINAL
+    // endedBy / endedAt, and nothing is written.
+    final alreadyClosed = sessionsById[id];
+    if (alreadyClosed != null && alreadyClosed.isClosed) {
+      if (failure != null) return Failed(failure);
+      return Success(alreadyClosed);
     }
     if (failure != null && !commitCloseDespiteFailure) return Failed(failure);
     final closed = buildRemoteSession(
       id: id,
       status: RemoteSessionStatus.closed,
-      endedAt: DateTime.utc(2026, 3, 11, 9, 40),
+      endedAt: closeEndedAt,
       endedBy: RemoteSessionEndedBy.technician,
     );
     sessionsById[id] = closed;
+    closeTransitions++;
     if (current?.id == id) current = null;
     if (failure != null) return Failed(failure);
     return Success(closed);
+  }
+
+  /// When set, a close that does not fail answers exactly this — how a `200`
+  /// that does not describe the session asked for is scripted.
+  RemoteSession? closeResponse;
+
+  /// The `endedAt` the backend stamps on the real transition.
+  static final DateTime closeEndedAt = DateTime.utc(2026, 3, 11, 9, 40);
+
+  /// How many closes actually moved a live session to `CLOSED`.
+  int closeTransitions = 0;
+
+  /// The session as the tablet (`DEVICE`) or the backend (`SYSTEM`) left it
+  /// after closing it first: what a later close from this console answers.
+  void closedElsewhere(
+    RemoteSessionEndedBy endedBy, {
+    String id = remoteSessionId,
+  }) {
+    sessionsById[id] = buildRemoteSession(
+      id: id,
+      status: RemoteSessionStatus.closed,
+      endedAt: DateTime.utc(2026, 3, 11, 9, 38, 5),
+      endedBy: endedBy,
+    );
+    if (current?.id == id) current = null;
   }
 }
 
