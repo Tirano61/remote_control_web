@@ -121,7 +121,7 @@ void main() {
       await bloc.close();
     });
 
-    test('the event is idempotent', () async {
+    test('readiness is idempotent, and every arrival is counted', () async {
       final bloc = SignalingJoinBloc(client: client);
       final seen = <SignalingJoinState>[];
       bloc.add(
@@ -140,10 +140,79 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       await Future<void>.delayed(Duration.zero);
 
-      // One change of state, whatever the number of events.
-      expect(seen, hasLength(1));
-      expect((bloc.state as SignalingJoined).peerJoined, isTrue);
+      // Readiness became true once and stays true; the arrivals say when the
+      // tablet (re)entered the room, which is what Prompt 27 needs.
+      expect(
+        seen.map((state) => (state as SignalingJoined).peerJoined),
+        everyElement(isTrue),
+      );
+      expect(seen.map((state) => (state as SignalingJoined).peerArrivals), [
+        1,
+        2,
+        3,
+      ]);
+      expect(bloc.state.remoteSessionId, sessionId);
       await subscription.cancel();
+      await bloc.close();
+    });
+
+    test('an ACK saying the peer is in is not an arrival', () async {
+      client.peerJoinedOnJoin = true;
+      final bloc = SignalingJoinBloc(client: client);
+      bloc.add(
+        const SignalingJoinRequested(
+          remoteSessionId: sessionId,
+          connectionId: 1,
+        ),
+      );
+      await bloc.stream.firstWhere((state) => state is SignalingJoined);
+
+      final joined = bloc.state as SignalingJoined;
+      expect(joined.peerJoined, isTrue);
+      expect(joined.peerArrivals, 0);
+      await bloc.close();
+    });
+
+    test('arrivals of another session, or before the ACK, are not counted, '
+        'and a reset forgets them', () async {
+      final gate = Completer<void>();
+      client.joinGate = gate.future;
+      final bloc = SignalingJoinBloc(client: client);
+      bloc.add(
+        const SignalingJoinRequested(
+          remoteSessionId: sessionId,
+          connectionId: 1,
+        ),
+      );
+      await bloc.stream.firstWhere((state) => state is SignalingJoining);
+      // Overtook the ACK: readiness, not an arrival after this join.
+      client.emitPeerJoined(sessionId);
+      await Future<void>.delayed(Duration.zero);
+      gate.complete();
+      await bloc.stream.firstWhere((state) => state is SignalingJoined);
+      expect((bloc.state as SignalingJoined).peerArrivals, 0);
+
+      client.emitPeerJoined('9a0f3d1b-4c88-9e64-6f2a-5c7e8b103d1b');
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+      expect((bloc.state as SignalingJoined).peerArrivals, 0);
+
+      client.emitPeerJoined(sessionId);
+      await bloc.stream.firstWhere(
+        (state) => state is SignalingJoined && state.peerArrivals == 1,
+      );
+
+      bloc.add(const SignalingJoinReset());
+      await bloc.stream.firstWhere((state) => state is SignalingIdle);
+      client.joinGate = null;
+      bloc.add(
+        const SignalingJoinRequested(
+          remoteSessionId: sessionId,
+          connectionId: 2,
+        ),
+      );
+      await bloc.stream.firstWhere((state) => state is SignalingJoined);
+      expect((bloc.state as SignalingJoined).peerArrivals, 0);
       await bloc.close();
     });
 
