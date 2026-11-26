@@ -1140,8 +1140,12 @@ void main() {
       peers.last.emitPeerState(WebRtcPeerConnectionState.failed);
       await settle();
       await deliverOffer();
+      // The tablet answered: the negotiation is progressing.
+      answer('v=0 answer');
+      await settle();
 
-      // Every trigger that re-evaluates readiness, again.
+      // Every trigger that re-evaluates readiness, again. An arrival does
+      // not touch a negotiation that got its answer (Prompt 27).
       realtime.emitPeerJoined(remoteSessionId);
       remoteSessionBloc.add(const RemoteSessionRefreshRequested());
       await settle();
