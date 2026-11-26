@@ -17,19 +17,48 @@ final class WebRtcNegotiationRequested extends WebRtcSessionEvent {
   const WebRtcNegotiationRequested(
     this.remoteSessionId, {
     this.replacesUnansweredOffer = false,
+    this.isRecovery = false,
   });
 
   final String remoteSessionId;
 
   /// The console checked with REST that the session is still live, and asks
-  /// for the negotiation whose offer was never answered to be replaced.
+  /// for the negotiation whose offer was never answered — overdue, or lost
+  /// ([WebRtcSessionState.isOfferLost]) — to be replaced.
   ///
   /// It only ever replaces that one: a negotiation that got its answer — and
   /// a connected one above all — is still never touched by a new request.
   final bool replacesUnansweredOffer;
 
+  /// Asked by the console's recovery of a session that is already under way
+  /// (a failure, an unanswered or a lost offer, REINTENTAR). Its offer waits
+  /// for [WebRtcSessionBloc.defaultRecoveryAnswerDeadline] instead of the
+  /// first offer's deadline.
+  final bool isRecovery;
+
   @override
-  List<Object?> get props => [remoteSessionId, replacesUnansweredOffer];
+  List<Object?> get props => [
+    remoteSessionId,
+    replacesUnansweredOffer,
+    isRecovery,
+  ];
+}
+
+/// The tablet entered the signaling room of [remoteSessionId] again
+/// (`remote-session:peer-joined`, received after this socket joined).
+///
+/// It says *when*, nothing more: it is not authorization, and the BLoC does not
+/// negotiate because of it. If the current negotiation relayed its offer
+/// before this and has no answer, that offer is marked lost
+/// ([WebRtcSessionState.isOfferLost]); the console decides what follows,
+/// after REST.
+final class WebRtcPeerArrived extends WebRtcSessionEvent {
+  const WebRtcPeerArrived(this.remoteSessionId);
+
+  final String remoteSessionId;
+
+  @override
+  List<Object?> get props => [remoteSessionId];
 }
 
 /// Whether the console has an automatic recovery attempt in its schedule.

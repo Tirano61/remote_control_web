@@ -140,13 +140,25 @@ sealed class WebRtcSessionState extends Equatable {
   /// Cleared by the first answer, a connection, or the end of the session.
   bool get isTabletSilent => false;
 
+  /// The offer was relayed, then the tablet entered the signaling room again
+  /// (`remote-session:peer-joined`), and no answer has come.
+  ///
+  /// The backend relays into a room the tablet is not in without a word, and
+  /// emits that event only when a tablet socket enters a room with none of its
+  /// sockets left in it: whatever held this offer is gone. Nobody will answer
+  /// it, so the console may replace it at once instead of waiting for the
+  /// answer deadline. Not a failure either: nothing is torn down for it, and
+  /// an answer that still arrives is applied.
+  bool get isOfferLost => false;
+
   /// The console will try to restore the connection on its own, within its
   /// bounded recovery budget. When this is `false` on a failure, nothing will
   /// happen until the technician asks for it.
   bool get isRecoveryScheduled => false;
 
   /// Whether the technician may ask for a new connection attempt now.
-  bool get canRetryConnection => this is WebRtcFailed || isAnswerOverdue;
+  bool get canRetryConnection =>
+      this is WebRtcFailed || isAnswerOverdue || isOfferLost;
 
   /// Whether losing the signaling socket must leave the peer connection alone.
   ///
@@ -175,6 +187,7 @@ sealed class WebRtcNegotiation extends WebRtcSessionState {
     this.isAnswerOverdue = false,
     this.isRecoveryScheduled = false,
     this.isTabletSilent = false,
+    this.isOfferLost = false,
   });
 
   @override
@@ -199,6 +212,9 @@ sealed class WebRtcNegotiation extends WebRtcSessionState {
   final bool isTabletSilent;
 
   @override
+  final bool isOfferLost;
+
+  @override
   bool get hasNegotiation => true;
 
   @override
@@ -210,6 +226,7 @@ sealed class WebRtcNegotiation extends WebRtcSessionState {
     isAnswerOverdue,
     isRecoveryScheduled,
     isTabletSilent,
+    isOfferLost,
   ];
 }
 
@@ -223,6 +240,7 @@ final class WebRtcPreparing extends WebRtcNegotiation {
     super.isAnswerOverdue,
     super.isRecoveryScheduled,
     super.isTabletSilent,
+    super.isOfferLost,
   });
 }
 
@@ -236,6 +254,7 @@ final class WebRtcOffering extends WebRtcNegotiation {
     super.isAnswerOverdue,
     super.isRecoveryScheduled,
     super.isTabletSilent,
+    super.isOfferLost,
   });
 }
 
@@ -252,6 +271,7 @@ final class WebRtcConnecting extends WebRtcNegotiation {
     super.isAnswerOverdue,
     super.isRecoveryScheduled,
     super.isTabletSilent,
+    super.isOfferLost,
   });
 }
 
@@ -270,6 +290,7 @@ final class WebRtcConnected extends WebRtcNegotiation {
     super.isAnswerOverdue,
     super.isRecoveryScheduled,
     super.isTabletSilent,
+    super.isOfferLost,
   });
 
   @override
@@ -292,6 +313,7 @@ final class WebRtcInterrupted extends WebRtcNegotiation {
     super.isAnswerOverdue,
     super.isRecoveryScheduled,
     super.isTabletSilent,
+    super.isOfferLost,
   });
 
   @override

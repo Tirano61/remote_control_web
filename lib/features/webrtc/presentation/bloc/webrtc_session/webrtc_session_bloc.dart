@@ -84,8 +84,14 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     Duration remoteCommandMargin = defaultRemoteCommandMargin,
     Duration settleDuration = remoteSettleDuration,
     Duration answerDeadline = defaultAnswerDeadline,
+    Duration? recoveryAnswerDeadline,
   }) : _peerClient = peerClient,
        _answerDeadline = answerDeadline,
+       _recoveryAnswerDeadline =
+           recoveryAnswerDeadline ??
+           (answerDeadline < defaultRecoveryAnswerDeadline
+               ? answerDeadline
+               : defaultRecoveryAnswerDeadline),
        _signalingClient = signalingClient,
        _iceConfiguration = iceConfiguration,
        _commandIdGenerator =
@@ -119,6 +125,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     on<_WebRtcAnswerDeadlineReached>(_onAnswerDeadlineReached);
     on<WebRtcAutomaticRecoveryChanged>(_onAutomaticRecoveryChanged);
     on<WebRtcConnectionRetryRequested>(_onConnectionRetryRequested);
+    on<WebRtcPeerArrived>(_onPeerArrived);
 
     _incomingSubscription = _signalingClient.incoming.listen(
       (message) => add(_WebRtcSignalingReported(message)),
@@ -144,13 +151,32 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   /// T10A: 10 s from the offer to the answer while the user read the dialog.
   static const Duration defaultAnswerDeadline = Duration(seconds: 30);
 
+  /// The answer deadline of an offer made by the console's recovery
+  /// ([WebRtcNegotiationRequested.isRecovery]).
+  ///
+  /// Shorter than the first offer's on purpose. It is the fallback for a lost
+  /// offer the console was not told about — the tablet's
+  /// `remote-session:peer-joined` is best effort, and the backend does not
+  /// emit it while an older tablet socket is still in the room. A tablet that
+  /// still holds its capture answers within a second (T10A: 0.5 s from the
+  /// offer to the answer); one that needs a new MediaProjection consent shows
+  /// a single dialog whatever the number of offers, and the newest one gets
+  /// the grant. Measured against the tablet's 45 s orphan-capture window,
+  /// counted from its rejoin: 10 s + the 5 s step still offers within it.
+  static const Duration defaultRecoveryAnswerDeadline = Duration(seconds: 10);
+
   final Duration _answerDeadline;
+  final Duration _recoveryAnswerDeadline;
 
   /// Started when the backend relayed the offer, for that negotiation only.
   Timer? _answerDeadlineTimer;
 
   /// The answer deadline of the current negotiation passed without one.
   bool _isAnswerOverdue = false;
+
+  /// The tablet entered the room after the current offer was relayed, and no
+  /// answer came: see [WebRtcSessionState.isOfferLost].
+  bool _isOfferLost = false;
 
   /// No offer of the session has been answered since a deadline passed. It
   /// outlives the negotiation it was noticed on, so the technician keeps being
@@ -271,11 +297,16 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     // and only when the console says so — after REST confirmed the session. It
     // is replaced like a failed one: released first, so there are never two.
     if (state.remoteSessionId == remoteSessionId && state.hasNegotiation) {
-      if (!event.replacesUnansweredOffer || !state.isAnswerOverdue) {
+      if (!event.replacesUnansweredOffer ||
+          !(state.isAnswerOverdue || state.isOfferLost)) {
         logDebug('negotiation already in place $remoteSessionId');
         return;
       }
-      logDebug('unanswered negotiation replaced $remoteSessionId');
+      logDebug(
+        state.isOfferLost
+            ? 'lost negotiation replaced $remoteSessionId'
+            : 'unanswered negotiation replaced $remoteSessionId',
+      );
     }
 
     _generation++;
@@ -341,7 +372,10 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
 
       logDebug('offer relayed $remoteSessionId');
       _isOfferDelivered = true;
-      _startAnswerDeadline(generation);
+      _startAnswerDeadline(
+        generation,
+        event.isRecovery ? _recoveryAnswerDeadline : _answerDeadline,
+      );
       if (state is WebRtcOffering) {
         emit(
           _withNegotiationFacts(
@@ -365,9 +399,9 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   }
 
   /// Arms the answer deadline of [generation], once its offer was relayed.
-  void _startAnswerDeadline(int generation) {
+  void _startAnswerDeadline(int generation, Duration deadline) {
     _answerDeadlineTimer?.cancel();
-    _answerDeadlineTimer = Timer(_answerDeadline, () {
+    _answerDeadlineTimer = Timer(deadline, () {
       if (isClosed) return;
       add(_WebRtcAnswerDeadlineReached(generation));
     });
@@ -388,6 +422,41 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     _isAnswerOverdue = true;
     _isTabletSilent = true;
     logDebug('answer overdue ${session.remoteSessionId}');
+    final next = _withNegotiationFacts(state);
+    if (next != state) emit(next);
+  }
+
+  /// The tablet is in the room again. An offer relayed before that, and not
+  /// answered, reached a room without it: whatever held it is gone.
+  ///
+  /// Decided here, synchronously, from what this negotiation already knows:
+  /// an offer still being built or relayed ([_isOfferDelivered] false) goes
+  /// out to the tablet now in the room, and one that got its answer is
+  /// progressing — neither is touched. Nothing is torn down and the deadline
+  /// keeps running; replacing is the console's call, after REST. A second
+  /// arrival changes nothing more.
+  void _onPeerArrived(
+    WebRtcPeerArrived event,
+    Emitter<WebRtcSessionState> emit,
+  ) {
+    final session = _session;
+    if (session == null || session.remoteSessionId != event.remoteSessionId) {
+      return;
+    }
+    // Only an offer still waiting for its answer. A peer connection that
+    // reached `connected` — or `disconnected` after it — proves the tablet
+    // has this negotiation, whatever was or was not seen of its answer.
+    if (state is! WebRtcConnecting) return;
+    if (!_isOfferDelivered ||
+        _isAnswerAccepted ||
+        _isRemoteDescriptionApplied ||
+        _isOfferLost) {
+      return;
+    }
+    _isOfferLost = true;
+    logDebug(
+      'offer lost, the device rejoined after it ${event.remoteSessionId}',
+    );
     final next = _withNegotiationFacts(state);
     if (next != state) emit(next);
   }
@@ -1436,6 +1505,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         _answerDeadlineTimer?.cancel();
         _answerDeadlineTimer = null;
         _isAnswerOverdue = false;
+        _isOfferLost = false;
         _isTabletSilent = false;
         // The peers can talk. `RemoteSession` is *not* promoted to ACTIVE:
         // that transition does not exist in the backend and is never faked.
@@ -1505,6 +1575,15 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         _isAnswerAccepted = true;
         _answerDeadlineTimer?.cancel();
         _answerDeadlineTimer = null;
+        if (_isOfferLost) {
+          // It was not lost after all: whoever held it answered. Applied like
+          // any late answer, and nothing replaces it any more.
+          logDebug(
+            'answer to an offer taken for lost ${message.remoteSessionId}',
+          );
+          _isOfferLost = false;
+          emit(_withNegotiationFacts(state));
+        }
         if (_isAnswerOverdue || _isTabletSilent) {
           // Late, and still this negotiation's: the tablet was most likely
           // waiting for its user. Nothing about it was given up on.
@@ -1615,6 +1694,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     _answerDeadlineTimer?.cancel();
     _answerDeadlineTimer = null;
     _isAnswerOverdue = false;
+    _isOfferLost = false;
     _pendingLocalIceCandidates.clear();
     _pendingRemoteIceCandidates.clear();
     _controlChannelState = WebRtcDataChannelState.closed;
@@ -1646,6 +1726,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
           isAnswerOverdue: _isAnswerOverdue,
           isRecoveryScheduled: _isRecoveryScheduled,
           isTabletSilent: _isTabletSilent,
+          isOfferLost: _isOfferLost,
         ),
         WebRtcOffering(:final remoteSessionId) => WebRtcOffering(
           remoteSessionId: remoteSessionId,
@@ -1655,6 +1736,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
           isAnswerOverdue: _isAnswerOverdue,
           isRecoveryScheduled: _isRecoveryScheduled,
           isTabletSilent: _isTabletSilent,
+          isOfferLost: _isOfferLost,
         ),
         WebRtcConnecting(:final remoteSessionId) => WebRtcConnecting(
           remoteSessionId: remoteSessionId,
@@ -1664,6 +1746,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
           isAnswerOverdue: _isAnswerOverdue,
           isRecoveryScheduled: _isRecoveryScheduled,
           isTabletSilent: _isTabletSilent,
+          isOfferLost: _isOfferLost,
         ),
         WebRtcConnected(:final remoteSessionId) => WebRtcConnected(
           remoteSessionId: remoteSessionId,
@@ -1673,6 +1756,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
           isAnswerOverdue: _isAnswerOverdue,
           isRecoveryScheduled: _isRecoveryScheduled,
           isTabletSilent: _isTabletSilent,
+          isOfferLost: _isOfferLost,
         ),
         WebRtcInterrupted(:final remoteSessionId) => WebRtcInterrupted(
           remoteSessionId: remoteSessionId,
@@ -1682,6 +1766,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
           isAnswerOverdue: _isAnswerOverdue,
           isRecoveryScheduled: _isRecoveryScheduled,
           isTabletSilent: _isTabletSilent,
+          isOfferLost: _isOfferLost,
         ),
         WebRtcFailed(:final remoteSessionId, :final reason) => WebRtcFailed(
           remoteSessionId: remoteSessionId,
