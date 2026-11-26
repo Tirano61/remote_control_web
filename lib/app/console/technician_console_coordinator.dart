@@ -59,6 +59,12 @@ const String kRealtimeSessionRejectedNotice =
 /// offer unanswered past its deadline -> the same, replacing only that
 ///                                       negotiation; a late answer still
 ///                                       counts while nothing replaced it
+/// tablet back in the room (peer-joined
+///   after this socket joined)        -> an unanswered offer relayed before
+///                                       it is lost: the same at once, with
+///                                       a fresh schedule; a failed one is
+///                                       retried at once too. Anything that
+///                                       got its answer is left alone
 /// REINTENTAR on the connection       -> the same, with a fresh schedule
 /// tap refused session_not_active     -> GET current (the tap is not resent)
 /// remote-session:active              -> GET current (never the event as state)
@@ -246,6 +252,11 @@ class TechnicianConsoleCoordinator {
   int? _webRtcRecoveryCheck;
   bool _isWebRtcFailureSeen = false;
   bool _isUnansweredOfferSeen = false;
+  bool _isLostOfferSeen = false;
+
+  /// The tablet arrivals of the current join already acted upon
+  /// ([SignalingJoined.peerArrivals]). Back to zero with every join.
+  int _handledPeerArrivals = 0;
 
   void start() {
     if (_isStarted) return;
@@ -320,6 +331,7 @@ class TechnicianConsoleCoordinator {
     _forgetWebRtcReadiness();
     _forgetWebRtcRecovery();
     _clearRelayGuards();
+    _handledPeerArrivals = 0;
   }
 
   void _onRealtimeStatusChanged(TechnicianRealtimeStatus status) {
@@ -451,9 +463,11 @@ class TechnicianConsoleCoordinator {
   /// The signaling room changed hands: joined, lost, or the tablet arrived.
   void _onSignalingJoinChanged(SignalingJoinState state) {
     if (state is SignalingJoined) {
+      _onPeerArrivals(state);
       _negotiateWebRtcIfReady();
       return;
     }
+    _handledPeerArrivals = 0;
 
     // A join refused `UNAUTHORIZED` is how a session closed meanwhile — by the
     // tablet, or by the backend while this socket was away — looks from
@@ -515,8 +529,61 @@ class TechnicianConsoleCoordinator {
       _isUnansweredOfferSeen = false;
     }
 
+    // An offer relayed before the tablet came back into the room: nobody
+    // holds it, and waiting for its deadline would only lose time — the
+    // tablet keeps its capture for a bounded while (45 s in the room). Same
+    // path as above, REST first, but now.
+    if (state.isOfferLost) {
+      if (!_isLostOfferSeen) {
+        _isLostOfferSeen = true;
+        logDebug('webrtc offer lost ${state.remoteSessionId}');
+        _advanceWebRtcRecovery(state.remoteSessionId!);
+      }
+    } else {
+      _isLostOfferSeen = false;
+    }
+
     _activateIfEstablished();
     _reconcileAfterCommandRefusal(state.remoteControl.lastCommand);
+  }
+
+  /// `remote-session:peer-joined` reached this socket after it joined: a
+  /// tablet socket entered the room, and none of the tablet's was in it.
+  ///
+  /// What the event proves, from the backend: the tablet's join passed its
+  /// checks (the session was live and its own), and it is in the room now, so
+  /// a message sent from now on reaches it. The tablet joins only once its own
+  /// REST read confirmed the session (`remote_control_device` Prompt 38). It is
+  /// still not authorization for anything here: remote control is decided by
+  /// [_publishControlAuthority] alone, and every recovery reads REST first.
+  ///
+  /// So it only changes *when* a recovery runs:
+  ///
+  /// ```text
+  /// offer relayed before it, no answer  -> marked lost by the WebRTC BLoC,
+  ///                                        which brings the attempt forward
+  /// WebRTC failed (attempt waiting, or
+  ///   schedule spent)                    -> attempt now, fresh schedule
+  /// offer being built or relayed now    -> nothing: it reaches the tablet
+  /// answered, connected, ICE interrupted -> nothing: it is progressing, or
+  ///                                        recovers on its own
+  /// ```
+  void _onPeerArrivals(SignalingJoined join) {
+    if (join.peerArrivals <= _handledPeerArrivals) return;
+    _handledPeerArrivals = join.peerArrivals;
+
+    final session = _remoteSessionBloc.state.session;
+    if (session == null || !session.isLive) return;
+    // An id is never adopted from signaling.
+    if (session.id != join.remoteSessionId) return;
+    if (!_technicianRealtimeBloc.state.isConnected) return;
+
+    logDebug('device rejoined signaling ${session.id}');
+    _webRtcSessionBloc.add(WebRtcPeerArrived(session.id));
+    final webRtc = _webRtcSessionBloc.state;
+    if (webRtc is WebRtcFailed && webRtc.remoteSessionId == session.id) {
+      _advanceWebRtcRecovery(session.id);
+    }
   }
 
   /// The tablet says this session is not `ACTIVE`, while the console believed it
@@ -756,7 +823,10 @@ class TechnicianConsoleCoordinator {
   /// `joined == true` is deliberately not enough. An offer relayed into a room
   /// the tablet has not entered is handed to nobody and silently dropped, and
   /// nothing would ever answer it.
-  void _negotiateWebRtcIfReady({bool replacesUnansweredOffer = false}) {
+  void _negotiateWebRtcIfReady({
+    bool replacesUnansweredOffer = false,
+    bool isRecovery = false,
+  }) {
     final join = _signalingJoinBloc.state;
     if (join is! SignalingJoined || !join.peerJoined) return;
 
@@ -778,6 +848,7 @@ class TechnicianConsoleCoordinator {
       WebRtcNegotiationRequested(
         session.id,
         replacesUnansweredOffer: replacesUnansweredOffer,
+        isRecovery: isRecovery,
       ),
     );
   }
@@ -891,7 +962,9 @@ class TechnicianConsoleCoordinator {
   bool _needsWebRtcRecovery(String remoteSessionId) {
     final webRtc = _webRtcSessionBloc.state;
     if (webRtc.remoteSessionId != remoteSessionId) return false;
-    return webRtc is WebRtcFailed || webRtc.isAnswerOverdue;
+    return webRtc is WebRtcFailed ||
+        webRtc.isAnswerOverdue ||
+        webRtc.isOfferLost;
   }
 
   /// Plans the next recovery attempt for the session the console holds.
@@ -1001,7 +1074,9 @@ class TechnicianConsoleCoordinator {
     _requestedNegotiation = null;
     _negotiateWebRtcIfReady(
       replacesUnansweredOffer:
-          webRtc is! WebRtcFailed && webRtc.isAnswerOverdue,
+          webRtc is! WebRtcFailed &&
+          (webRtc.isAnswerOverdue || webRtc.isOfferLost),
+      isRecovery: true,
     );
   }
 
@@ -1015,6 +1090,28 @@ class TechnicianConsoleCoordinator {
     if (_webRtcRecoveryCheck != null) return;
     _restartWebRtcRecovery();
     _webRtcRecoverySessionId = session.id;
+    _scheduleWebRtcRecovery(session.id);
+  }
+
+  /// The tablet is back in the room and the negotiation still needs it: the
+  /// attempt runs now, with the schedule given back — a tablet that
+  /// reconnected is a genuinely new situation, like a socket of this console
+  /// that came back. It still reads REST first.
+  ///
+  /// Never a loop: arrivals come from the tablet's own reconnections, each
+  /// one confirmed by its REST read before it joins, never from anything this
+  /// console sends. A check already in flight is not doubled: it answers after
+  /// the arrival, and its renegotiation finds the tablet in the room.
+  void _advanceWebRtcRecovery(String remoteSessionId) {
+    final session = _remoteSessionBloc.state.session;
+    if (session == null || !session.isLive || session.id != remoteSessionId) {
+      return;
+    }
+    if (!_needsWebRtcRecovery(remoteSessionId)) return;
+    _restartWebRtcRecovery();
+    _webRtcRecoverySessionId = session.id;
+    if (_webRtcRecoveryCheck != null) return;
+    logDebug('webrtc recovery brought forward ${session.id}');
     _scheduleWebRtcRecovery(session.id);
   }
 

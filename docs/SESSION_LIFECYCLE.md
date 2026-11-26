@@ -365,7 +365,8 @@ Bounds:
 
 * at most four automatic attempts in a run of failures; a connection that
   really works again (`connected` + `control` open), a socket reconnection, a
-  new session and REINTENTAR give the schedule back;
+  new session, REINTENTAR and — since Prompt 27 — the tablet coming back into
+  the room while a recovery is needed give the schedule back;
 * one attempt at a time: a failure reported while one is planned or reading
   REST is what that attempt is already about;
 * the failed peer connection is released before the new one exists, so there
@@ -451,7 +452,9 @@ So:
 
 ```text
 offer relayed
-  answer deadline armed (WebRtcSessionBloc.defaultAnswerDeadline, 30 s)
+  answer deadline armed (WebRtcSessionBloc.defaultAnswerDeadline, 30 s;
+  defaultRecoveryAnswerDeadline, 10 s, for an offer made by the recovery
+  since Prompt 27 — see "Fast recovery when the tablet is back")
 deadline passes without an answer
   the negotiation is reported unanswered — NOT failed, NOT torn down:
     "El dispositivo todavía no respondió. Si la tablet pide permiso
@@ -479,6 +482,234 @@ grant goes to the newest negotiation. Seen on the T10A (below): one dialog.
 Bounds: the schedule above — four automatic offers at most for a silent tablet,
 then only REINTENTAR; the last negotiation is kept so that a consent given
 later still connects.
+
+## Fast recovery when the tablet is back (Prompt 27)
+
+### Why the recovery took ~55 s
+
+Seen on the T10A in `remote_control_device` Prompt 41 (B, C) and reproduced by
+`technician_console_fast_recovery_test` › *reproduction* on the code before this
+change (707 ms on a 600 ms deadline + 100 ms step, i.e. 30 s + 5 s):
+
+```text
++0      tablet Wi-Fi cut; its socket drops, its authority is suspended
++~16    the web's ICE fails -> recovery attempt 1 at once -> REST -> offer
+        the tablet is not in the room: the backend relays to nobody (delivered: true)
++~18-20 the tablet reconnects, confirms by REST, joins the room again
+        -> the web receives remote-session:peer-joined ... and ignored it:
+           readiness was already true, the event was treated as idempotent
++~46    the offer's 30 s answer deadline passes -> attempt 2 planned in 5 s
++~51-53 new offer -> answered at once (capture reused) -> ~+55 connected
+```
+
+Nothing was wrong with the deadline or the schedule; the console simply threw
+away the one signal that said the offer had been lost.
+
+### What `remote-session:peer-joined` means here
+
+Read from `remote_control_backend` (`SignalingService.join`, `announceToPeer`)
+and the copied contract (`docs/backend/REALTIME.md`, *Participant readiness*):
+
+* it is emitted when a socket joins **after passing every check** (the session
+  exists, is `CONNECTING`/`ACTIVE` and belongs to that participant), and is
+  sent to the room of **that** session in the **opposite** namespace only. On
+  `/technicians` it therefore always describes the tablet's side: another tab of
+  this technician joining notifies the tablet, never this console;
+* it is emitted only if **no socket of the joining side was already in the
+  room** (`ownSideWasPresent`). So, received after this socket joined, it means
+  "the tablet was not in the room a moment ago, and it is now";
+* the tablet joins only once its own `GET /device/remote-sessions/current`,
+  made after its socket came back, confirmed the session (`remote_control_device`
+  Prompt 38/41);
+* it carries no participant, socket id or negotiation id; delivery is best
+  effort; there is no `peer-left`.
+
+Consequence: an offer this console relayed **before** that event, and not
+answered, reached a room the tablet had left — or a tablet socket that has
+gone. Nobody holds it. It is not authorization for anything.
+
+Not emitted — and the console falls back on the deadline — when the tablet's
+new socket joins while the backend still holds its previous one (a half-open
+socket the heartbeat has not evicted yet, up to `pingInterval + pingTimeout` =
+20 s), and whenever the event is lost.
+
+### Policy
+
+```text
+remote-session:peer-joined, after this socket joined, for the held session
+  SignalingJoined.peerArrivals += 1          (readiness stays idempotent)
+  coordinator -> WebRtcPeerArrived(id)
+    current negotiation: WebRtcConnecting, offer relayed (ACK delivered),
+      no answer, no remote description      -> isOfferLost
+    offer still being built or relayed      -> nothing: it goes to the tablet now
+    answered / connected / ICE disconnected -> nothing: progressing, or ICE may
+                                               recover on its own
+  coordinator, on isOfferLost or WebRtcFailed:
+    schedule given back (a reconnected tablet is a new situation)
+    attempt now -> GET /remote-sessions/current (always REST first)
+      live, same id, still lost/failed, socket + room + tablet in it
+        -> lost negotiation released, one new peer connection, one new offer
+      null / CLOSED / failure -> as for any attempt
+```
+
+* **Duplicates**: one replacement per lost negotiation. A second arrival while
+  the REST read is in flight finds the attempt already running; one arriving
+  before the new offer is relayed cannot mark it lost (not delivered yet).
+  Arrivals come only from the tablet's own reconnections, never from anything
+  the console sends: no loop can be built from them.
+* **Order**: the relay ACK and the event travel on the same WebSocket. When the
+  ACK came first, the console has already recorded the offer as delivered when
+  it handles the event (one WebSocket frame is handled to the end before the
+  next one); when the event came first, the offer is still "not delivered" and
+  is left alone — it went to the tablet already in the room.
+* **A late answer** to an offer taken for lost is applied, and nothing replaces
+  it any more. An answer arriving before the replacement's relay ACK is
+  ignored. An answer already on the wire when the replacement is relayed cannot
+  be told apart (no negotiation id) — unchanged residual risk, bounded by ICE
+  and the schedule.
+* **Generations**: unchanged. The lost negotiation is released before the new
+  one exists; its ICE, state, track and channel callbacks are dropped.
+
+### Timeouts
+
+| What | Before | Now |
+|---|---|---|
+| first offer of an assistance (MediaProjection consent) | 30 s | 30 s |
+| offer made by the recovery (failure, unanswered, lost, REINTENTAR) | 30 s | **10 s** (`defaultRecoveryAnswerDeadline`) |
+| lost offer, tablet back in the room | deadline + step | **at once**, REST first |
+| schedule `[0, 5, 15, 30] s`, 4 attempts | — | unchanged; given back by an arrival |
+
+The 10 s deadline is the fallback when the event does not come. A tablet that
+still holds its capture answers in about 0.5 s (T10A); one that needs a new
+consent shows one dialog whatever the number of offers. It also fits the
+tablet's 45 s orphan-capture window, counted from its rejoin: lost at +16, back
+at +20, replaced at ~+31.
+
+### Authority untouched
+
+The arrival only changes *when* an attempt runs. Remote control is still
+`_publishControlAuthority` alone (a test checks an arrival during the
+post-reconnection check gives nothing back); the tablet still refuses offers and
+commands without its own confirmed session. FINALIZAR, the idempotent close,
+the pending-close store, command validation, DRAG, the tablet's C2, heartbeat
+and watchdog, the video gate and the `SYSTEM` close are untouched.
+
+### Indicator (Prompt 26)
+
+Unchanged rules. A lost offer and its replacement read *Recuperando
+transmisión* (renegotiating) — a new offer is never "recovered" —, and
+*available* needs connected + `control` open + picture displayed. A lost
+`peer-joined` no longer leaves the notice for long: the fallback's answered
+offer is evidence.
+
+### Seen on the T10A (2026-11-26)
+
+T10A `LSTT10M2026081504`, Android 16. Isolated environment, nothing shared
+touched: a second installation `com.example.remote_control_device.p27test`
+("P27 prueba", `git archive` of `remote_control_device` `main` `0cc0b3b`, debug,
+its own enrolment `948-739-212`); the exported `remote_control_backend` `main`
+`18a413f` (heartbeat 10/10) of Prompt 42, with its own `node_modules`, on
+`127.0.0.1:3200` over a **new** disposable embedded PostgreSQL; the device
+repository's `fault_relay.js` on `:3010` behind the existing dev tunnel; this
+branch served by `flutter run -d web-server` on `localhost:5173` in Chrome. The
+shared backend on `:3000` and Neon were not touched; the main app was not
+modified. Tablet Dart logs from its VM service (clock −0.655 s, converted),
+web logs and `inbound-rtp` (frames decoded, every second) from test hooks
+injected in the page; one hook could drop `remote-session:peer-joined` frames
+(E, E2). Wi-Fi cut with `adb shell "svc wifi disable; sleep N; svc wifi enable"`.
+The accessibility toggle, PERMITIR and every capture dialog by the user; no
+mobile-mcp, no UiAutomation, no `am force-stop`. Times from the cut.
+
+| Run | What | Seen |
+|---|---|---|
+| **A** normal | session `f62f5f5f` | one offer; answered 3.8 s later (consent); Recientes, Atrás confirmed |
+| **B** Wi-Fi 5 s | | web ICE failed +15.67, offer +15.69 **lost**; tablet socket +17.43, REST +17.80, joined +17.90; `peer-joined` +17.88 → replacement **+17.89**; tablet `capture reused` +17.99; answer +18.12; **connected +18.23**, first frame **+18.7**; Recientes/Atrás confirmed on the new channel |
+| **C** Wi-Fi 9 s | | failed +16.27, offer +16.30 lost; `peer-joined` +17.95 → replacement +17.96; capture reused; **connected +18.28**, first frame **+19.02** |
+| **D** lost offer, forced | relay refused the tablet's `/devices` 25 s + 5 s cut | offer +15.93 lost; no event → 10 s fallback, replaced +32.28 (lost too); tablet back +37.05; `peer-joined` +37.52 → replacement **+37.53**; connected +37.87, frame +38.26; capture reused. Old code: next offer ≈ +51 |
+| **E** `peer-joined` dropped, 5 s | | the tablet rejoined at +9.96, before the web's ICE failure (+16.59): the failure's offer reached it; connected +17.05 |
+| **E2** dropped + socket refused 20 s | | offer +16.66 lost; tablet back +22.15 (event dropped); overdue **+26.66** (10 s); replaced +31.69; **connected +32.09**. Old code: offer ≈ +51.7 |
+| **F** three 5 s cuts, 30 s apart | | one new peer per cut; connected +17.3, +16.0, +17.0 after each cut; 1 peer open of 17 created; in F2 `peer-joined` arrived while ICE was still `disconnected`: nothing replaced, the failure 5 s later offered at once |
+| **G** `SYSTEM` during recovery | session `117c0834`, Wi-Fi 95 s | offers +16.50, +32.14, +59.14 (10 s + schedule); backend `SYSTEM` (`DEVICE_ABSENT`) +74.45 → peer closed, attempt 4 cancelled, no offer after; tablet ended at +75.2; back at +101: gone, no rejoin |
+| **H** FINALIZAR during recovery | socket refused 25 s + 5 s cut | offer lost +15.76; FINALIZAR +29.30 while attempt 2 waited: peer closed, close confirmed `TECHNICIAN` +29.34, nothing offered; tablet saw it gone +31.50, capture stopped, no rejoin |
+| **I** new assistance | `117c0834` | PERMITIR and a new capture consent; connected; Recientes/Atrás confirmed |
+
+Unplanned **X**: a lone Atrás on the test app's root screen destroyed its
+activity (Flutter engine detached) — a procedure error, not a code path of this
+change. Relaunched, the tablet rejoined `f62f5f5f` at +42.9 with the drop hook
+armed: replaced through the schedule at +57.8, a new consent (its capture had
+died with the engine), connected +61.3. Recovery without the event, bounded.
+
+Capture: 3 consent requests in the whole run (A, X, I); every cut reused the
+running capture (8 times). After the runs: no live session in the isolated
+backend, the test app uninstalled, every temporary process stopped.
+
+**Against the ~55 s of Prompt 41**: 5 s cut 18.2 s to connected / 18.7 s to the
+first frame; 9 s cut 18.3 / 19.0 s. What is left is outside the console:
+
+```text
++5.3        Wi-Fi back
++~15.7      Chrome declares ICE failed (disconnected +5.7, failed 10 s later)
++~17.4      the tablet's socket.io reconnects (its backoff after the cut)
++~17.8      the tablet's REST confirmation; +17.9 rejoined
++0.01 s     the console's reaction to peer-joined (REST read ~5 ms on the
+            isolated database; ~0.3-2.5 s on Neon)
++0.2-0.3 s  answer; +0.1 s ICE; +0.5 s first frame
+```
+
+Observation, not a defect of this change: while the automated Chrome window
+was occluded (`visibilitychange` → hidden) the renderer attached the new track
+only when the page became visible again (C: frames decoded from +19.0, picture
+attached +57.7 when the tab was looked at). The indicator said *recovering*
+until then, which is what it saw. In D too (attached the instant the page was
+visible again); with the page visible (E2, F, I) the picture followed the
+connection within a second.
+
+### Limits and residual risks
+
+* **No event, no speed-up.** When the backend still holds the tablet's previous
+  socket (half-open, ≤ 20 s) or the event is lost, the 10 s fallback and the
+  schedule recover it (E2: +32 s; X: +58 s with the 15 s step).
+* **The 10 s recovery deadline** may replace an offer while Android's consent
+  dialog is open after a long outage; the tablet keeps one dialog and grants the
+  newest offer. A user slower than ~90 s spends the schedule; the last
+  negotiation is kept, as before.
+* **A tablet that flaps** reconnects → one offer per arrival. Each needs its own
+  reconnection and REST confirmation; there is never more than one peer.
+* **An answer already on the wire** when an offer is replaced is still
+  indistinguishable. Proposal for `remote_control_backend` (not implemented): an
+  optional `negotiationId` in `webrtc:offer`, relayed as is and echoed by the
+  tablet in its `webrtc:answer`, so either end can drop an answer of another
+  negotiation. A `remote-session:peer-left`, emitted when the last socket of a
+  side leaves the room, would also let the console know an offer is lost before
+  it is sent.
+* **Neon** adds its read latency to every attempt (REST first is kept on
+  purpose).
+
+### Tests (Prompt 27)
+
+* `technician_console_fast_recovery_test` (28, everything real but transports):
+  the reproduction (707 ms before, ~5 ms now), and the 30 cases of the prompt —
+  normal offer, lost offer, valid return, immediate offer, answered offer, a
+  late answer after the mark, two events, another session, readiness heard
+  before the ACK, old peer `connected`, ICE `failed` with an attempt waiting,
+  ICE `disconnected`, a late answer to the old offer, old ICE, socket down and
+  back, ONLINE without rejoin, REST not confirming, no event (10 s fallback),
+  first offer keeps 30 s, spent schedule, `SYSTEM` (REST and event), FINALIZAR,
+  pending close, `remote-session:closed`, new assistance / consecutive
+  sessions, three cuts with video and control back, an arrival never giving
+  control back. With the arrival handling removed, 13 of them (and the
+  coordinator test below) fail.
+* `webrtc_session_bloc_answer_deadline_test` (+7): when an offer is lost and
+  when it is not, the replacement, the recovery deadline.
+* `realtime_blocs_test` (+2, one rewritten): arrivals counted, the ACK is not
+  one, another session / before the ACK / after a reset.
+* `remote_transmission_monitor_test` (+3): lost offer → recovering until the
+  picture; fallback without the event; an arrival on a healthy transmission.
+* Changed expectations, both encoding the old idempotence:
+  `technician_console_coordinator_test` › *repeated readiness …* now sends the
+  events before the offer is relayed (and a new test covers after: one
+  replacement); `technician_console_session_recovery_test` › *the recovery
+  never leaves two peer connections* now has the tablet answer first.
 
 ## Seen on the T10A (2026-11-18)
 
@@ -729,7 +960,9 @@ whatever arrives afterwards.
   backend's detection time plus a round trip.
 * **A lost `peer-joined`** (best effort delivery) leaves *Recuperando
   transmisión* until another evidence: an answered offer, an `ok` command, or
-  the next reconnection.
+  the next reconnection. Since Prompt 27 the answered offer comes on its own:
+  the recovery deadline (10 s) replaces the lost offer, and its answer is the
+  evidence.
 * For an instant the strip can read *unavailable* before *recovering* (the
   WebRTC BLoC reports `failed` before the coordinator plans its attempt, and
   the coordinator clears the plan before the new negotiation). Same frame; seen
@@ -875,9 +1108,10 @@ Wi-Fi on, relay and debug server stopped.
   last negotiation is kept and still connects on consent, but if the backend's
   120 s `CONNECTING` TTL closes the session first, the assistance ends.
 * **A tablet that lost its own room** while the web stays joined re-enters it
-  and the web receives `remote-session:peer-joined` again. The console treats
-  that event as idempotent, as the contract asks, so it waits for the answer
-  deadline instead of offering at once.
+  and the web receives `remote-session:peer-joined` again. Until Prompt 27 the
+  console waited for the answer deadline; it now replaces an offer relayed
+  before that arrival at once (see *Fast recovery when the tablet is back*).
+  Readiness itself is still idempotent, as the contract asks.
 * **Longer outages** than the schedule (~2 min, plus ~20 s per failing attempt)
   end on *No se pudo establecer la conexión remota.* with REINTENTAR CONEXIÓN.
 * **No TURN.** Networks that never allow UDP between the two ends cannot be
@@ -955,5 +1189,8 @@ Debug only, identifiers only: `remote session closed <id> endedBy=<value>`,
 `remote session finalized here is still live <id>`,
 `remote session close confirmed by a read <id>`,
 `remote sessions finalized before this page: <count>`,
-`transmission <phase>/<cause> <id>`. No token, SDP, ICE
+`transmission <phase>/<cause> <id>`, `device rejoined signaling <id>`,
+`offer lost, the device rejoined after it <id>`, `webrtc offer lost <id>`,
+`webrtc recovery brought forward <id>`, `lost negotiation replaced <id>`,
+`answer to an offer taken for lost <id>`. No token, SDP, ICE
 candidate, coordinate or text.

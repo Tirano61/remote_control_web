@@ -38,7 +38,11 @@ final class SignalingJoining extends SignalingJoinState {
 /// It holds only for the connection that obtained it: rooms are connection
 /// scoped, so a reconnection sends the console back to [SignalingIdle].
 final class SignalingJoined extends SignalingJoinState {
-  const SignalingJoined(this.remoteSessionId, {required this.peerJoined});
+  const SignalingJoined(
+    this.remoteSessionId, {
+    required this.peerJoined,
+    this.peerArrivals = 0,
+  });
 
   @override
   final String remoteSessionId;
@@ -55,6 +59,17 @@ final class SignalingJoined extends SignalingJoinState {
   /// dropped.
   final bool peerJoined;
 
+  /// How many `remote-session:peer-joined` this socket received for this
+  /// session since it joined it. The join ACK is not counted.
+  ///
+  /// The backend emits the event only when a tablet socket enters the room
+  /// and no other tablet socket was in it, so each one is a fresh arrival: an
+  /// offer this socket had relayed before it reached a room the tablet had
+  /// left, and nobody holds it any more. Readiness ([peerJoined]) is unchanged
+  /// by a second arrival; what the count adds is *when*. It is never
+  /// authorization, and it is reset with the join.
+  final int peerArrivals;
+
   @override
   bool get isJoined => true;
 
@@ -62,7 +77,7 @@ final class SignalingJoined extends SignalingJoinState {
   bool get isPeerReady => peerJoined;
 
   @override
-  List<Object?> get props => [remoteSessionId, peerJoined];
+  List<Object?> get props => [remoteSessionId, peerJoined, peerArrivals];
 }
 
 /// The join was refused, or no usable acknowledgement came back.

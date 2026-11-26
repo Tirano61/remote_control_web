@@ -153,12 +153,15 @@ void main() {
   }
 
   group('user session', () {
-    test('an authenticated user connects and reads the current session', () async {
-      await signIn();
+    test(
+      'an authenticated user connects and reads the current session',
+      () async {
+        await signIn();
 
-      expect(realtime.connectCount, 1);
-      expect(remoteSessions.currentCount, 1);
-    });
+        expect(realtime.connectCount, 1);
+        expect(remoteSessions.currentCount, 1);
+      },
+    );
 
     test('signing out disconnects and forgets the session', () async {
       remoteSessions.current = buildRemoteSession();
@@ -233,17 +236,20 @@ void main() {
       expect(realtime.joinedSessionIds, [remoteSessionId]);
     });
 
-    test('a session created later is joined without a new connection', () async {
-      await signIn();
-      realtime.emitConnected();
-      await settle();
-      expect(realtime.joinedSessionIds, isEmpty);
+    test(
+      'a session created later is joined without a new connection',
+      () async {
+        await signIn();
+        realtime.emitConnected();
+        await settle();
+        expect(realtime.joinedSessionIds, isEmpty);
 
-      remoteSessionBloc.add(const RemoteSessionCreateRequested(requestId));
-      await settle();
+        remoteSessionBloc.add(const RemoteSessionCreateRequested(requestId));
+        await settle();
 
-      expect(realtime.joinedSessionIds, [remoteSessionId]);
-    });
+        expect(realtime.joinedSessionIds, [remoteSessionId]);
+      },
+    );
 
     test('no live session means no join at all', () async {
       remoteSessions.current = null;
@@ -305,9 +311,7 @@ void main() {
   group('WebRTC readiness', () {
     /// A console with a live, joined session. [peerAlreadyJoined] is what the
     /// join ACK reports.
-    Future<void> signInWithLiveSession({
-      bool peerAlreadyJoined = false,
-    }) async {
+    Future<void> signInWithLiveSession({bool peerAlreadyJoined = false}) async {
       remoteSessions.current = buildRemoteSession();
       supportRequests.requests = [buildSupportRequest()];
       realtime.peerJoinedOnJoin = peerAlreadyJoined;
@@ -359,6 +363,30 @@ void main() {
 
     test('repeated readiness never produces a second negotiation', () async {
       await signInWithLiveSession(peerAlreadyJoined: true);
+
+      // Before the offer is relayed it goes to whoever is in the room now:
+      // a tablet arriving meanwhile receives it.
+      realtime
+        ..emitPeerJoined(remoteSessionId)
+        ..emitPeerJoined(remoteSessionId);
+      remoteSessionBloc.add(const RemoteSessionRefreshRequested());
+      await settle();
+      await deliverOffer();
+      remoteSessionBloc.add(const RemoteSessionRefreshRequested());
+      await settle();
+
+      expect(peers.sessions, hasLength(1));
+      expect(
+        relayedEvents().where((event) => event == 'webrtc:offer'),
+        hasLength(1),
+      );
+    });
+
+    test('arrivals after the offer was relayed replace it once', () async {
+      // Prompt 27: the backend emits peer-joined only when a tablet socket
+      // enters a room none of its sockets is in, so an unanswered offer
+      // relayed before it was held by nobody. Two of them still cost one.
+      await signInWithLiveSession(peerAlreadyJoined: true);
       await deliverOffer();
 
       realtime
@@ -367,10 +395,11 @@ void main() {
       remoteSessionBloc.add(const RemoteSessionRefreshRequested());
       await settle();
 
-      expect(peers.sessions, hasLength(1));
+      expect(peers.sessions, hasLength(2));
+      expect(peers.sessions.where((peer) => !peer.isClosed), hasLength(1));
       expect(
         relayedEvents().where((event) => event == 'webrtc:offer'),
-        hasLength(1),
+        hasLength(2),
       );
     });
 
@@ -408,17 +437,20 @@ void main() {
       );
     });
 
-    test('an incomplete negotiation is dropped when the socket drops', () async {
-      await signInWithLiveSession(peerAlreadyJoined: true);
-      await deliverOffer();
-      expect(peers.sessions, hasLength(1));
+    test(
+      'an incomplete negotiation is dropped when the socket drops',
+      () async {
+        await signInWithLiveSession(peerAlreadyJoined: true);
+        await deliverOffer();
+        expect(peers.sessions, hasLength(1));
 
-      realtime.emitReconnecting();
-      await settle();
+        realtime.emitReconnecting();
+        await settle();
 
-      expect(peers.last.isClosed, isTrue);
-      expect(webRtcSessionBloc.state, isA<WebRtcIdle>());
-    });
+        expect(peers.last.isClosed, isTrue);
+        expect(webRtcSessionBloc.state, isA<WebRtcIdle>());
+      },
+    );
 
     test('an assistance closed by the tablet releases everything', () async {
       await signInWithLiveSession(peerAlreadyJoined: true);
@@ -479,18 +511,21 @@ void main() {
       expect(remoteSessionBloc.state, isA<RemoteSessionConnecting>());
     });
 
-    test('a connected peer with a channel still opening is not enough', () async {
-      await signInNegotiating();
+    test(
+      'a connected peer with a channel still opening is not enough',
+      () async {
+        await signInNegotiating();
 
-      peers.last
-        ..emitControlChannelState(WebRtcDataChannelState.connecting)
-        ..emitPeerState(WebRtcPeerConnectionState.connected);
-      await settle();
+        peers.last
+          ..emitControlChannelState(WebRtcDataChannelState.connecting)
+          ..emitPeerState(WebRtcPeerConnectionState.connected);
+        await settle();
 
-      expect(webRtcSessionBloc.state, isA<WebRtcConnected>());
-      expect(webRtcSessionBloc.state.isControlChannelOpen, isFalse);
-      expect(remoteSessions.activatedIds, isEmpty);
-    });
+        expect(webRtcSessionBloc.state, isA<WebRtcConnected>());
+        expect(webRtcSessionBloc.state.isControlChannelOpen, isFalse);
+        expect(remoteSessions.activatedIds, isEmpty);
+      },
+    );
 
     test('an open channel without a connected peer is not enough', () async {
       await signInNegotiating();
@@ -573,8 +608,10 @@ void main() {
       // POST /activate, then GET /remote-sessions/current.
       expect(remoteSessions.activatedIds, [remoteSessionId]);
       expect(remoteSessions.currentCount, readsBefore + 1);
-      expect(remoteSessionBloc.state.session!.status,
-          RemoteSessionStatus.active);
+      expect(
+        remoteSessionBloc.state.session!.status,
+        RemoteSessionStatus.active,
+      );
     });
 
     test('a 409 is reconciled with REST', () async {
@@ -609,20 +646,23 @@ void main() {
       expect(remoteSessionBloc.state.canRetryActivation, isTrue);
     });
 
-    test('a failed activation is not retried by the next state change', () async {
-      await signInNegotiating();
-      remoteSessions.activateFailure = const NetworkFailure();
-      await establishWebRtc();
-      expect(remoteSessions.activatedIds, hasLength(1));
+    test(
+      'a failed activation is not retried by the next state change',
+      () async {
+        await signInNegotiating();
+        remoteSessions.activateFailure = const NetworkFailure();
+        await establishWebRtc();
+        expect(remoteSessions.activatedIds, hasLength(1));
 
-      // Everything that would re-evaluate readiness: no retry loop.
-      remoteSessionBloc.add(const RemoteSessionRefreshRequested());
-      realtime.emitPeerJoined(remoteSessionId);
-      peers.last.emitPeerState(WebRtcPeerConnectionState.connected);
-      await settle();
+        // Everything that would re-evaluate readiness: no retry loop.
+        remoteSessionBloc.add(const RemoteSessionRefreshRequested());
+        realtime.emitPeerJoined(remoteSessionId);
+        peers.last.emitPeerState(WebRtcPeerConnectionState.connected);
+        await settle();
 
-      expect(remoteSessions.activatedIds, hasLength(1));
-    });
+        expect(remoteSessions.activatedIds, hasLength(1));
+      },
+    );
 
     test('a peer connection that comes back gets a new attempt', () async {
       await signInNegotiating();
@@ -804,65 +844,74 @@ void main() {
       expect(webRtcSessionBloc.state, isA<WebRtcConnected>());
     });
 
-    test('each refused tap reads REST once, however many states follow', () async {
-      await signInReady();
-      final readsBefore = remoteSessions.currentCount;
-      await tap();
-      peers.last.emitRemoteControlAck(
-        'tap-1',
-        error: RemoteControlError.sessionNotActive,
-      );
-      await settle();
+    test(
+      'each refused tap reads REST once, however many states follow',
+      () async {
+        await signInReady();
+        final readsBefore = remoteSessions.currentCount;
+        await tap();
+        peers.last.emitRemoteControlAck(
+          'tap-1',
+          error: RemoteControlError.sessionNotActive,
+        );
+        await settle();
 
-      peers.last.emitPeerState(WebRtcPeerConnectionState.disconnected);
-      await settle();
-      peers.last.emitPeerState(WebRtcPeerConnectionState.connected);
-      await settle();
-      expect(remoteSessions.currentCount, readsBefore + 1);
+        peers.last.emitPeerState(WebRtcPeerConnectionState.disconnected);
+        await settle();
+        peers.last.emitPeerState(WebRtcPeerConnectionState.connected);
+        await settle();
+        expect(remoteSessions.currentCount, readsBefore + 1);
 
-      await tap();
-      peers.last.emitRemoteControlAck(
-        'tap-2',
-        error: RemoteControlError.sessionNotActive,
-      );
-      await settle();
+        await tap();
+        peers.last.emitRemoteControlAck(
+          'tap-2',
+          error: RemoteControlError.sessionNotActive,
+        );
+        await settle();
 
-      expect(remoteSessions.currentCount, readsBefore + 2);
-    });
+        expect(remoteSessions.currentCount, readsBefore + 2);
+      },
+    );
 
-    test('session_not_active that REST confirms closes the assistance', () async {
-      await signInReady();
-      final session = peers.last;
-      await tap();
-      remoteSessions.current = null;
+    test(
+      'session_not_active that REST confirms closes the assistance',
+      () async {
+        await signInReady();
+        final session = peers.last;
+        await tap();
+        remoteSessions.current = null;
 
-      session.emitRemoteControlAck(
-        'tap-1',
-        error: RemoteControlError.sessionNotActive,
-      );
-      await settle();
+        session.emitRemoteControlAck(
+          'tap-1',
+          error: RemoteControlError.sessionNotActive,
+        );
+        await settle();
 
-      expect(remoteSessionBloc.state.hasLiveSession, isFalse);
-      expect(session.isClosed, isTrue);
-      expect(webRtcSessionBloc.state, isA<WebRtcIdle>());
-    });
+        expect(remoteSessionBloc.state.hasLiveSession, isFalse);
+        expect(session.isClosed, isTrue);
+        expect(webRtcSessionBloc.state, isA<WebRtcIdle>());
+      },
+    );
 
-    test('accessibility_unavailable closes nothing and reads nothing', () async {
-      await signInReady();
-      final readsBefore = remoteSessions.currentCount;
-      await tap();
+    test(
+      'accessibility_unavailable closes nothing and reads nothing',
+      () async {
+        await signInReady();
+        final readsBefore = remoteSessions.currentCount;
+        await tap();
 
-      peers.last.emitRemoteControlAck(
-        'tap-1',
-        error: RemoteControlError.accessibilityUnavailable,
-      );
-      await settle();
+        peers.last.emitRemoteControlAck(
+          'tap-1',
+          error: RemoteControlError.accessibilityUnavailable,
+        );
+        await settle();
 
-      expect(remoteSessions.currentCount, readsBefore);
-      expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
-      expect(peers.last.isClosed, isFalse);
-      expect(webRtcSessionBloc.state.canSendRemoteControl, isTrue);
-    });
+        expect(remoteSessions.currentCount, readsBefore);
+        expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
+        expect(peers.last.isClosed, isFalse);
+        expect(webRtcSessionBloc.state.canSendRemoteControl, isTrue);
+      },
+    );
 
     test('signing out stops it and leaves nothing pending', () async {
       await signInReady();
@@ -886,23 +935,26 @@ void main() {
       await settle();
     }
 
-    test('triggers a REST reconciliation instead of mutating the state', () async {
-      await signInWithConnectingSession();
-      expect(remoteSessionBloc.state, isA<RemoteSessionConnecting>());
-      final readsBefore = remoteSessions.currentCount;
+    test(
+      'triggers a REST reconciliation instead of mutating the state',
+      () async {
+        await signInWithConnectingSession();
+        expect(remoteSessionBloc.state, isA<RemoteSessionConnecting>());
+        final readsBefore = remoteSessions.currentCount;
 
-      // What the backend really has when it emits the event.
-      remoteSessions.current = buildRemoteSession(
-        status: RemoteSessionStatus.active,
-        connectedAt: DateTime.utc(2026, 3, 11, 9, 35, 12),
-      );
-      realtime.emitRemoteSessionActive(remoteSessionId);
-      await settle();
+        // What the backend really has when it emits the event.
+        remoteSessions.current = buildRemoteSession(
+          status: RemoteSessionStatus.active,
+          connectedAt: DateTime.utc(2026, 3, 11, 9, 35, 12),
+        );
+        realtime.emitRemoteSessionActive(remoteSessionId);
+        await settle();
 
-      expect(remoteSessions.currentCount, readsBefore + 1);
-      expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
-      expect(remoteSessionBloc.state.session!.connectedAt, isNotNull);
-    });
+        expect(remoteSessions.currentCount, readsBefore + 1);
+        expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
+        expect(remoteSessionBloc.state.session!.connectedAt, isNotNull);
+      },
+    );
 
     test('the event alone never promotes the session', () async {
       await signInWithConnectingSession();
@@ -1291,27 +1343,30 @@ void main() {
       expect(supportRequests.loadCount, loadsBefore);
     });
 
-    test('a reconnection re-reads the queue, the first connection does not', () async {
-      await signInWithAssignedRequest(
-        afterwards: [
-          buildSupportRequest(
-            status: SupportRequestStatus.accepted,
-            technician: technicianId,
-          ),
-        ],
-      );
-      // Only the console's own first load so far.
-      expect(supportRequests.loadCount, 1);
+    test(
+      'a reconnection re-reads the queue, the first connection does not',
+      () async {
+        await signInWithAssignedRequest(
+          afterwards: [
+            buildSupportRequest(
+              status: SupportRequestStatus.accepted,
+              technician: technicianId,
+            ),
+          ],
+        );
+        // Only the console's own first load so far.
+        expect(supportRequests.loadCount, 1);
 
-      // The tablet accepted while the socket was down: the event is lost.
-      realtime.emitReconnecting();
-      await settle();
-      realtime.emitConnected();
-      await settle();
+        // The tablet accepted while the socket was down: the event is lost.
+        realtime.emitReconnecting();
+        await settle();
+        realtime.emitConnected();
+        await settle();
 
-      expect(supportRequests.loadCount, 2);
-      expect(queue().requests.single.status, SupportRequestStatus.accepted);
-    });
+        expect(supportRequests.loadCount, 2);
+        expect(queue().requests.single.status, SupportRequestStatus.accepted);
+      },
+    );
   });
 
   group('support-request:queue-updated', () {
@@ -1594,27 +1649,30 @@ void main() {
       expect(queue().failure, isA<AuthFailure>());
     });
 
-    test('a network failure keeps the queue, and a later event syncs', () async {
-      await signInWithQueue(initially: [waiting]);
+    test(
+      'a network failure keeps the queue, and a later event syncs',
+      () async {
+        await signInWithQueue(initially: [waiting]);
 
-      supportRequests.loadFailure = const NetworkFailure();
-      realtime.emitSupportRequestQueueUpdated(requestId);
-      await settle();
+        supportRequests.loadFailure = const NetworkFailure();
+        realtime.emitSupportRequestQueueUpdated(requestId);
+        await settle();
 
-      expect(queue().requests, [waiting]);
-      expect(queue().failure, isA<NetworkFailure>());
-      expect(userSessionBloc.state, isA<UserSessionAuthenticated>());
+        expect(queue().requests, [waiting]);
+        expect(queue().failure, isA<NetworkFailure>());
+        expect(userSessionBloc.state, isA<UserSessionAuthenticated>());
 
-      // The network is back and the request was taken meanwhile.
-      supportRequests
-        ..loadFailure = null
-        ..requests = [takenByOther];
-      realtime.emitSupportRequestQueueUpdated(requestId);
-      await settle();
+        // The network is back and the request was taken meanwhile.
+        supportRequests
+          ..loadFailure = null
+          ..requests = [takenByOther];
+        realtime.emitSupportRequestQueueUpdated(requestId);
+        await settle();
 
-      expect(queue().waiting, isEmpty);
-      expect(queue().failure, isNull);
-    });
+        expect(queue().waiting, isEmpty);
+        expect(queue().failure, isNull);
+      },
+    );
   });
 
   group('device:presence-updated', () {
@@ -1674,20 +1732,23 @@ void main() {
       expect(peers.sessions, isEmpty);
     });
 
-    test('OFFLINE -> ONLINE reaches both sections without ACTUALIZAR', () async {
-      await signInWithPresence(isOnline: false);
-      expect(listPresence(), isFalse);
-      expect(cardPresence(), isFalse);
+    test(
+      'OFFLINE -> ONLINE reaches both sections without ACTUALIZAR',
+      () async {
+        await signInWithPresence(isOnline: false);
+        expect(listPresence(), isFalse);
+        expect(cardPresence(), isFalse);
 
-      backendPresence(isOnline: true);
-      realtime.emitDevicePresenceUpdated(deviceId);
-      await settle();
+        backendPresence(isOnline: true);
+        realtime.emitDevicePresenceUpdated(deviceId);
+        await settle();
 
-      expect(listPresence(), isTrue);
-      expect(cardPresence(), isTrue);
-      expect(deviceList().isRefreshing, isFalse);
-      expect(queue().isRefreshing, isFalse);
-    });
+        expect(listPresence(), isTrue);
+        expect(cardPresence(), isTrue);
+        expect(deviceList().isRefreshing, isFalse);
+        expect(queue().isRefreshing, isFalse);
+      },
+    );
 
     test('ONLINE -> OFFLINE reaches both sections as well', () async {
       await signInWithPresence(isOnline: true);
@@ -1743,7 +1804,11 @@ void main() {
       remoteSessions.current = null;
       devices.devices = [
         tablet(isOnline: false),
-        buildDevice(id: otherDeviceId, publicId: '777-000-111', isOnline: false),
+        buildDevice(
+          id: otherDeviceId,
+          publicId: '777-000-111',
+          isOnline: false,
+        ),
       ];
       supportRequests.requests = [request(isOnline: false)];
       await signIn();
@@ -1830,101 +1895,113 @@ void main() {
       expect(cardPresence(), isTrue);
     });
 
-    test('OFFLINE -> ONLINE -> OFFLINE with slow responses ends OFFLINE', () async {
-      await signInWithPresence(isOnline: false);
+    test(
+      'OFFLINE -> ONLINE -> OFFLINE with slow responses ends OFFLINE',
+      () async {
+        await signInWithPresence(isOnline: false);
 
-      // ONLINE: its event starts both GETs, and both are slow.
-      final firstDevices = Completer<void>();
-      final firstRequests = Completer<void>();
-      devices.loadGate = firstDevices.future;
-      supportRequests.loadGate = firstRequests.future;
-      backendPresence(isOnline: true);
-      realtime.emitDevicePresenceUpdated(deviceId);
-      await settle();
+        // ONLINE: its event starts both GETs, and both are slow.
+        final firstDevices = Completer<void>();
+        final firstRequests = Completer<void>();
+        devices.loadGate = firstDevices.future;
+        supportRequests.loadGate = firstRequests.future;
+        backendPresence(isOnline: true);
+        realtime.emitDevicePresenceUpdated(deviceId);
+        await settle();
 
-      // OFFLINE again before they came back; the reads after them are slow
-      // too.
-      final secondDevices = Completer<void>();
-      final secondRequests = Completer<void>();
-      devices.loadGate = secondDevices.future;
-      supportRequests.loadGate = secondRequests.future;
-      backendPresence(isOnline: false);
-      realtime.emitDevicePresenceUpdated(deviceId);
-      await settle();
+        // OFFLINE again before they came back; the reads after them are slow
+        // too.
+        final secondDevices = Completer<void>();
+        final secondRequests = Completer<void>();
+        devices.loadGate = secondDevices.future;
+        supportRequests.loadGate = secondRequests.future;
+        backendPresence(isOnline: false);
+        realtime.emitDevicePresenceUpdated(deviceId);
+        await settle();
 
-      firstDevices.complete();
-      firstRequests.complete();
-      await settle();
-      // The intermediate ONLINE is shown while the newer read is running...
-      expect(listPresence(), isTrue);
-      expect(cardPresence(), isTrue);
-      expect(deviceList().isRefreshing, isTrue);
-      expect(queue().isRefreshing, isTrue);
+        firstDevices.complete();
+        firstRequests.complete();
+        await settle();
+        // The intermediate ONLINE is shown while the newer read is running...
+        expect(listPresence(), isTrue);
+        expect(cardPresence(), isTrue);
+        expect(deviceList().isRefreshing, isTrue);
+        expect(queue().isRefreshing, isTrue);
 
-      secondDevices.complete();
-      secondRequests.complete();
-      await settle();
+        secondDevices.complete();
+        secondRequests.complete();
+        await settle();
 
-      // ...and the last effective presence is what stays.
-      expect(listPresence(), isFalse);
-      expect(cardPresence(), isFalse);
-      expect(deviceList().isRefreshing, isFalse);
-      expect(queue().isRefreshing, isFalse);
-    });
+        // ...and the last effective presence is what stays.
+        expect(listPresence(), isFalse);
+        expect(cardPresence(), isFalse);
+        expect(deviceList().isRefreshing, isFalse);
+        expect(queue().isRefreshing, isFalse);
+      },
+    );
 
-    test('changes missed while disconnected are reconciled on reconnect', () async {
-      await signInWithPresence(isOnline: false);
-      final devicesBefore = devices.loadCount;
-      final requestsBefore = supportRequests.loadCount;
+    test(
+      'changes missed while disconnected are reconciled on reconnect',
+      () async {
+        await signInWithPresence(isOnline: false);
+        final devicesBefore = devices.loadCount;
+        final requestsBefore = supportRequests.loadCount;
 
-      realtime.emitReconnecting();
-      await settle();
-      // The tablet connects while the socket is down: its event is lost.
-      backendPresence(isOnline: true);
-      realtime.emitConnected();
-      await settle();
+        realtime.emitReconnecting();
+        await settle();
+        // The tablet connects while the socket is down: its event is lost.
+        backendPresence(isOnline: true);
+        realtime.emitConnected();
+        await settle();
 
-      expect(devices.loadCount, devicesBefore + 1);
-      expect(supportRequests.loadCount, requestsBefore + 1);
-      expect(listPresence(), isTrue);
-      expect(cardPresence(), isTrue);
-    });
+        expect(devices.loadCount, devicesBefore + 1);
+        expect(supportRequests.loadCount, requestsBefore + 1);
+        expect(listPresence(), isTrue);
+        expect(cardPresence(), isTrue);
+      },
+    );
 
-    test('the first connection re-reads nothing: the console just loaded', () async {
-      remoteSessions.current = null;
-      backendPresence(isOnline: false);
-      await signIn();
-      devicesBloc.add(const DevicesRequested());
-      await settle();
-      final devicesBefore = devices.loadCount;
+    test(
+      'the first connection re-reads nothing: the console just loaded',
+      () async {
+        remoteSessions.current = null;
+        backendPresence(isOnline: false);
+        await signIn();
+        devicesBloc.add(const DevicesRequested());
+        await settle();
+        final devicesBefore = devices.loadCount;
 
-      realtime.emitConnected();
-      await settle();
+        realtime.emitConnected();
+        await settle();
 
-      expect(devices.loadCount, devicesBefore);
-    });
+        expect(devices.loadCount, devicesBefore);
+      },
+    );
 
-    test('a signed-out console ignores it and drops a pending reload', () async {
-      await signInWithPresence(isOnline: false);
-      final gate = Completer<void>();
-      devices.loadGate = gate.future;
-      realtime.emitDevicePresenceUpdated(deviceId);
-      await settle();
-      // A second invalidation is coalesced behind the GET in flight.
-      realtime.emitDevicePresenceUpdated(deviceId);
-      await settle();
-      final devicesInFlight = devices.loadCount;
+    test(
+      'a signed-out console ignores it and drops a pending reload',
+      () async {
+        await signInWithPresence(isOnline: false);
+        final gate = Completer<void>();
+        devices.loadGate = gate.future;
+        realtime.emitDevicePresenceUpdated(deviceId);
+        await settle();
+        // A second invalidation is coalesced behind the GET in flight.
+        realtime.emitDevicePresenceUpdated(deviceId);
+        await settle();
+        final devicesInFlight = devices.loadCount;
 
-      userSessionBloc.add(const UserSessionSignOutRequested());
-      await settle();
-      gate.complete();
-      await settle();
-      realtime.emitDevicePresenceUpdated(deviceId);
-      await settle();
+        userSessionBloc.add(const UserSessionSignOutRequested());
+        await settle();
+        gate.complete();
+        await settle();
+        realtime.emitDevicePresenceUpdated(deviceId);
+        await settle();
 
-      // Neither the coalesced reload nor a new event costs a request.
-      expect(devices.loadCount, devicesInFlight);
-    });
+        // Neither the coalesced reload nor a new event costs a request.
+        expect(devices.loadCount, devicesInFlight);
+      },
+    );
 
     test('support request events still leave the device list alone', () async {
       await signInWithPresence(isOnline: false);
@@ -2027,17 +2104,20 @@ void main() {
       expect(storage.token, 'stored-user-jwt');
     });
 
-    test('UNAUTHORIZED on a session the tablet closed ends the assistance', () async {
-      await signInWithJoinedSession();
-      // The session was closed while the relay was travelling.
-      remoteSessions.current = null;
+    test(
+      'UNAUTHORIZED on a session the tablet closed ends the assistance',
+      () async {
+        await signInWithJoinedSession();
+        // The session was closed while the relay was travelling.
+        remoteSessions.current = null;
 
-      await relayRefusedWith('UNAUTHORIZED');
+        await relayRefusedWith('UNAUTHORIZED');
 
-      expect(remoteSessionBloc.state, isA<RemoteSessionIdle>());
-      expect(signalingJoinBloc.state, isA<SignalingIdle>());
-      expect(userSessionBloc.state, isA<UserSessionAuthenticated>());
-    });
+        expect(remoteSessionBloc.state, isA<RemoteSessionIdle>());
+        expect(signalingJoinBloc.state, isA<SignalingIdle>());
+        expect(userSessionBloc.state, isA<UserSessionAuthenticated>());
+      },
+    );
 
     test('UNAVAILABLE reconciles over REST once', () async {
       await signInWithJoinedSession();

@@ -31,7 +31,10 @@ part 'signaling_join_state.dart';
 ///   over;
 /// * readiness only ever grows within a connection, and it is idempotent: the
 ///   ACK may already say `peerJoined: true`, `remote-session:peer-joined` may
-///   arrive once or twice, and all of it means the same thing.
+///   arrive once or twice, and all of it means the same thing. Each event
+///   received after the join is still counted as an arrival
+///   ([SignalingJoined.peerArrivals]), because it also says *when* the tablet
+///   entered the room — after its own reconnection, for instance.
 ///
 /// Being joined is the precondition the signaling client checks before
 /// relaying anything, so this BLoC and that client are kept in step: a reset
@@ -125,6 +128,12 @@ class SignalingJoinBloc extends Bloc<SignalingJoinEvent, SignalingJoinState> {
   ///
   /// The event is never treated as authorization and its id is never adopted:
   /// readiness is only applied to the session this console already joined.
+  ///
+  /// Readiness is idempotent — a second event, or one after an ACK that
+  /// already said so, leaves [SignalingJoined.peerJoined] as it was — but the
+  /// arrival itself is counted ([SignalingJoined.peerArrivals]): the backend
+  /// emits it when a tablet socket enters a room it was absent from, which is
+  /// what a tablet coming back from its own reconnection looks like.
   void _onPeerJoinedReported(
     _SignalingPeerJoinedReported event,
     Emitter<SignalingJoinState> emit,
@@ -134,11 +143,14 @@ class SignalingJoinBloc extends Bloc<SignalingJoinEvent, SignalingJoinState> {
     final current = state;
     if (current is! SignalingJoined) return;
     if (current.remoteSessionId != event.remoteSessionId) return;
-    // Idempotent: a second event, or one after an ACK that already said so,
-    // changes nothing.
-    if (current.peerJoined) return;
 
-    emit(SignalingJoined(current.remoteSessionId, peerJoined: true));
+    emit(
+      SignalingJoined(
+        current.remoteSessionId,
+        peerJoined: true,
+        peerArrivals: current.peerArrivals + 1,
+      ),
+    );
   }
 
   void _onReset(SignalingJoinReset event, Emitter<SignalingJoinState> emit) {

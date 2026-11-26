@@ -61,6 +61,28 @@ The event is readiness, never authorization: what the technician may do was
 settled by the join the backend accepted. It is idempotent, and readiness for a
 session the console does not hold is ignored.
 
+Since Prompt 27 the event is also read for *when* it arrives. The backend emits
+it only when a tablet socket enters a room none of the tablet's sockets is in,
+so one received after this socket joined says the tablet has just come back —
+typically after its own reconnection — and that an offer relayed before it,
+still unanswered, reached nobody:
+
+```text
+peer-joined after the join      SignalingJoined.peerArrivals += 1
+                                (peerJoined stays true: readiness unchanged)
+offer relayed before it,
+  no answer yet                 WebRtcSessionState.isOfferLost
+                                -> the console replaces it at once, REST first
+offer not relayed yet           nothing: it goes to the tablet now in the room
+answered / connected /
+  ICE disconnected              nothing
+```
+
+Offers made by the recovery wait 10 s for their answer instead of 30 s
+(`WebRtcSessionBloc.defaultRecoveryAnswerDeadline`), the fallback when the
+event does not come. Details, measurements and limits:
+[SESSION_LIFECYCLE.md](SESSION_LIFECYCLE.md#fast-recovery-when-the-tablet-is-back-prompt-27).
+
 ## Four states, kept apart
 
 ```text
@@ -456,6 +478,14 @@ acknowledgement that finally came back — is dropped instead of touching the
 current state. The number is never persisted: an F5 destroys the peer
 connection anyway.
 
+A negotiation marked lost (Prompt 27) is replaced like an unanswered one: the
+old peer connection is released first, so there are never two, and the new
+generation drops everything the old one still reports. An answer received
+before the replacement's offer is relayed is ignored; one that still arrives
+for the offer taken for lost, before it is replaced, is applied and cancels the
+replacement. The signaling contract has no negotiation id, so an answer already
+on the wire when the replacement is relayed cannot be told apart.
+
 ## Teardown
 
 The peer connection, the data channel, the video transceiver, the remote track
@@ -502,17 +532,14 @@ plus the safe identifiers (`remoteSessionId`, `supportRequestId`,
 
 ## Divergence with the copied contract
 
-`docs/backend/REALTIME.md`, as copied into this repository, documents neither
-the `peerJoined` field of the `remote-session:join` ACK nor the
-`remote-session:peer-joined` event. The client implements both, because the
-readiness contract was the explicit scope of this stage and the backend already
-implements it.
-
-The copied file is **not** edited to match this client: it is a copy of the
-contract owned by `remote_control_backend`, and the source document has to be
-updated there and copied again. Until it is, the readiness half of the contract
-lives here and in the contract tests
-(`test/features/technician_realtime/data/realtime_contract_test.dart`).
+When this stage was written, `docs/backend/REALTIME.md` as copied into this
+repository documented neither the `peerJoined` field of the
+`remote-session:join` ACK nor the `remote-session:peer-joined` event. The copy
+has since been refreshed from `remote_control_backend` and documents both
+(*Participant readiness*, checked again in Prompt 27); the contract tests
+(`test/features/technician_realtime/data/realtime_contract_test.dart`) still
+pin the shape the client relies on. The copied file is never edited to match
+this client.
 
 An accepted ACK without a boolean `peerJoined` is treated as **malformed**, so a
 backend that does not send it yet reports the assistance channel as
