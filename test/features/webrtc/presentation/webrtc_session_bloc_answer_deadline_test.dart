@@ -47,13 +47,19 @@ class _Harness {
     run();
   }
 
-  void negotiate({bool replacing = false}) {
+  void negotiate({bool replacing = false, bool recovery = false}) {
     bloc.add(
       WebRtcNegotiationRequested(
         _sessionId,
         replacesUnansweredOffer: replacing,
+        isRecovery: recovery,
       ),
     );
+    run();
+  }
+
+  void peerArrived([String id = _sessionId]) {
+    bloc.add(WebRtcPeerArrived(id));
     run();
   }
 
@@ -320,6 +326,115 @@ void main() {
       h.run();
       h.negotiate();
       expect(h.state.isRecoveryScheduled, isFalse);
+    });
+  });
+
+  group('the tablet back in the room (Prompt 27)', () {
+    const recoveryDeadline = WebRtcSessionBloc.defaultRecoveryAnswerDeadline;
+
+    test('an unanswered relayed offer is marked lost, and nothing is torn '
+        'down', () {
+      onClock((h) {
+        h.negotiate();
+        h.peerArrived();
+
+        expect(h.state, isA<WebRtcConnecting>());
+        expect(h.state.isOfferLost, isTrue);
+        expect(h.state.isAnswerOverdue, isFalse);
+        expect(h.state.isTabletSilent, isFalse);
+        expect(h.state.canRetryConnection, isTrue);
+        expect(h.peers.last.isClosed, isFalse);
+      });
+    });
+
+    test('an offer still being relayed is not lost: it reaches the tablet '
+        'now in the room', () {
+      onClock((h) {
+        final gate = Completer<void>();
+        h.signaling.offerGate = gate.future;
+        h.negotiate();
+        expect(h.state, isA<WebRtcOffering>());
+        h.peerArrived();
+        gate.complete();
+        h.run();
+
+        expect(h.state, isA<WebRtcConnecting>());
+        expect(h.state.isOfferLost, isFalse);
+      });
+    });
+
+    test('an answered, connected or interrupted negotiation is never lost', () {
+      onClock((h) {
+        h.negotiate();
+        h.answer();
+        h.peerArrived();
+        expect(h.state.isOfferLost, isFalse);
+
+        h.peers.last.emitPeerState(WebRtcPeerConnectionState.connected);
+        h.run();
+        h.peerArrived();
+        expect(h.state.isOfferLost, isFalse);
+
+        h.peers.last.emitPeerState(WebRtcPeerConnectionState.disconnected);
+        h.run();
+        h.peerArrived();
+        expect(h.state, isA<WebRtcInterrupted>());
+        expect(h.state.isOfferLost, isFalse);
+      });
+    });
+
+    test('an arrival of another session changes nothing', () {
+      onClock((h) {
+        h.negotiate();
+        h.peerArrived(_otherSessionId);
+        expect(h.state.isOfferLost, isFalse);
+      });
+    });
+
+    test('only a replacement asked for replaces it; the new one is clean', () {
+      onClock((h) {
+        h.negotiate();
+        h.peerArrived();
+        final lost = h.peers.last;
+
+        h.negotiate();
+        expect(h.peers.sessions, hasLength(1));
+
+        h.negotiate(replacing: true, recovery: true);
+        expect(lost.isClosed, isTrue);
+        expect(h.peers.sessions, hasLength(2));
+        expect(h.state.isOfferLost, isFalse);
+      });
+    });
+
+    test('an answer that still comes is applied and clears it', () {
+      onClock((h) {
+        h.negotiate();
+        h.peerArrived();
+        h.answer();
+
+        expect(h.peers.last.appliedAnswers, hasLength(1));
+        expect(h.state.isOfferLost, isFalse);
+        expect(h.state.canRetryConnection, isFalse);
+      });
+    });
+
+    test('a recovery offer waits for the recovery deadline; the first offer '
+        'keeps its own', () {
+      onClock((h) {
+        h.negotiate();
+        h.wait(recoveryDeadline);
+        expect(h.state.isAnswerOverdue, isFalse);
+        h.wait(_deadline - recoveryDeadline);
+        expect(h.state.isAnswerOverdue, isTrue);
+
+        h.negotiate(replacing: true, recovery: true);
+        expect(h.state.isAnswerOverdue, isFalse);
+        h.wait(recoveryDeadline - const Duration(milliseconds: 1));
+        expect(h.state.isAnswerOverdue, isFalse);
+        h.wait(const Duration(milliseconds: 1));
+        expect(h.state.isAnswerOverdue, isTrue);
+      });
     });
   });
 }

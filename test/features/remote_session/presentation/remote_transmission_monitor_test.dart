@@ -701,4 +701,87 @@ void main() {
       expect(console.status.remoteSessionId, otherSessionId);
     });
   });
+
+  group('fast WebRTC recovery (Prompt 27)', () {
+    WebRtcSessionState failed() => const WebRtcFailed(
+      remoteSessionId: remoteSessionId,
+      reason: WebRtcFailureReason.connectionFailed,
+      isRecoveryScheduled: true,
+    );
+
+    test('a lost offer and its replacement are "recovering" until the '
+        'picture is really back', () {
+      final console = Console()..setWebRtc(failed());
+      console.setWebRtc(
+        const WebRtcConnecting(remoteSessionId: remoteSessionId),
+      );
+      // The tablet rejoined: the console knows the offer is lost and offers
+      // again. A new offer is not a recovered transmission.
+      console
+        ..setJoin(
+          const SignalingJoined(
+            remoteSessionId,
+            peerJoined: true,
+            peerArrivals: 1,
+          ),
+        )
+        ..setWebRtc(
+          const WebRtcConnecting(
+            remoteSessionId: remoteSessionId,
+            isOfferLost: true,
+          ),
+        );
+      console.monitor.peerJoined(remoteSessionId);
+      expectStatus(
+        console.status,
+        RemoteTransmissionPhase.recovering,
+        RemoteTransmissionCause.renegotiating,
+      );
+      console
+        ..setWebRtc(const WebRtcPreparing(remoteSessionId: remoteSessionId))
+        ..setWebRtc(const WebRtcOffering(remoteSessionId: remoteSessionId))
+        ..setWebRtc(const WebRtcConnecting(remoteSessionId: remoteSessionId));
+      expect(console.status.phase, RemoteTransmissionPhase.recovering);
+      console.setWebRtc(connected(isPictureDisplayed: false, track: 'b'));
+      expect(console.status.phase, RemoteTransmissionPhase.recovering);
+      console.setWebRtc(connected(track: 'b'));
+      expectStatus(console.status, RemoteTransmissionPhase.available);
+    });
+
+    test('a lost peer-joined does not leave the notice: the replacement '
+        'the tablet answered is evidence too', () {
+      final console = Console()
+        ..presence(isOnline: false)
+        ..setWebRtc(failed())
+        ..presence(isOnline: true);
+      expect(console.status.phase, RemoteTransmissionPhase.recovering);
+      // No peer-joined ever arrives; the recovery deadline replaces the
+      // offer and the tablet answers that one.
+      console
+        ..setWebRtc(const WebRtcConnecting(remoteSessionId: remoteSessionId))
+        ..setWebRtc(
+          const WebRtcConnecting(
+            remoteSessionId: remoteSessionId,
+            isAnswerOverdue: true,
+          ),
+        )
+        ..setWebRtc(const WebRtcPreparing(remoteSessionId: remoteSessionId))
+        ..setWebRtc(const WebRtcConnecting(remoteSessionId: remoteSessionId))
+        ..setWebRtc(connected(track: 'c'));
+      expectStatus(console.status, RemoteTransmissionPhase.available);
+    });
+
+    test('an arrival on a healthy transmission says nothing', () {
+      final console = Console()
+        ..setJoin(
+          const SignalingJoined(
+            remoteSessionId,
+            peerJoined: true,
+            peerArrivals: 1,
+          ),
+        );
+      console.monitor.peerJoined(remoteSessionId);
+      expectStatus(console.status, RemoteTransmissionPhase.available);
+    });
+  });
 }
